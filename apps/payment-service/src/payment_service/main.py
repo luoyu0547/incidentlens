@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import time
 import uuid
 from typing import Any
 
@@ -22,10 +23,10 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Payment Service", version="0.1.0")
 
-_telemetry = TelemetryClient("payment-service")
-
 # Control plane URL for runtime config (set in Compose mode)
 CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL", "")
+
+_telemetry = TelemetryClient("payment-service", control_plane_url=CONTROL_PLANE_URL or None)
 
 # Module-level scenario service reference (set via set_scenario_service for in-process tests)
 _scenario_service: Any | None = None
@@ -98,6 +99,7 @@ async def charge(
     ctx = extract_context(headers)
     trace_id = ctx["X-Trace-ID"]
 
+    start_time = time.monotonic()
     span_id = f"span-pay-{uuid.uuid4().hex[:8]}"
     _telemetry.emit_span(trace_id, span_id, "POST /charge")
     _telemetry.emit_log(trace_id, "INFO", f"Processing charge: {body.amount} {body.currency}")
@@ -117,9 +119,13 @@ async def charge(
     if params is not None:
         error_rate = params.get("error_rate", 0.3)
         if random.random() < error_rate:
-            err_event = _telemetry.emit_log(trace_id, "ERROR", "Payment failed due to injected error rate")
-            # Await telemetry delivery on error path to ensure it reaches the control plane
-            await _telemetry._post_event(err_event)
+            duration_ms = (time.monotonic() - start_time) * 1000
+            _telemetry.emit_log(
+                trace_id, "ERROR", "Payment failed due to injected error rate",
+                duration_ms=duration_ms,
+                error_type="injected_error_rate",
+                span_status="ERROR",
+            )
             return JSONResponse(
                 status_code=500,
                 content={"detail": "payment processing error", "trace_id": trace_id},

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import uuid
 from typing import Any
 
@@ -22,13 +23,13 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Order Service", version="0.1.0")
 
-_telemetry = TelemetryClient("order-service")
+# Control plane URL for runtime config (set in Compose mode)
+CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL", "")
+
+_telemetry = TelemetryClient("order-service", control_plane_url=CONTROL_PLANE_URL or None)
 
 # Payment service URL (configurable via env var, defaults to localhost)
 PAYMENT_SERVICE_URL = os.environ.get("PAYMENT_SERVICE_URL", "http://localhost:8002")
-
-# Control plane URL for runtime config (set in Compose mode)
-CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL", "")
 
 # Module-level scenario service reference (set via set_scenario_service for in-process tests)
 _scenario_service: Any | None = None
@@ -102,6 +103,7 @@ async def create_order(
     ctx = extract_context(headers)
     trace_id = ctx["X-Trace-ID"]
 
+    start_time = time.monotonic()
     span_id = f"span-order-{uuid.uuid4().hex[:8]}"
     _telemetry.emit_span(trace_id, span_id, "POST /orders")
     _telemetry.emit_log(trace_id, "INFO", f"Creating order: {body.item} x{body.quantity}")
@@ -121,11 +123,13 @@ async def create_order(
     # dependency_unavailable: return 502 without calling payment
     params = active.get("dependency_unavailable")
     if params is not None:
-        err_event = _telemetry.emit_log(
-            trace_id, "ERROR", f"Dependency unavailable: {params.get('dependency', 'unknown')}"
+        duration_ms = (time.monotonic() - start_time) * 1000
+        _telemetry.emit_log(
+            trace_id, "ERROR", f"Dependency unavailable: {params.get('dependency', 'unknown')}",
+            duration_ms=duration_ms,
+            error_type="dependency_unavailable",
+            span_status="ERROR",
         )
-        # Await telemetry delivery on error path
-        await _telemetry._post_event(err_event)
         return JSONResponse(
             status_code=502,
             content={

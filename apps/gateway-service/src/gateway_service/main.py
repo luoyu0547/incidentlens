@@ -19,13 +19,13 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Gateway Service", version="0.1.0")
 
-_telemetry = TelemetryClient("gateway-service")
+# Control plane URL for runtime config (set in Compose mode)
+CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL", "")
+
+_telemetry = TelemetryClient("gateway-service", control_plane_url=CONTROL_PLANE_URL or None)
 
 # Order service URL (configurable via env var, defaults to localhost)
 ORDER_SERVICE_URL = os.environ.get("ORDER_SERVICE_URL", "http://localhost:8001")
-
-# Control plane URL for runtime config (set in Compose mode)
-CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL", "")
 
 
 class OrderRequest(BaseModel):

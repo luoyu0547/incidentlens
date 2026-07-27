@@ -98,6 +98,8 @@ class TestTelemetryClientHTTPDelivery:
         # The event is still returned (local diagnostic was emitted)
         assert event is not None
         assert event.event_type == "log"
+        # Explicitly await _post_event to verify it catches the error without raising
+        await client._post_event(event)
 
     @pytest.mark.asyncio()
     async def test_no_control_plane_url_means_no_http_post(self) -> None:
@@ -192,6 +194,10 @@ class TestTelemetryDeliveryIntegration:
                 headers={"X-Trace-ID": "trace-err-telemetry", "X-Request-ID": "req-err-telemetry"},
             )
             assert response.status_code == 500
+
+            # Give the event loop a chance to process fire-and-forget telemetry posts
+            import asyncio
+            await asyncio.sleep(0.1)
 
             # Verify telemetry reached the control plane repository
             logs = repository.query_logs(

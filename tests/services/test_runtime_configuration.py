@@ -27,11 +27,15 @@ class TestRuntimeConfigClientUnit:
 
     @pytest.mark.asyncio()
     async def test_returns_empty_on_connect_timeout(self) -> None:
-        """When the control plane is unreachable, get_active() returns {}."""
-        client = RuntimeConfigClient("http://unreachable:9999", "payment-service")
-        # Use a very short timeout so the test doesn't hang
-        client._timeout = 0.1
-        result = await client.get_active()
+        """When the control plane connection times out, get_active() returns {}."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectTimeout("Connection timed out")
+
+        transport = httpx.MockTransport(handler)
+        rc = RuntimeConfigClient("http://cp", "payment-service")
+        rc._client = httpx.AsyncClient(transport=transport, base_url="http://cp")
+        result = await rc.get_active()
         assert result == {}
 
     @pytest.mark.asyncio()
