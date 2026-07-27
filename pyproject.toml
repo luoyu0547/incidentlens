@@ -9,6 +9,7 @@ dependencies = [
     "incidentlens-telemetry",
     "incidentlens-scenarios",
     "incidentlens-service-common",
+    "incidentlens-control-plane",
     "incidentlens-gateway-service",
     "incidentlens-order-service",
     "incidentlens-payment-service",
@@ -26,6 +27,7 @@ members = [
     "apps/gateway-service",
     "apps/order-service",
     "apps/payment-service",
+    "apps/control-plane",
 ]
 
 [tool.uv.sources]
@@ -33,6 +35,7 @@ incidentlens-contracts = { workspace = true }
 incidentlens-telemetry = { workspace = true }
 incidentlens-scenarios = { workspace = true }
 incidentlens-service-common = { workspace = true }
+incidentlens-control-plane = { workspace = true }
 incidentlens-gateway-service = { workspace = true }
 incidentlens-order-service = { workspace = true }
 incidentlens-payment-service = { workspace = true }
