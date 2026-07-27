@@ -173,6 +173,7 @@ dependencies = [
     { name = "incidentlens-telemetry" },
     { name = "pydantic" },
     { name = "sqlalchemy" },
+    { name = "sse-starlette" },
 ]
 
 [package.dev-dependencies]
@@ -198,6 +199,7 @@ requires-dist = [
     { name = "incidentlens-telemetry", editable = "packages/telemetry" },
     { name = "pydantic", specifier = ">=2.0,<3" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
+    { name = "sse-starlette", specifier = ">=2.0,<3" },
 ]
 
 [package.metadata.requires-dev]
@@ -229,6 +231,7 @@ dependencies = [
     { name = "incidentlens-telemetry" },
     { name = "pydantic" },
     { name = "sqlalchemy" },
+    { name = "sse-starlette" },
     { name = "uvicorn" },
 ]
 
@@ -239,6 +242,7 @@ requires-dist = [
     { name = "incidentlens-telemetry", editable = "packages/telemetry" },
     { name = "pydantic", specifier = ">=2.0,<3" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
+    { name = "sse-starlette", specifier = ">=2.0,<3" },
     { name = "uvicorn", specifier = ">=0.30,<1" },
 ]
 
@@ -592,6 +596,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/3c/b7/c5ffe50aa2f4d947c9250e1519d939260329a07fe6272edfccd784b3d007/sqlalchemy-2.0.51-cp312-cp312-win32.whl", hash = "sha256:9f380393be5abeb6815f68fd39271b95127173511b6706b0a630a9995d53f8f5", size = 2119674, upload-time = "2026-06-15T16:23:09.543Z" },
     { url = "https://files.pythonhosted.org/packages/25/dc/46a65916af68a06ef6b972c6050ba4c8f97070fe3fb33097d34229d9bef6/sqlalchemy-2.0.51-cp312-cp312-win_amd64.whl", hash = "sha256:2cf39aabdf48e87c1c2c2ed6d20d33ffa0733b3071ce9c5f66357947dd009080", size = 2146670, upload-time = "2026-06-15T16:23:11.048Z" },
     { url = "https://files.pythonhosted.org/packages/e2/22/dbf013a12ec759e54a34a119e9e217435b3f71b2dd5c61a7ade0a25dae87/sqlalchemy-2.0.51-py3-none-any.whl", hash = "sha256:bb024d8b621d0be75f4f44ecc7c950450026e76d66dc8f791bb5331d7fed59d5", size = 1944334, upload-time = "2026-06-15T16:09:22.418Z" },
+]
+
+[[package]]
+name = "sse-starlette"
+version = "2.4.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/07/3e/eae74d8d33e3262bae0a7e023bb43d8bdd27980aa3557333f4632611151f/sse_starlette-2.4.1.tar.gz", hash = "sha256:7c8a800a1ca343e9165fc06bbda45c78e4c6166320707ae30b416c42da070926", size = 18635, upload-time = "2025-07-06T09:41:33.631Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e4/f1/6c7eaa8187ba789a6dd6d74430307478d2a91c23a5452ab339b6fbe15a08/sse_starlette-2.4.1-py3-none-any.whl", hash = "sha256:08b77ea898ab1a13a428b2b6f73cfe6d0e607a7b4e15b9bb23e4a37b087fd39a", size = 10824, upload-time = "2025-07-06T09:41:32.321Z" },
 ]
 
 [[package]]
