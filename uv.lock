@@ -230,6 +230,7 @@ source = { editable = "apps/control-plane" }
 dependencies = [
     { name = "fastapi" },
     { name = "incidentlens-contracts" },
+    { name = "incidentlens-scenarios" },
     { name = "incidentlens-telemetry" },
     { name = "pydantic" },
     { name = "sqlalchemy" },
@@ -241,6 +242,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "incidentlens-contracts", editable = "packages/contracts" },
+    { name = "incidentlens-scenarios", editable = "packages/scenarios" },
     { name = "incidentlens-telemetry", editable = "packages/telemetry" },
     { name = "pydantic", specifier = ">=2.0,<3" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
@@ -346,10 +348,14 @@ version = "0.1.0"
 source = { editable = "packages/scenarios" }
 dependencies = [
     { name = "pydantic" },
+    { name = "sqlalchemy" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pydantic", specifier = ">=2.0,<3" }]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.0,<3" },
+    { name = "sqlalchemy", specifier = ">=2.0,<3" },
+]
 
 [[package]]
 name = "incidentlens-service-common"

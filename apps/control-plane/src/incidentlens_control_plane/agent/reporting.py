@@ -3,7 +3,10 @@
 Guards:
   - Report is only generated when a root cause is verified
     (at least one CONFIRMED hypothesis exists).
-  - Report contains structured findings with root_cause and evidence summary.
+  - The confirmed hypothesis must have a root_service.
+  - All supporting evidence_ids must be owned by the current incident.
+  - Report contains root_service, root_cause (cause_code), evidence_ids,
+    findings, rounds_completed, and uncertainty.
 """
 
 from __future__ import annotations
@@ -21,22 +24,44 @@ from incidentlens_control_plane.agent.state import InvestigationState
 def can_generate_report(state: InvestigationState) -> bool:
     """Check whether a report can be generated.
 
-    A report can only be generated when at least one hypothesis
-    is CONFIRMED (root cause verified).
+    A report can only be generated when:
+      1. At least one hypothesis is CONFIRMED.
+      2. The confirmed hypothesis has a non-empty root_service.
+      3. All supporting evidence_ids of the confirmed hypothesis are
+         owned by the current incident (present in state.evidence).
     """
-    return any(
-        h.status == HypothesisStatus.CONFIRMED for h in state.hypotheses
-    )
+    confirmed = [
+        h for h in state.hypotheses if h.status == HypothesisStatus.CONFIRMED
+    ]
+    if not confirmed:
+        return False
+
+    primary = confirmed[0]
+
+    # Must have a root_service
+    if not primary.root_service:
+        return False
+
+    # All supporting evidence must be owned by this incident
+    owned_ids = {e.id for e in state.evidence}
+    if not set(primary.supporting_evidence_ids) <= owned_ids:
+        return False
+
+    return True
 
 
 def generate_report(state: InvestigationState) -> dict[str, Any]:
     """Generate a structured investigation report.
 
     Returns a dict with:
-      - root_cause: description of the confirmed hypothesis
+      - root_service: the confirmed root service
+      - root_cause: the cause code from the confirmed hypothesis
+      - evidence_ids: list of evidence IDs supporting the confirmed hypothesis
       - findings: list of evidence summaries
       - hypotheses: all hypotheses with their final status
       - rounds_completed: number of rounds executed
+      - incident_id: the incident identifier
+      - uncertainty: confidence gap or uncertainty measure
     """
     confirmed = [
         h for h in state.hypotheses if h.status == HypothesisStatus.CONFIRMED
@@ -66,10 +91,20 @@ def generate_report(state: InvestigationState) -> dict[str, Any]:
                     "content": ev.content,
                 })
 
-    root_cause = confirmed[0].description if confirmed else "No confirmed root cause"
+    primary = confirmed[0] if confirmed else None
+    root_cause = primary.cause_code if primary and primary.cause_code else (
+        primary.description if primary else "No confirmed root cause"
+    )
+    root_service = primary.root_service if primary else ""
+    evidence_ids = primary.supporting_evidence_ids if primary else []
+
+    # Compute uncertainty: 1.0 - confidence of primary confirmed hypothesis
+    uncertainty = 1.0 - primary.confidence if primary else 1.0
 
     return {
+        "root_service": root_service,
         "root_cause": root_cause,
+        "evidence_ids": evidence_ids,
         "findings": findings,
         "hypotheses": {
             "confirmed": [h.model_dump() for h in confirmed],
@@ -78,4 +113,5 @@ def generate_report(state: InvestigationState) -> dict[str, Any]:
         },
         "rounds_completed": state.current_round,
         "incident_id": state.incident_id,
+        "uncertainty": round(uncertainty, 3),
     }

@@ -84,3 +84,5 @@ class Hypothesis(BaseModel):
     supporting_evidence_ids: list[str] = Field(default_factory=list)
     contradicting_evidence_ids: list[str] = Field(default_factory=list)
     status: HypothesisStatus = HypothesisStatus.ACTIVE
+    root_service: str = ""
+    cause_code: str = ""

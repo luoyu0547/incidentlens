@@ -34,6 +34,7 @@ from incidentlens_contracts.models import (
     ToolResult,
 )
 
+from incidentlens_control_plane.agent.evidence_rules import assess_evidence
 from incidentlens_control_plane.agent.reporting import can_generate_report, generate_report
 from incidentlens_control_plane.agent.state import (
     CheckpointStore,
@@ -328,12 +329,14 @@ class InvestigationEngine:
                     description=f"{service} experiencing high error rate ({error_rate:.0%})",
                     confidence=0.4,
                     status=HypothesisStatus.ACTIVE,
+                    root_service=service,
                 )
             )
 
         # Generate hypotheses from retrieved cases (candidates only)
         for case in state.retrieved_cases:
             root_cause = case.get("root_cause")
+            case_service = case.get("service", "")
             if root_cause:
                 hypotheses.append(
                     Hypothesis(
@@ -344,6 +347,8 @@ class InvestigationEngine:
                         ),
                         confidence=0.3,  # Candidate, not confirmed
                         status=HypothesisStatus.ACTIVE,
+                        root_service=case_service,
+                        cause_code=root_cause,
                     )
                 )
 
@@ -355,6 +360,7 @@ class InvestigationEngine:
                     description=f"{service} incident under investigation",
                     confidence=0.2,
                     status=HypothesisStatus.ACTIVE,
+                    root_service=service,
                 )
             )
 
@@ -510,7 +516,14 @@ class InvestigationEngine:
         return state
 
     def _update_hypotheses(self, state: InvestigationState) -> InvestigationState:
-        """Update hypotheses based on accumulated evidence."""
+        """Update hypotheses based on accumulated evidence.
+
+        Uses assess_evidence() for deterministic pattern matching to
+        identify candidate services and cause codes.  When assessments
+        align with an existing hypothesis, the hypothesis gains
+        root_service and cause_code.  When no matching hypothesis
+        exists, a new one is created.
+        """
         # Analyze evidence patterns
         has_errors = any(
             ev.content.get("error") or ev.content.get("error_result")
@@ -526,27 +539,109 @@ class InvestigationEngine:
         # Check for conflicting evidence (errors in some tools, normal in others)
         has_conflict = has_errors and has_data
 
+        # Collect assessments from all evidence
+        # Group by (candidate_service, root_cause) to merge
+        assessment_map: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        for ev in state.evidence:
+            assessments = assess_evidence(ev)
+            for a in assessments:
+                key = (a.candidate_service, a.root_cause)
+                if key not in assessment_map:
+                    assessment_map[key] = []
+                if a.supports:
+                    assessment_map[key].append((ev.id, "supports"))
+                if a.contradicts:
+                    assessment_map[key].append((ev.id, "contradicts"))
+
+        # Merge assessments into existing hypotheses or create new ones
+        for (service, cause), ev_refs in assessment_map.items():
+            # Find existing hypothesis matching this service+cause
+            matching_hyp = None
+            for hyp in state.hypotheses:
+                if (
+                    hyp.root_service == service
+                    and hyp.cause_code == cause
+                    and hyp.status == HypothesisStatus.ACTIVE
+                ):
+                    matching_hyp = hyp
+                    break
+
+            if matching_hyp is None:
+                # Also check for hypotheses that don't have root_service/cause_code yet
+                # but whose description mentions the service
+                for hyp in state.hypotheses:
+                    if (
+                        not hyp.root_service
+                        and service.lower() in hyp.description.lower()
+                        and hyp.status == HypothesisStatus.ACTIVE
+                    ):
+                        matching_hyp = hyp
+                        break
+
+            if matching_hyp is not None:
+                # Update existing hypothesis
+                matching_hyp.root_service = service
+                matching_hyp.cause_code = cause
+                for ev_id, ref_type in ev_refs:
+                    if ref_type == "supports" and ev_id not in matching_hyp.supporting_evidence_ids:
+                        matching_hyp.supporting_evidence_ids.append(ev_id)
+                    if ref_type == "contradicts" and ev_id not in matching_hyp.contradicting_evidence_ids:
+                        matching_hyp.contradicting_evidence_ids.append(ev_id)
+            else:
+                # Create new hypothesis from assessment
+                support_ids = [eid for eid, t in ev_refs if t == "supports"]
+                contradict_ids = [eid for eid, t in ev_refs if t == "contradicts"]
+                new_hyp = Hypothesis(
+                    id=str(uuid4()),
+                    description=f"{service} incident: {cause}",
+                    confidence=0.4,
+                    supporting_evidence_ids=support_ids,
+                    contradicting_evidence_ids=contradict_ids,
+                    status=HypothesisStatus.ACTIVE,
+                    root_service=service,
+                    cause_code=cause,
+                )
+                state.hypotheses.append(new_hyp)
+                matching_hyp = new_hyp
+
+            # Update cross-references on evidence
+            for ev_id, ref_type in ev_refs:
+                for ev in state.evidence:
+                    if ev.id == ev_id:
+                        if ref_type == "supports" and matching_hyp.id not in ev.supports_hypothesis_ids:
+                            ev.supports_hypothesis_ids.append(matching_hyp.id)
+                        if ref_type == "contradicts" and matching_hyp.id not in ev.contradicts_hypothesis_ids:
+                            ev.contradicts_hypothesis_ids.append(matching_hyp.id)
+
+        # Also run the legacy keyword-based evidence association for
+        # hypotheses that don't have root_service/cause_code yet
         for hyp in state.hypotheses:
             if hyp.status != HypothesisStatus.ACTIVE:
                 continue
+            if hyp.root_service and hyp.cause_code:
+                # Already handled by assess_evidence above
+                continue
 
-            # Associate evidence with hypotheses
+            # Legacy keyword-based association
             for ev in state.evidence:
-                # Determine if evidence supports or contradicts this hypothesis
                 supports = self._evidence_supports_hypothesis(ev, hyp, state)
                 contradicts = self._evidence_contradicts_hypothesis(ev, hyp, state)
 
                 if supports and ev.id not in hyp.supporting_evidence_ids:
                     hyp.supporting_evidence_ids.append(ev.id)
-                    if ev.id not in ev.supports_hypothesis_ids:
+                    if hyp.id not in ev.supports_hypothesis_ids:
                         ev.supports_hypothesis_ids.append(hyp.id)
 
                 if contradicts and ev.id not in hyp.contradicting_evidence_ids:
                     hyp.contradicting_evidence_ids.append(ev.id)
-                    if ev.id not in ev.contradicts_hypothesis_ids:
+                    if hyp.id not in ev.contradicts_hypothesis_ids:
                         ev.contradicts_hypothesis_ids.append(hyp.id)
 
-            # Update confidence based on evidence
+        # Update confidence for all active hypotheses
+        for hyp in state.hypotheses:
+            if hyp.status != HypothesisStatus.ACTIVE:
+                continue
+
             support_count = len(hyp.supporting_evidence_ids)
             contradict_count = len(hyp.contradicting_evidence_ids)
 
