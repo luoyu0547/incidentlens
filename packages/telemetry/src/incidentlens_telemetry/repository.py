@@ -33,6 +33,11 @@ class TelemetryRepository:
         # Tables are created by create_engine(); no need to call create_all here.
         self._engine = engine
 
+    @property
+    def engine(self) -> Engine:
+        """Public read-only access to the underlying SQLAlchemy Engine."""
+        return self._engine
+
     # ------------------------------------------------------------------
     # Write path
     # ------------------------------------------------------------------

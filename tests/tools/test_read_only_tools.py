@@ -51,7 +51,7 @@ def audit_store(repository):
     """Provide access to the audit store for checking audit records."""
     from incidentlens_control_plane.tools.base import AuditStore
 
-    engine = repository._engine
+    engine = repository.engine
     return AuditStore(engine)
 
 
@@ -459,8 +459,8 @@ class TestGetRunbook:
         self, toolkit
     ) -> None:
         result = await toolkit.get_runbook(service="unknown-service")
-        assert result.ok
-        assert result.data is None or result.data == {}
+        assert result.ok is False
+        assert "No runbook found" in (result.error or "")
 
 
 # ===================================================================

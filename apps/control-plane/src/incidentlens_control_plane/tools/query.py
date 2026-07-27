@@ -48,6 +48,15 @@ class QueryMetricsArgs(BaseModel):
     end: datetime | None = None
     limit: int = Field(default=100)
 
+    @field_validator("service")
+    @classmethod
+    def validate_service_length(cls, v: str) -> str:
+        if len(v.encode("utf-8")) > MAX_TEXT_LENGTH_BYTES:
+            raise ValueError(
+                f"Text length exceeds maximum of {MAX_TEXT_LENGTH_BYTES} bytes"
+            )
+        return v
+
     @field_validator("limit")
     @classmethod
     def clamp_limit(cls, v: int) -> int:
@@ -71,6 +80,15 @@ class SearchLogsArgs(BaseModel):
     level: str | None = None
     limit: int = Field(default=100)
 
+    @field_validator("service")
+    @classmethod
+    def validate_service_length(cls, v: str) -> str:
+        if len(v.encode("utf-8")) > MAX_TEXT_LENGTH_BYTES:
+            raise ValueError(
+                f"Text length exceeds maximum of {MAX_TEXT_LENGTH_BYTES} bytes"
+            )
+        return v
+
     @field_validator("limit")
     @classmethod
     def clamp_limit(cls, v: int) -> int:
@@ -92,6 +110,15 @@ class GetSlowTracesArgs(BaseModel):
     service: str
     threshold_seconds: float = 5.0
     limit: int = Field(default=100)
+
+    @field_validator("service")
+    @classmethod
+    def validate_service_length(cls, v: str) -> str:
+        if len(v.encode("utf-8")) > MAX_TEXT_LENGTH_BYTES:
+            raise ValueError(
+                f"Text length exceeds maximum of {MAX_TEXT_LENGTH_BYTES} bytes"
+            )
+        return v
 
     @field_validator("limit")
     @classmethod
@@ -131,6 +158,15 @@ class ListRecentDeploymentsArgs(BaseModel):
     service: str
     limit: int = Field(default=100)
 
+    @field_validator("service")
+    @classmethod
+    def validate_service_length(cls, v: str) -> str:
+        if len(v.encode("utf-8")) > MAX_TEXT_LENGTH_BYTES:
+            raise ValueError(
+                f"Text length exceeds maximum of {MAX_TEXT_LENGTH_BYTES} bytes"
+            )
+        return v
+
     @field_validator("limit")
     @classmethod
     def clamp_limit(cls, v: int) -> int:
@@ -159,10 +195,6 @@ class GetRunbookArgs(BaseModel):
 
 class QueryMetricsTool(ReadOnlyTool):
     """Query metric points by service, name, and time range."""
-
-    _permission = "read_only"
-    _timeout_seconds = 3
-    _max_retries = 1
 
     def __init__(self, repository: TelemetryRepository, audit_store: AuditStore) -> None:
         super().__init__(audit_store)
@@ -198,10 +230,6 @@ class QueryMetricsTool(ReadOnlyTool):
 
 class SearchLogsTool(ReadOnlyTool):
     """Search log rows by service and keyword."""
-
-    _permission = "read_only"
-    _timeout_seconds = 3
-    _max_retries = 1
 
     def __init__(self, repository: TelemetryRepository, audit_store: AuditStore) -> None:
         super().__init__(audit_store)
@@ -239,10 +267,6 @@ class SearchLogsTool(ReadOnlyTool):
 class GetSlowTracesTool(ReadOnlyTool):
     """Find traces with spans that exceed a duration threshold."""
 
-    _permission = "read_only"
-    _timeout_seconds = 3
-    _max_retries = 1
-
     def __init__(self, repository: TelemetryRepository, audit_store: AuditStore) -> None:
         super().__init__(audit_store)
         self._repository = repository
@@ -255,7 +279,7 @@ class GetSlowTracesTool(ReadOnlyTool):
         try:
             from incidentlens_telemetry.models import SpanRow
 
-            engine = self._repository._engine
+            engine = self._repository.engine
             with Session(engine) as session:
                 # Get all spans for the service, ordered by trace_id and time
                 stmt = (
@@ -302,10 +326,6 @@ class GetSlowTracesTool(ReadOnlyTool):
 class GetTraceTool(ReadOnlyTool):
     """Aggregate all spans for a given trace_id."""
 
-    _permission = "read_only"
-    _timeout_seconds = 3
-    _max_retries = 1
-
     def __init__(self, repository: TelemetryRepository, audit_store: AuditStore) -> None:
         super().__init__(audit_store)
         self._repository = repository
@@ -329,10 +349,6 @@ class GetTraceTool(ReadOnlyTool):
 class GetServiceDependenciesTool(ReadOnlyTool):
     """Derive service dependency graph from span parent-child relationships."""
 
-    _permission = "read_only"
-    _timeout_seconds = 3
-    _max_retries = 1
-
     def __init__(self, repository: TelemetryRepository, audit_store: AuditStore) -> None:
         super().__init__(audit_store)
         self._repository = repository
@@ -345,7 +361,7 @@ class GetServiceDependenciesTool(ReadOnlyTool):
         try:
             from incidentlens_telemetry.models import SpanRow
 
-            engine = self._repository._engine
+            engine = self._repository.engine
             with Session(engine) as session:
                 stmt = select(SpanRow).order_by(SpanRow.trace_id, SpanRow.occurred_at)
                 all_spans = [row.as_dict() for row in session.scalars(stmt)]
@@ -386,10 +402,6 @@ class GetServiceDependenciesTool(ReadOnlyTool):
 
 class ListRecentDeploymentsTool(ReadOnlyTool):
     """List recent deployments for a service."""
-
-    _permission = "read_only"
-    _timeout_seconds = 3
-    _max_retries = 1
 
     def __init__(self, repository: TelemetryRepository, audit_store: AuditStore) -> None:
         super().__init__(audit_store)
@@ -455,10 +467,6 @@ _RUNBOOKS: dict[str, dict[str, Any]] = {
 class GetRunbookTool(ReadOnlyTool):
     """Retrieve a runbook for a service."""
 
-    _permission = "read_only"
-    _timeout_seconds = 3
-    _max_retries = 1
-
     def __init__(self, audit_store: AuditStore) -> None:
         super().__init__(audit_store)
 
@@ -468,6 +476,12 @@ class GetRunbookTool(ReadOnlyTool):
     async def _execute(self, args: BaseModel) -> ToolResult[Any]:
         assert isinstance(args, GetRunbookArgs)
         runbook = _RUNBOOKS.get(args.service)
+        if runbook is None:
+            return ToolResult(
+                ok=False,
+                error=f"No runbook found for service '{args.service}'",
+                metadata={"service": args.service},
+            )
         return ToolResult(
             ok=True,
             data=runbook,
@@ -489,7 +503,7 @@ class ReadOnlyToolkit:
 
     def __init__(self, repository: TelemetryRepository) -> None:
         self._repository = repository
-        engine = repository._engine
+        engine = repository.engine
         self._audit_store = AuditStore(engine)
 
         self._query_metrics_tool = QueryMetricsTool(repository, self._audit_store)

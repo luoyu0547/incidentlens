@@ -171,6 +171,8 @@ class ReadOnlyTool(ABC):
                     error=error_msg,
                     metadata={"timeout": True, "retries": retries},
                 )
+                if attempt < self._max_retries:
+                    continue
             except Exception as exc:
                 error_msg = str(exc)
                 retries = attempt
