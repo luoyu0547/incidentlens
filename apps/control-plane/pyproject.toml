@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.115,<1",
     "incidentlens-contracts",
+    "incidentlens-scenarios",
     "incidentlens-telemetry",
     "pydantic>=2.0,<3",
     "sqlalchemy>=2.0,<3",

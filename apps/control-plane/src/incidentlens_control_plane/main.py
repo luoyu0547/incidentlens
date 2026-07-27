@@ -8,6 +8,11 @@ Provides:
   - GET /api/cases/search — search verified cases
   - POST /api/cases — save a new case
   - POST /api/cases/{case_id}/confirm — confirm a case
+  - GET /api/scenarios — list all scenario definitions
+  - POST /api/scenarios/{name}/enable — activate a scenario
+  - POST /api/scenarios/{name}/disable — deactivate a scenario
+  - POST /api/scenarios/reset — reset all scenarios and demo data
+  - GET /api/scenarios/runtime/{service} — get active scenarios for a service
   - GET /healthz — health check
 """
 
@@ -38,9 +43,18 @@ from incidentlens_control_plane.routes.investigations import (
 from incidentlens_control_plane.routes.investigations import (
     set_event_bus as set_investigation_event_bus,
 )
+from incidentlens_control_plane.routes.scenarios import (
+    router as scenarios_router,
+)
+from incidentlens_control_plane.routes.scenarios import (
+    set_demo_reset_service,
+    set_scenario_store,
+)
 from incidentlens_control_plane.routes.telemetry import router as telemetry_router
 from incidentlens_control_plane.routes.telemetry import set_repository
+from incidentlens_control_plane.services.demo_reset import DemoResetService
 from incidentlens_control_plane.tools.query import ReadOnlyToolkit
+from incidentlens_scenarios.store import ScenarioStore
 
 logger = logging.getLogger("incidentlens_control_plane")
 
@@ -76,6 +90,8 @@ _engine = create_engine(_db_url)
 _repository = TelemetryRepository(_engine)
 _toolkit = ReadOnlyToolkit(_repository)
 _case_repository = CaseRepository(_engine)
+_scenario_store = ScenarioStore(_engine)
+_demo_reset_service = DemoResetService(_repository, _scenario_store)
 _investigation_engine = InvestigationEngine(
     telemetry_repo=_repository,
     toolkit=_toolkit,
@@ -86,6 +102,8 @@ _investigation_engine = InvestigationEngine(
 set_repository(_repository)
 set_investigation_engine(_investigation_engine)
 set_case_repository(_case_repository)
+set_scenario_store(_scenario_store)
+set_demo_reset_service(_demo_reset_service)
 
 # Configure event bus for SSE streaming — use the global singleton so that
 # publishers (investigation routes) and subscribers (SSE endpoint) share
@@ -98,6 +116,7 @@ app.include_router(telemetry_router)
 app.include_router(investigations_router)
 app.include_router(cases_router)
 app.include_router(events_router)
+app.include_router(scenarios_router)
 
 # Mount static dashboard files.
 # NOTE: This MUST come after all include_router() calls above because
