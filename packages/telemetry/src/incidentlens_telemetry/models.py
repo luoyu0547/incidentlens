@@ -29,7 +29,7 @@ class LogRow(Base):
     trace_id: Mapped[str] = mapped_column(String(255), index=True)
     level: Mapped[str] = mapped_column(String(32))
     message: Mapped[str] = mapped_column(Text)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     def as_dict(self) -> dict:
         return {
@@ -50,7 +50,7 @@ class MetricRow(Base):
     trace_id: Mapped[str] = mapped_column(String(255), index=True)
     name: Mapped[str] = mapped_column(String(255), index=True)
     value: Mapped[float] = mapped_column(Float)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     def as_dict(self) -> dict:
         return {
@@ -72,7 +72,7 @@ class SpanRow(Base):
     span_id: Mapped[str] = mapped_column(String(255))
     parent_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     operation: Mapped[str] = mapped_column(String(512))
-    occurred_at: Mapped[datetime] = mapped_column(DateTime)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     def as_dict(self) -> dict:
         return {
@@ -92,7 +92,7 @@ class DeploymentRow(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     service: Mapped[str] = mapped_column(String(255), index=True)
     version: Mapped[str] = mapped_column(String(64))
-    occurred_at: Mapped[datetime] = mapped_column(DateTime)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     def as_dict(self) -> dict:
         return {

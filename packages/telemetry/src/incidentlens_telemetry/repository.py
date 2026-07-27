@@ -30,8 +30,7 @@ class TelemetryRepository:
     """Repository for recording and querying telemetry data via SQLAlchemy."""
 
     def __init__(self, engine: Engine) -> None:
-        # Ensure tables exist (idempotent for in-memory DBs created by create_engine)
-        Base.metadata.create_all(engine)
+        # Tables are created by create_engine(); no need to call create_all here.
         self._engine = engine
 
     # ------------------------------------------------------------------
@@ -62,6 +61,7 @@ class TelemetryRepository:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Return log rows matching the given filters."""
+        limit = min(limit, 1000)
         with Session(self._engine) as session:
             stmt: Select = select(LogRow).where(LogRow.service == service)
             if trace_id is not None:
@@ -79,14 +79,18 @@ class TelemetryRepository:
         self,
         *,
         service: str,
+        trace_id: str | None = None,
         name: str | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Return metric points matching the given filters."""
+        limit = min(limit, 1000)
         with Session(self._engine) as session:
             stmt: Select = select(MetricRow).where(MetricRow.service == service)
+            if trace_id is not None:
+                stmt = stmt.where(MetricRow.trace_id == trace_id)
             if name is not None:
                 stmt = stmt.where(MetricRow.name == name)
             if start is not None:
@@ -123,6 +127,7 @@ class TelemetryRepository:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Return deployment records for a service, newest first."""
+        limit = min(limit, 1000)
         with Session(self._engine) as session:
             stmt = (
                 select(DeploymentRow)

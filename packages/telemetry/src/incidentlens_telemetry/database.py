@@ -15,5 +15,7 @@ def create_engine(url: str = "sqlite:///telemetry.db") -> Engine:
     For testing, pass ``"sqlite:///:memory:"`` to get an in-memory DB.
     """
     engine = sa_create_engine(url, echo=False)
+    # Schema creation lives here (not in TelemetryRepository) because this
+    # function owns the engine and is the single point of entry for DB setup.
     Base.metadata.create_all(engine)
     return engine
