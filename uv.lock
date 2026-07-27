@@ -6,6 +6,7 @@ requires-python = "==3.12.*"
 members = [
     "incidentlens",
     "incidentlens-contracts",
+    "incidentlens-telemetry",
 ]
 
 [[package]]
@@ -143,6 +144,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "incidentlens-contracts" },
+    { name = "incidentlens-telemetry" },
     { name = "pydantic" },
     { name = "sqlalchemy" },
 ]
@@ -159,6 +161,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "incidentlens-contracts", editable = "packages/contracts" },
+    { name = "incidentlens-telemetry", editable = "packages/telemetry" },
     { name = "pydantic", specifier = ">=2.0,<3" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
 ]
@@ -180,6 +183,21 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "pydantic", specifier = ">=2.0,<3" }]
+
+[[package]]
+name = "incidentlens-telemetry"
+version = "0.1.0"
+source = { editable = "packages/telemetry" }
+dependencies = [
+    { name = "incidentlens-contracts" },
+    { name = "sqlalchemy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "incidentlens-contracts", editable = "packages/contracts" },
+    { name = "sqlalchemy", specifier = ">=2.0,<3" },
+]
 
 [[package]]
 name = "iniconfig"

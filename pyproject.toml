@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.115,<1",
     "incidentlens-contracts",
+    "incidentlens-telemetry",
     "pydantic>=2.0,<3",
     "sqlalchemy>=2.0,<3",
     "httpx>=0.28,<1",
@@ -14,10 +15,12 @@ dependencies = [
 [tool.uv.workspace]
 members = [
     "packages/contracts",
+    "packages/telemetry",
 ]
 
 [tool.uv.sources]
 incidentlens-contracts = { workspace = true }
+incidentlens-telemetry = { workspace = true }
 
 [dependency-groups]
 dev = [
