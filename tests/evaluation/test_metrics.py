@@ -1,6 +1,7 @@
-"""Tests for evaluation metrics — TDD RED phase.
+"""Tests for evaluation metrics and runner — TDD RED phase.
 
 Metrics must be computed from actual run records, never fixed scores.
+Runner must execute real investigations and produce RunRecords.
 """
 
 from __future__ import annotations
@@ -72,3 +73,37 @@ def test_compute_metrics_single_perfect_record() -> None:
     assert result.evidence_reference_correctness == 100.0
     assert result.duplicate_rate == 0.0
     assert result.misleading_rate == 0.0
+
+
+def test_run_evaluation_returns_result_from_actual_run() -> None:
+    """run_evaluation should execute a real investigation and return metrics."""
+    from incidentlens_evaluation.runner import run_evaluation
+
+    result = run_evaluation("react_no_memory", "payment_delay")
+    assert result.root_service_accuracy >= 0.0
+    assert result.average_tool_calls >= 0.0
+
+
+def test_run_single_produces_run_record() -> None:
+    """run_single should produce a RunRecord from an actual investigation."""
+    from incidentlens_evaluation.runner import run_single
+
+    record = run_single("react_no_memory", "payment_delay")
+    assert record.root_service_expected == "payment-service"
+    assert record.tool_calls >= 0
+
+
+def test_run_evaluation_rejects_invalid_strategy() -> None:
+    """run_evaluation should reject unknown strategies."""
+    from incidentlens_evaluation.runner import run_evaluation
+
+    with pytest.raises(ValueError, match="Unknown strategy"):
+        run_evaluation("invalid_strategy", "payment_delay")
+
+
+def test_run_evaluation_rejects_invalid_scenario() -> None:
+    """run_evaluation should reject unknown scenarios."""
+    from incidentlens_evaluation.runner import run_evaluation
+
+    with pytest.raises(ValueError, match="Unknown scenario"):
+        run_evaluation("react_no_memory", "nonexistent_scenario")
