@@ -23,24 +23,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
-# ---------------------------------------------------------------------------
-# Custom JSON encoder for datetime serialization
-# ---------------------------------------------------------------------------
-
-
-class _DateTimeEncoder(json.JSONEncoder):
-    """JSON encoder that handles datetime objects."""
-
-    def default(self, obj: Any) -> Any:
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        return super().default(obj)
-
-
-def _json_dumps(obj: Any) -> str:
-    """JSON dumps with datetime support."""
-    return json.dumps(obj, cls=_DateTimeEncoder)
-
 
 # ---------------------------------------------------------------------------
 # ORM Base for investigation tables
@@ -83,6 +65,24 @@ class InvestigationCheckpointRow(InvestigationBase):
 
 
 # ---------------------------------------------------------------------------
+# ORM model for investigation audit records
+# ---------------------------------------------------------------------------
+
+
+class InvestigationAuditRow(InvestigationBase):
+    __tablename__ = "investigation_audits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    incident_id: Mapped[str] = mapped_column(String(255), index=True)
+    action: Mapped[str] = mapped_column(String(64))
+    details_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(tz=timezone.utc),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Pydantic models for investigation state
 # ---------------------------------------------------------------------------
 
@@ -102,6 +102,44 @@ class InvestigationState(BaseModel):
     retrieved_cases: list[dict[str, Any]] = Field(default_factory=list)
 
     model_config = {"use_enum_values": False}
+
+    @property
+    def alert_json(self) -> str:
+        """Serialize alert dict to JSON using model_dump(mode='json')."""
+        return json.dumps(self.alert, default=self._json_default)
+
+    @property
+    def hypotheses_json(self) -> str:
+        """Serialize hypotheses to JSON using model_dump(mode='json')."""
+        return json.dumps(
+            [h.model_dump(mode="json") for h in self.hypotheses],
+            default=self._json_default,
+        )
+
+    @property
+    def evidence_json(self) -> str:
+        """Serialize evidence to JSON using model_dump(mode='json')."""
+        return json.dumps(
+            [e.model_dump(mode="json") for e in self.evidence],
+            default=self._json_default,
+        )
+
+    @property
+    def report_json(self) -> str:
+        """Serialize report to JSON using model_dump(mode='json')."""
+        return json.dumps(self.report, default=self._json_default)
+
+    @property
+    def retrieved_cases_json(self) -> str:
+        """Serialize retrieved_cases to JSON."""
+        return json.dumps(self.retrieved_cases, default=self._json_default)
+
+    @staticmethod
+    def _json_default(obj: Any) -> Any:
+        """Fallback JSON serializer for non-standard types like datetime."""
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
 # ---------------------------------------------------------------------------
@@ -138,19 +176,12 @@ class CheckpointStore:
         InvestigationBase.metadata.create_all(self._engine)
 
     def save(self, state: InvestigationState) -> None:
-        """Persist investigation state to the database."""
+        """Persist investigation state to the database (append-only).
+
+        Always inserts a new row so that checkpoint history is preserved.
+        Use load() to retrieve the latest checkpoint for a given incident.
+        """
         with Session(self._engine) as session:
-            # Check if a checkpoint already exists for this incident
-            from sqlalchemy import select
-
-            stmt = (
-                select(InvestigationCheckpointRow)
-                .where(InvestigationCheckpointRow.incident_id == state.incident_id)
-                .order_by(InvestigationCheckpointRow.id.desc())
-                .limit(1)
-            )
-            existing = session.scalars(stmt).first()
-
             data = {
                 "incident_id": state.incident_id,
                 "status": (
@@ -160,22 +191,17 @@ class CheckpointStore:
                 ),
                 "current_round": state.current_round,
                 "max_rounds": state.max_rounds,
-                "alert_json": _json_dumps(state.alert),
-                "hypotheses_json": _json_dumps([h.model_dump() for h in state.hypotheses]),
-                "evidence_json": _json_dumps([e.model_dump() for e in state.evidence]),
-                "report_json": _json_dumps(state.report),
-                "retrieved_cases_json": _json_dumps(state.retrieved_cases),
+                "alert_json": state.alert_json,
+                "hypotheses_json": state.hypotheses_json,
+                "evidence_json": state.evidence_json,
+                "report_json": state.report_json,
+                "retrieved_cases_json": state.retrieved_cases_json,
                 "phase": state.phase,
             }
 
-            if existing:
-                for key, value in data.items():
-                    setattr(existing, key, value)
-                session.commit()
-            else:
-                row = InvestigationCheckpointRow(**data)
-                session.add(row)
-                session.commit()
+            row = InvestigationCheckpointRow(**data)
+            session.add(row)
+            session.commit()
 
     def load(self, incident_id: str) -> InvestigationState | None:
         """Load investigation state from the database."""
@@ -216,6 +242,52 @@ class CheckpointStore:
 
 
 # ---------------------------------------------------------------------------
+# InvestigationAuditStore — record audit trail for investigations
+# ---------------------------------------------------------------------------
+
+
+class InvestigationAuditStore:
+    """Records audit entries for investigation phase transitions and tool calls."""
+
+    def __init__(self, engine: Any) -> None:
+        self._engine = engine
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        """Ensure the audit table exists."""
+        from sqlalchemy import inspect
+
+        inspector = inspect(self._engine)
+        if inspector.has_table(InvestigationAuditRow.__tablename__):
+            existing_columns = {col["name"] for col in inspector.get_columns(
+                InvestigationAuditRow.__tablename__
+            )}
+            expected_columns = {
+                c.name for c in InvestigationAuditRow.__table__.columns
+            }
+            if not expected_columns.issubset(existing_columns):
+                InvestigationAuditRow.__table__.drop(self._engine)
+        InvestigationBase.metadata.create_all(self._engine)
+
+    def record(self, incident_id: str, action: str, details: dict[str, Any] | None = None) -> None:
+        """Record an audit entry for an investigation.
+
+        Args:
+            incident_id: The investigation this audit belongs to.
+            action: The action type, e.g. "phase_transition", "tool_call".
+            details: Optional dict of additional details (stored as JSON).
+        """
+        with Session(self._engine) as session:
+            row = InvestigationAuditRow(
+                incident_id=incident_id,
+                action=action,
+                details_json=json.dumps(details or {}, default=InvestigationState._json_default),
+            )
+            session.add(row)
+            session.commit()
+
+
+# ---------------------------------------------------------------------------
 # State machine phase definitions
 # ---------------------------------------------------------------------------
 
@@ -230,12 +302,4 @@ PHASES = [
     "update_hypotheses",
     "verify_root_cause",
     "generate_report",
-]
-
-# Phases that constitute one "round" of investigation
-ROUND_PHASES = [
-    "choose_next_action",
-    "execute_tool",
-    "record_evidence",
-    "update_hypotheses",
 ]

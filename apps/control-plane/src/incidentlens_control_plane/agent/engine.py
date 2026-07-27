@@ -37,6 +37,7 @@ from incidentlens_contracts.models import (
 from incidentlens_control_plane.agent.reporting import can_generate_report, generate_report
 from incidentlens_control_plane.agent.state import (
     CheckpointStore,
+    InvestigationAuditStore,
     InvestigationState,
 )
 from incidentlens_control_plane.memory.repository import CaseRepository
@@ -84,6 +85,7 @@ class InvestigationEngine:
         )
         self._max_rounds = max_rounds
         self._checkpoint_store = CheckpointStore(telemetry_repo.engine)
+        self._audit_store = InvestigationAuditStore(telemetry_repo.engine)
 
     @property
     def checkpoint_store(self) -> CheckpointStore:
@@ -113,18 +115,23 @@ class InvestigationEngine:
 
         # Phase: parse_alert -> scope_incident
         state = self._parse_alert(state)
+        self._checkpoint_store.save(state)
+        self._audit_store.record(incident_id, "phase_transition", {"from": "parse_alert", "to": "scope_incident"})
 
         # Phase: scope_incident -> retrieve_memory
         state = self._scope_incident(state)
+        self._checkpoint_store.save(state)
+        self._audit_store.record(incident_id, "phase_transition", {"from": "scope_incident", "to": "retrieve_memory"})
 
         # Phase: retrieve_memory -> generate_hypotheses
         state = self._retrieve_memory(state)
+        self._checkpoint_store.save(state)
+        self._audit_store.record(incident_id, "phase_transition", {"from": "retrieve_memory", "to": "generate_hypotheses"})
 
         # Phase: generate_hypotheses
         state = self._generate_hypotheses(state)
-
-        # Checkpoint after initialization
         self._checkpoint_store.save(state)
+        self._audit_store.record(incident_id, "phase_transition", {"from": "generate_hypotheses", "to": "choose_next_action"})
 
         return state
 
@@ -150,6 +157,7 @@ class InvestigationEngine:
             else:
                 state.status = InvestigationStatus.NEEDS_MORE_EVIDENCE
             self._checkpoint_store.save(state)
+            self._audit_store.record(incident_id, "phase_transition", {"to": state.status.value, "reason": "max_rounds_reached"})
             return state
 
         # Increment round
@@ -159,6 +167,7 @@ class InvestigationEngine:
         # Transition from SCOPING to INVESTIGATING on first round
         if state.status == InvestigationStatus.SCOPING:
             state.status = InvestigationStatus.INVESTIGATING
+            self._audit_store.record(incident_id, "phase_transition", {"from": "scoping", "to": "investigating"})
 
         # Phase: choose_next_action
         tool_call = self._choose_next_action(state)
@@ -172,13 +181,25 @@ class InvestigationEngine:
             state.phase = "record_evidence"
             state = self._record_evidence(state, tool_call, result)
 
+            # Checkpoint and audit after every tool call
+            self._checkpoint_store.save(state)
+            self._audit_store.record(
+                incident_id,
+                "tool_call",
+                {"tool": tool_call["tool"], "args": tool_call.get("args", {}), "ok": result.ok},
+            )
+
         # Phase: update_hypotheses
         state.phase = "update_hypotheses"
         state = self._update_hypotheses(state)
+        self._checkpoint_store.save(state)
+        self._audit_store.record(incident_id, "phase_transition", {"to": "update_hypotheses"})
 
         # Phase: verify_root_cause
         state.phase = "verify_root_cause"
         state = self._verify_root_cause(state)
+        self._checkpoint_store.save(state)
+        self._audit_store.record(incident_id, "phase_transition", {"to": "verify_root_cause"})
 
         # Phase: generate_report (if possible)
         if can_generate_report(state):
@@ -190,6 +211,7 @@ class InvestigationEngine:
 
         # Checkpoint after round
         self._checkpoint_store.save(state)
+        self._audit_store.record(incident_id, "phase_transition", {"to": state.phase, "round": state.current_round})
 
         return state
 
@@ -311,32 +333,40 @@ class InvestigationEngine:
         """Choose the next tool to execute based on current state."""
         service = state.alert.get("service", "")
 
-        # Track which tools have been called with which args
-        called_tools: set[str] = set()
+        # Track which tool+args combos have been called (consistent with evidence dedup)
+        called_tool_args: set[tuple[str, str]] = set()
         for ev in state.evidence:
-            called_tools.add(ev.source_tool)
+            called_tool_args.add((ev.source_tool, ev.tool_call_id))
 
-        # Pick next tool that hasn't been called yet (or rotate)
+        # Pick next tool that hasn't been called with these args yet
         for strategy in _TOOL_STRATEGY:
             tool_name = strategy["tool"]
-            # Allow re-calling different tools, but prefer uncalled ones
-            if tool_name not in called_tools:
-                if tool_name in ("search_logs", "query_metrics",
-                                 "get_slow_traces", "list_recent_deployments",
-                                 "get_runbook"):
-                    return {"tool": tool_name, "args": {"service": service}}
-                elif tool_name == "get_service_dependencies":
-                    return {"tool": tool_name, "args": {}}
-                elif tool_name == "get_trace":
-                    # Only call if we have a trace_id
-                    trace_id = state.alert.get("trace_id")
-                    if trace_id:
-                        return {"tool": tool_name, "args": {"trace_id": trace_id}}
+            if tool_name in ("search_logs", "query_metrics",
+                             "get_slow_traces", "list_recent_deployments",
+                             "get_runbook"):
+                args = {"service": service}
+            elif tool_name == "get_service_dependencies":
+                args = {}
+            elif tool_name == "get_trace":
+                # Only call if we have a trace_id
+                trace_id = state.alert.get("trace_id")
+                if not trace_id:
                     continue
+                args = {"trace_id": trace_id}
+            else:
+                continue
 
-        # If all tools called, re-call with different params based on evidence
-        # Pick the first tool again (but with different dedup key)
-        if called_tools:
+            # Compute the same dedup key as _record_evidence
+            args_str = json.dumps(args, sort_keys=True)
+            args_hash = hashlib.sha256(
+                f"{tool_name}:{args_str}".encode()
+            ).hexdigest()[:16]
+
+            if (tool_name, args_hash) not in called_tool_args:
+                return {"tool": tool_name, "args": args}
+
+        # If all tools called with default args, re-call with different params
+        if called_tool_args:
             return {"tool": "search_logs", "args": {"service": service, "keyword": "error"}}
 
         return None
@@ -496,8 +526,9 @@ class InvestigationEngine:
 
             # Confidence guard: > 0.70 requires evidence references
             if hyp.confidence > 0.70 and not hyp.supporting_evidence_ids:
-                # Without evidence, cap confidence and mark investigation
-                hyp.confidence = 0.70
+                # Without evidence, the investigation needs more evidence
+                # Keep the hypothesis confidence as-is, but mark the investigation
+                state.status = InvestigationStatus.NEEDS_MORE_EVIDENCE
 
         return state
 
@@ -602,7 +633,9 @@ class InvestigationEngine:
             h.status == HypothesisStatus.CONFIRMED for h in state.hypotheses
         )
         if has_confirmed:
-            state.status = InvestigationStatus.VERIFYING
+            # A confirmed hypothesis with supporting evidence means verification
+            # is complete — go directly to REPORT_READY (bypass dead VERIFYING state)
+            state.status = InvestigationStatus.REPORT_READY
         elif all(
             h.status in (HypothesisStatus.RULED_OUT, HypothesisStatus.CONFIRMED)
             for h in state.hypotheses

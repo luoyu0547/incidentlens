@@ -188,7 +188,6 @@ class TestStateMachine:
         state = await engine.run_round(state.incident_id)
         assert state.status in (
             InvestigationStatus.INVESTIGATING,
-            InvestigationStatus.VERIFYING,
             InvestigationStatus.NEEDS_MORE_EVIDENCE,
             InvestigationStatus.REPORT_READY,
         )
