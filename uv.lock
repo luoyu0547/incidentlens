@@ -6,6 +6,11 @@ requires-python = "==3.12.*"
 members = [
     "incidentlens",
     "incidentlens-contracts",
+    "incidentlens-gateway-service",
+    "incidentlens-order-service",
+    "incidentlens-payment-service",
+    "incidentlens-scenarios",
+    "incidentlens-service-common",
     "incidentlens-telemetry",
 ]
 
@@ -144,6 +149,11 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "incidentlens-contracts" },
+    { name = "incidentlens-gateway-service" },
+    { name = "incidentlens-order-service" },
+    { name = "incidentlens-payment-service" },
+    { name = "incidentlens-scenarios" },
+    { name = "incidentlens-service-common" },
     { name = "incidentlens-telemetry" },
     { name = "pydantic" },
     { name = "sqlalchemy" },
@@ -153,6 +163,7 @@ dependencies = [
 dev = [
     { name = "mypy" },
     { name = "pytest" },
+    { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
 
@@ -161,6 +172,11 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "incidentlens-contracts", editable = "packages/contracts" },
+    { name = "incidentlens-gateway-service", editable = "apps/gateway-service" },
+    { name = "incidentlens-order-service", editable = "apps/order-service" },
+    { name = "incidentlens-payment-service", editable = "apps/payment-service" },
+    { name = "incidentlens-scenarios", editable = "packages/scenarios" },
+    { name = "incidentlens-service-common", editable = "apps/shared-service" },
     { name = "incidentlens-telemetry", editable = "packages/telemetry" },
     { name = "pydantic", specifier = ">=2.0,<3" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
@@ -170,6 +186,7 @@ requires-dist = [
 dev = [
     { name = "mypy", specifier = ">=1.13,<2" },
     { name = "pytest", specifier = ">=8.0,<9" },
+    { name = "pytest-asyncio", specifier = ">=0.24,<1" },
     { name = "ruff", specifier = ">=0.8,<1" },
 ]
 
@@ -183,6 +200,103 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "pydantic", specifier = ">=2.0,<3" }]
+
+[[package]]
+name = "incidentlens-gateway-service"
+version = "0.1.0"
+source = { editable = "apps/gateway-service" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "incidentlens-contracts" },
+    { name = "incidentlens-service-common" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.115,<1" },
+    { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "incidentlens-contracts", editable = "packages/contracts" },
+    { name = "incidentlens-service-common", editable = "apps/shared-service" },
+    { name = "pydantic", specifier = ">=2.0,<3" },
+]
+
+[[package]]
+name = "incidentlens-order-service"
+version = "0.1.0"
+source = { editable = "apps/order-service" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "incidentlens-contracts" },
+    { name = "incidentlens-scenarios" },
+    { name = "incidentlens-service-common" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.115,<1" },
+    { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "incidentlens-contracts", editable = "packages/contracts" },
+    { name = "incidentlens-scenarios", editable = "packages/scenarios" },
+    { name = "incidentlens-service-common", editable = "apps/shared-service" },
+    { name = "pydantic", specifier = ">=2.0,<3" },
+]
+
+[[package]]
+name = "incidentlens-payment-service"
+version = "0.1.0"
+source = { editable = "apps/payment-service" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "incidentlens-contracts" },
+    { name = "incidentlens-scenarios" },
+    { name = "incidentlens-service-common" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.115,<1" },
+    { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "incidentlens-contracts", editable = "packages/contracts" },
+    { name = "incidentlens-scenarios", editable = "packages/scenarios" },
+    { name = "incidentlens-service-common", editable = "apps/shared-service" },
+    { name = "pydantic", specifier = ">=2.0,<3" },
+]
+
+[[package]]
+name = "incidentlens-scenarios"
+version = "0.1.0"
+source = { editable = "packages/scenarios" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.0,<3" }]
+
+[[package]]
+name = "incidentlens-service-common"
+version = "0.1.0"
+source = { editable = "apps/shared-service" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "incidentlens-contracts" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.115,<1" },
+    { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "incidentlens-contracts", editable = "packages/contracts" },
+    { name = "pydantic", specifier = ">=2.0,<3" },
+]
 
 [[package]]
 name = "incidentlens-telemetry"
@@ -355,6 +469,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a3/5c/00a0e072241553e1a7496d638deababa67c5058571567b92a7eaa258397c/pytest-8.4.2.tar.gz", hash = "sha256:86c0d0b93306b961d58d62a4db4879f27fe25513d4b969df351abdddb3c30e01", size = 1519618, upload-time = "2025-09-04T14:34:22.711Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a8/a4/20da314d277121d6534b3a980b29035dcd51e6744bd79075a6ce8fa4eb8d/pytest-8.4.2-py3-none-any.whl", hash = "sha256:872f880de3fc3a5bdc88a11b39c9710c3497a547cfa9320bc3c5e62fbf272e79", size = 365750, upload-time = "2025-09-04T14:34:20.226Z" },
+]
+
+[[package]]
+name = "pytest-asyncio"
+version = "0.26.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8e/c4/453c52c659521066969523e87d85d54139bbd17b78f09532fb8eb8cdb58e/pytest_asyncio-0.26.0.tar.gz", hash = "sha256:c4df2a697648241ff39e7f0e4a73050b03f123f760673956cf0d72a4990e312f", size = 54156, upload-time = "2025-03-25T06:22:28.883Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/20/7f/338843f449ace853647ace35870874f69a764d251872ed1b4de9f234822c/pytest_asyncio-0.26.0-py3-none-any.whl", hash = "sha256:7b51ed894f4fbea1340262bdae5135797ebbe21d8638978e35d31c6d19f72fb0", size = 19694, upload-time = "2025-03-25T06:22:27.807Z" },
 ]
 
 [[package]]
