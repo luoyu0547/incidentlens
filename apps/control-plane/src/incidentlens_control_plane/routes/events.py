@@ -13,7 +13,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from incidentlens_control_plane.events import EventBus

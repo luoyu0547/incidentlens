@@ -532,14 +532,28 @@ class ReadOnlyToolkit:
         end: datetime | None = None,
         limit: int = 100,
     ) -> ToolResult[Any]:
-        args = QueryMetricsArgs(
-            service=service,
-            name=name,
-            trace_id=trace_id,
-            start=start,
-            end=end,
-            limit=limit,
-        )
+        try:
+            args = QueryMetricsArgs(
+                service=service,
+                name=name,
+                trace_id=trace_id,
+                start=start,
+                end=end,
+                limit=limit,
+            )
+        except Exception as exc:
+            # Validation error — still audit and return ToolResult
+            self._audit_store.record(
+                tool_name="query_metrics",
+                parameters=json.dumps({"service": service, "name": name}),
+                result_summary=f"error: {exc}",
+                duration_ms=0.0,
+                retries=0,
+                error=str(exc),
+            )
+            return ToolResult(
+                ok=False, error=str(exc), metadata={"limit": min(limit, MAX_RESULT_COUNT)}
+            )
         # Validate time range before invoking
         time_error = args.validate_time_range()
         if time_error:
@@ -596,11 +610,26 @@ class ReadOnlyToolkit:
         threshold_seconds: float = 5.0,
         limit: int = 100,
     ) -> ToolResult[Any]:
-        args = GetSlowTracesArgs(
-            service=service,
-            threshold_seconds=threshold_seconds,
-            limit=limit,
-        )
+        try:
+            args = GetSlowTracesArgs(
+                service=service,
+                threshold_seconds=threshold_seconds,
+                limit=limit,
+            )
+        except Exception as exc:
+            # Validation error — still audit and return ToolResult
+            self._audit_store.record(
+                tool_name="get_slow_traces",
+                parameters=json.dumps({"service": service}),
+                result_summary=f"error: {exc}",
+                duration_ms=0.0,
+                retries=0,
+                error=str(exc),
+            )
+            return ToolResult(
+                ok=False, error=str(exc), metadata={"limit": min(limit, MAX_RESULT_COUNT)}
+            )
+
         return await self._get_slow_traces_tool.invoke(args)
 
     async def get_trace(
@@ -628,7 +657,22 @@ class ReadOnlyToolkit:
         *,
         limit: int = 100,
     ) -> ToolResult[Any]:
-        args = GetServiceDependenciesArgs(limit=limit)
+        try:
+            args = GetServiceDependenciesArgs(limit=limit)
+        except Exception as exc:
+            # Validation error — still audit and return ToolResult
+            self._audit_store.record(
+                tool_name="get_service_dependencies",
+                parameters=json.dumps({"limit": limit}),
+                result_summary=f"error: {exc}",
+                duration_ms=0.0,
+                retries=0,
+                error=str(exc),
+            )
+            return ToolResult(
+                ok=False, error=str(exc), metadata={"limit": min(limit, MAX_RESULT_COUNT)}
+            )
+
         return await self._get_service_dependencies_tool.invoke(args)
 
     async def list_recent_deployments(
@@ -637,7 +681,22 @@ class ReadOnlyToolkit:
         service: str,
         limit: int = 100,
     ) -> ToolResult[Any]:
-        args = ListRecentDeploymentsArgs(service=service, limit=limit)
+        try:
+            args = ListRecentDeploymentsArgs(service=service, limit=limit)
+        except Exception as exc:
+            # Validation error — still audit and return ToolResult
+            self._audit_store.record(
+                tool_name="list_recent_deployments",
+                parameters=json.dumps({"service": service}),
+                result_summary=f"error: {exc}",
+                duration_ms=0.0,
+                retries=0,
+                error=str(exc),
+            )
+            return ToolResult(
+                ok=False, error=str(exc), metadata={"limit": min(limit, MAX_RESULT_COUNT)}
+            )
+
         return await self._list_recent_deployments_tool.invoke(args)
 
     async def get_runbook(

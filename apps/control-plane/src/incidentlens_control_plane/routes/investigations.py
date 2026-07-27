@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
-from incidentlens_control_plane.events import SSEEvent, EventBus
+from incidentlens_control_plane.events import EventBus, SSEEvent
 
 router = APIRouter(prefix="/api/investigations", tags=["investigations"])
 
@@ -23,7 +23,8 @@ _event_bus: EventBus | None = None
 
 # Track which tool_call audit entries have already been published as SSE events
 # to avoid duplicates when run_round is called multiple times.
-_published_tool_call_ids: set[int] = set()
+# Scoped per incident_id so completed investigations can be cleaned up.
+_published_tool_call_ids: dict[str, set[int]] = {}
 
 
 def set_engine(engine: Any) -> None:
@@ -93,12 +94,19 @@ async def start_investigation(
 
     state = _engine.start(alert)
 
+    # Initialize the per-incident published tool call tracker
+    _published_tool_call_ids.setdefault(state.incident_id, set())
+
     # Publish SSE event for the initial state
     if _event_bus is not None:
         _event_bus.publish(state.incident_id, SSEEvent(
             event_type="state_changed",
             data={
-                "status": state.status.value if hasattr(state.status, "value") else str(state.status),
+                "status": (
+                    state.status.value
+                    if hasattr(state.status, "value")
+                    else str(state.status)
+                ),
                 "round": state.current_round,
                 "phase": state.phase,
             },
@@ -138,7 +146,11 @@ async def run_round(incident_id: str) -> InvestigationStateResponse:
         _event_bus.publish(incident_id, SSEEvent(
             event_type="state_changed",
             data={
-                "status": state.status.value if hasattr(state.status, "value") else str(state.status),
+                "status": (
+                    state.status.value
+                    if hasattr(state.status, "value")
+                    else str(state.status)
+                ),
                 "round": state.current_round,
                 "phase": state.phase,
             },
@@ -146,12 +158,13 @@ async def run_round(incident_id: str) -> InvestigationStateResponse:
 
     # Publish tool_called events for any new tool calls in this round
     if _event_bus is not None and _engine is not None:
+        published = _published_tool_call_ids.setdefault(incident_id, set())
         tool_call_entries = _engine.audit_store.list_for_incident(
             incident_id, action="tool_call"
         )
         for entry in tool_call_entries:
-            if entry["id"] not in _published_tool_call_ids:
-                _published_tool_call_ids.add(entry["id"])
+            if entry["id"] not in published:
+                published.add(entry["id"])
                 details = entry.get("details", {})
                 _event_bus.publish(incident_id, SSEEvent(
                     event_type="tool_called",
@@ -184,6 +197,10 @@ async def run_round(incident_id: str) -> InvestigationStateResponse:
             event_type="report_ready",
             data=state.report,
         ))
+
+    # Clean up per-incident tracking when investigation is complete
+    if state.status.value in ("report_ready", "needs_more_evidence"):
+        _published_tool_call_ids.pop(incident_id, None)
 
     return InvestigationStateResponse(
         incident_id=state.incident_id,

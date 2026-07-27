@@ -121,22 +121,38 @@ class InvestigationEngine:
         # Phase: parse_alert -> scope_incident
         state = self._parse_alert(state)
         self._checkpoint_store.save(state)
-        self._audit_store.record(incident_id, "phase_transition", {"from": "parse_alert", "to": "scope_incident"})
+        self._audit_store.record(
+            incident_id,
+            "phase_transition",
+            {"from": "parse_alert", "to": "scope_incident"},
+        )
 
         # Phase: scope_incident -> retrieve_memory
         state = self._scope_incident(state)
         self._checkpoint_store.save(state)
-        self._audit_store.record(incident_id, "phase_transition", {"from": "scope_incident", "to": "retrieve_memory"})
+        self._audit_store.record(
+            incident_id,
+            "phase_transition",
+            {"from": "scope_incident", "to": "retrieve_memory"},
+        )
 
         # Phase: retrieve_memory -> generate_hypotheses
         state = self._retrieve_memory(state)
         self._checkpoint_store.save(state)
-        self._audit_store.record(incident_id, "phase_transition", {"from": "retrieve_memory", "to": "generate_hypotheses"})
+        self._audit_store.record(
+            incident_id,
+            "phase_transition",
+            {"from": "retrieve_memory", "to": "generate_hypotheses"},
+        )
 
         # Phase: generate_hypotheses
         state = self._generate_hypotheses(state)
         self._checkpoint_store.save(state)
-        self._audit_store.record(incident_id, "phase_transition", {"from": "generate_hypotheses", "to": "choose_next_action"})
+        self._audit_store.record(
+            incident_id,
+            "phase_transition",
+            {"from": "generate_hypotheses", "to": "choose_next_action"},
+        )
 
         return state
 
@@ -162,7 +178,11 @@ class InvestigationEngine:
             else:
                 state.status = InvestigationStatus.NEEDS_MORE_EVIDENCE
             self._checkpoint_store.save(state)
-            self._audit_store.record(incident_id, "phase_transition", {"to": state.status.value, "reason": "max_rounds_reached"})
+            self._audit_store.record(
+                incident_id,
+                "phase_transition",
+                {"to": state.status.value, "reason": "max_rounds_reached"},
+            )
             return state
 
         # Increment round
@@ -172,7 +192,11 @@ class InvestigationEngine:
         # Transition from SCOPING to INVESTIGATING on first round
         if state.status == InvestigationStatus.SCOPING:
             state.status = InvestigationStatus.INVESTIGATING
-            self._audit_store.record(incident_id, "phase_transition", {"from": "scoping", "to": "investigating"})
+            self._audit_store.record(
+                incident_id,
+                "phase_transition",
+                {"from": "scoping", "to": "investigating"},
+            )
 
         # Phase: choose_next_action
         tool_call = self._choose_next_action(state)
@@ -216,7 +240,11 @@ class InvestigationEngine:
 
         # Checkpoint after round
         self._checkpoint_store.save(state)
-        self._audit_store.record(incident_id, "phase_transition", {"to": state.phase, "round": state.current_round})
+        self._audit_store.record(
+            incident_id,
+            "phase_transition",
+            {"to": state.phase, "round": state.current_round},
+        )
 
         return state
 

@@ -29,9 +29,15 @@ from incidentlens_control_plane.routes.cases import router as cases_router
 from incidentlens_control_plane.routes.cases import set_repository as set_case_repository
 from incidentlens_control_plane.routes.events import router as events_router
 from incidentlens_control_plane.routes.events import set_event_bus
-from incidentlens_control_plane.routes.investigations import router as investigations_router
-from incidentlens_control_plane.routes.investigations import set_engine as set_investigation_engine
-from incidentlens_control_plane.routes.investigations import set_event_bus as set_investigation_event_bus
+from incidentlens_control_plane.routes.investigations import (
+    router as investigations_router,
+)
+from incidentlens_control_plane.routes.investigations import (
+    set_engine as set_investigation_engine,
+)
+from incidentlens_control_plane.routes.investigations import (
+    set_event_bus as set_investigation_event_bus,
+)
 from incidentlens_control_plane.routes.telemetry import router as telemetry_router
 from incidentlens_control_plane.routes.telemetry import set_repository
 from incidentlens_control_plane.tools.query import ReadOnlyToolkit
