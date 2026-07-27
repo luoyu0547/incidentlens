@@ -1,0 +1,76 @@
+version: "3.8"
+
+services:
+  gateway-service:
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile
+    environment:
+      - SERVICE=gateway
+      - GATEWAY_PORT=8000
+      - ORDER_SERVICE_URL=http://order-service:8001
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      order-service:
+        condition: service_healthy
+
+  order-service:
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile
+    environment:
+      - SERVICE=order
+      - ORDER_PORT=8001
+      - PAYMENT_SERVICE_URL=http://payment-service:8002
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      payment-service:
+        condition: service_healthy
+
+  payment-service:
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile
+    environment:
+      - SERVICE=payment
+      - PAYMENT_PORT=8002
+    ports:
+      - "8002:8002"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile
+    environment:
+      - SERVICE=control-plane
+      - CONTROL_PLANE_PORT=8003
+      - TELEMETRY_DB_URL=sqlite:///data/control_plane.db
+    ports:
+      - "8003:8003"
+    volumes:
+      - control-plane-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  control-plane-data:
