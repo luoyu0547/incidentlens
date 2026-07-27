@@ -11,7 +11,23 @@ These tests verify:
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+# Ensure ASGI transport is used for inter-service calls in tests
+os.environ.pop("ORDER_SERVICE_URL", None)
+os.environ.pop("PAYMENT_SERVICE_URL", None)
+
+
+def _patch_service_urls() -> None:
+    """Set service URL constants to empty so ASGI transport is used."""
+    import order_service.main as ord_mod
+
+    ord_mod.PAYMENT_SERVICE_URL = ""
+
+
+_patch_service_urls()
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -124,6 +140,14 @@ class TestRootCauseIsolation:
         for params in active.values():
             assert "root_cause_label" not in params
 
+    def test_get_params_does_not_expose_root_cause(self, service) -> None:
+        """get_params must not contain root_cause_label in its output."""
+        service.enable("payment_delay", {"delay_ms": 250})
+        params = service.get_params("payment_delay")
+        assert params is not None
+        assert "root_cause_label" not in params
+        assert params["delay_ms"] == 250
+
 
 # ===================================================================
 # FAULT BEHAVIOR TESTS
@@ -202,6 +226,61 @@ class TestFaultBehavior:
             headers={"X-Trace-ID": "trace-dep", "X-Request-ID": "req-dep"},
         )
         assert response.status_code == 502
+
+        # Reset
+        svc.reset()
+        set_scenario_service(None)
+
+    @pytest.mark.asyncio()
+    async def test_db_pool_exhaustion_causes_delay(self) -> None:
+        """When db_pool_exhaustion is enabled, order service adds delay based on pool_size."""
+        import time
+
+        from httpx import ASGITransport, AsyncClient
+        from incidentlens_scenarios.service import ScenarioService
+        from order_service.main import app, set_scenario_service
+
+        svc = ScenarioService()
+        # pool_size=1 => delay = max(0.1, 1.0/1) = 1.0s; use pool_size=4 for faster test
+        svc.enable("db_pool_exhaustion", {"pool_size": 4})
+        set_scenario_service(svc)
+
+        client = AsyncClient(transport=ASGITransport(app=app), base_url="http://order")
+        start = time.monotonic()
+        response = await client.post(
+            "/orders",
+            json={"item": "widget", "quantity": 1},
+            headers={"X-Trace-ID": "trace-pool", "X-Request-ID": "req-pool"},
+        )
+        elapsed_ms = (time.monotonic() - start) * 1000
+        # pool_size=4 => delay = max(0.1, 1.0/4) = 0.25s = 250ms
+        assert response.status_code == 201
+        assert elapsed_ms >= 200  # Allow small timing variance
+
+        # Reset
+        svc.reset()
+        set_scenario_service(None)
+
+    @pytest.mark.asyncio()
+    async def test_deployment_regression_returns_zero_amount(self) -> None:
+        """When deployment_regression is enabled, payment service returns amount=0."""
+        from httpx import ASGITransport, AsyncClient
+        from incidentlens_scenarios.service import ScenarioService
+        from payment_service.main import app, set_scenario_service
+
+        svc = ScenarioService()
+        svc.enable("deployment_regression", {"version": "v2.0.0-buggy"})
+        set_scenario_service(svc)
+
+        client = AsyncClient(transport=ASGITransport(app=app), base_url="http://payment")
+        response = await client.post(
+            "/charge",
+            json={"amount": 500, "currency": "USD"},
+            headers={"X-Trace-ID": "trace-regression", "X-Request-ID": "req-regression"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["amount"] == 0  # Buggy deployment returns zero amount
 
         # Reset
         svc.reset()

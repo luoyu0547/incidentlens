@@ -63,5 +63,12 @@ class ScenarioService:
         return name in self._active
 
     def get_params(self, name: str) -> dict[str, Any] | None:
-        """Get parameters for an active scenario, or None if not active."""
-        return self._active.get(name)
+        """Get parameters for an active scenario, or None if not active.
+
+        Root cause labels are NOT included in the returned dict
+        (defense-in-depth, consistent with active_for()).
+        """
+        params = self._active.get(name)
+        if params is None:
+            return None
+        return {k: v for k, v in params.items() if k != "root_cause_label"}

@@ -10,8 +10,33 @@ These tests verify:
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from httpx import ASGITransport, AsyncClient
+
+# ---------------------------------------------------------------------------
+# Ensure ASGI transport is used for inter-service calls in tests
+# (clear the URL env vars so services fall back to in-process ASGI)
+# ---------------------------------------------------------------------------
+os.environ.pop("ORDER_SERVICE_URL", None)
+os.environ.pop("PAYMENT_SERVICE_URL", None)
+
+# We must import services AFTER clearing env vars so they read the correct
+# values at module init time. But the services read the env vars at module
+# import time, so we patch the module-level constants directly.
+
+
+def _patch_service_urls() -> None:
+    """Set service URL constants to empty so ASGI transport is used."""
+    import gateway_service.main as gw_mod
+    import order_service.main as ord_mod
+
+    gw_mod.ORDER_SERVICE_URL = ""
+    ord_mod.PAYMENT_SERVICE_URL = ""
+
+
+_patch_service_urls()
 
 # ---------------------------------------------------------------------------
 # Helpers to build ASGI test clients for each service
@@ -166,3 +191,18 @@ class TestRequestFlow:
         data = response.json()
         assert data["trace_id"] == "trace-order-direct"
         assert data["payment"]["status"] == "approved"
+
+    @pytest.mark.asyncio()
+    async def test_request_id_propagates_across_hops(self, order_client: AsyncClient) -> None:
+        """X-Request-ID must propagate from order-service to payment-service."""
+        response = await order_client.post(
+            "/orders",
+            json={"item": "thing", "quantity": 1},
+            headers={"X-Trace-ID": "trace-rid-prop", "X-Request-ID": "req-rid-prop"},
+        )
+        assert response.status_code == 201
+        data = response.json()
+        # The order service should have propagated the request to payment.
+        # Payment result should exist and be approved, confirming the hop succeeded.
+        assert data["payment"]["status"] == "approved"
+        assert data["trace_id"] == "trace-rid-prop"

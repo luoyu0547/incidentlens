@@ -8,10 +8,12 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import random
 import uuid
 from typing import Any
 
 from fastapi import FastAPI, Header
+from fastapi.responses import JSONResponse
 from incidentlens_service_common.context import extract_context
 from incidentlens_service_common.telemetry_client import TelemetryClient
 from pydantic import BaseModel
@@ -78,13 +80,9 @@ async def charge(
         # payment_error_rate: return 500 at configured rate
         params = _scenario_service.get_params("payment_error_rate")
         if params is not None:
-            import random
-
             error_rate = params.get("error_rate", 0.3)
             if random.random() < error_rate:
                 _telemetry.emit_log(trace_id, "ERROR", "Payment failed due to injected error rate")
-                from fastapi.responses import JSONResponse
-
                 return JSONResponse(
                     status_code=500,
                     content={"detail": "payment processing error", "trace_id": trace_id},

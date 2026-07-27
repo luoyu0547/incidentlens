@@ -7,11 +7,14 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
+import os
 import uuid
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, Header
+from fastapi.responses import JSONResponse
 from incidentlens_service_common.context import extract_context, propagate_headers
 from incidentlens_service_common.telemetry_client import TelemetryClient
 from pydantic import BaseModel
@@ -20,8 +23,8 @@ app = FastAPI(title="Order Service", version="0.1.0")
 
 _telemetry = TelemetryClient("order-service")
 
-# Payment service URL (configurable, defaults to localhost)
-PAYMENT_SERVICE_URL = "http://localhost:8002"
+# Payment service URL (configurable via env var, defaults to localhost)
+PAYMENT_SERVICE_URL = os.environ.get("PAYMENT_SERVICE_URL", "http://localhost:8002")
 
 # Module-level scenario service reference (set via set_scenario_service)
 _scenario_service: Any | None = None
@@ -77,9 +80,9 @@ async def create_order(
         params = _scenario_service.get_params("db_pool_exhaustion")
         if params is not None:
             _telemetry.emit_log(trace_id, "WARN", "DB pool exhausted, simulating slow query")
-            import asyncio
-
-            await asyncio.sleep(0.5)  # Simulate slow DB
+            pool_size = params.get("pool_size", 2)
+            delay = max(0.1, 1.0 / pool_size)
+            await asyncio.sleep(delay)
 
         # dependency_unavailable: return 502 without calling payment
         params = _scenario_service.get_params("dependency_unavailable")
@@ -87,8 +90,6 @@ async def create_order(
             _telemetry.emit_log(
                 trace_id, "ERROR", f"Dependency unavailable: {params.get('dependency', 'unknown')}"
             )
-            from fastapi.responses import JSONResponse
-
             return JSONResponse(
                 status_code=502,
                 content={
@@ -135,13 +136,18 @@ async def _call_payment_service(
 ) -> dict[str, Any]:
     """Call the payment service to process a charge.
 
-    In test mode, uses the ASGI app directly via httpx.
-    In production, makes an HTTP call to the payment service URL.
+    When PAYMENT_SERVICE_URL env var is set (non-empty), uses real HTTP
+    transport to that URL — suitable for production / Docker deployment.
+    Otherwise falls back to ASGI transport for fast in-process testing.
     """
-    from payment_service.main import app as payment_app
+    if PAYMENT_SERVICE_URL:
+        async with httpx.AsyncClient(base_url=PAYMENT_SERVICE_URL) as client:
+            response = await client.post("/charge", json=data, headers=headers)
+            return response.json()
+    else:
+        from payment_service.main import app as payment_app
 
-    # Use ASGI transport for in-process testing
-    transport = httpx.ASGITransport(app=payment_app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://payment") as client:
-        response = await client.post("/charge", json=data, headers=headers)
-        return response.json()
+        transport = httpx.ASGITransport(app=payment_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://payment") as client:
+            response = await client.post("/charge", json=data, headers=headers)
+            return response.json()

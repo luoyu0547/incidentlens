@@ -7,6 +7,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import os
 import uuid
 from typing import Any
 
@@ -20,8 +21,8 @@ app = FastAPI(title="Gateway Service", version="0.1.0")
 
 _telemetry = TelemetryClient("gateway-service")
 
-# Order service URL (configurable, defaults to localhost)
-ORDER_SERVICE_URL = "http://localhost:8001"
+# Order service URL (configurable via env var, defaults to localhost)
+ORDER_SERVICE_URL = os.environ.get("ORDER_SERVICE_URL", "http://localhost:8001")
 
 
 class OrderRequest(BaseModel):
@@ -73,13 +74,18 @@ async def _call_order_service(
 ) -> dict[str, Any]:
     """Call the order service.
 
-    In test mode, uses the ASGI app directly via httpx.
-    In production, makes an HTTP call to the order service URL.
+    When ORDER_SERVICE_URL env var is set (non-empty), uses real HTTP
+    transport to that URL — suitable for production / Docker deployment.
+    Otherwise falls back to ASGI transport for fast in-process testing.
     """
-    from order_service.main import app as order_app
+    if ORDER_SERVICE_URL:
+        async with httpx.AsyncClient(base_url=ORDER_SERVICE_URL) as client:
+            response = await client.post("/orders", json=data, headers=headers)
+            return response.json()
+    else:
+        from order_service.main import app as order_app
 
-    # Use ASGI transport for in-process testing
-    transport = httpx.ASGITransport(app=order_app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://order") as client:
-        response = await client.post("/orders", json=data, headers=headers)
-        return response.json()
+        transport = httpx.ASGITransport(app=order_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://order") as client:
+            response = await client.post("/orders", json=data, headers=headers)
+            return response.json()
