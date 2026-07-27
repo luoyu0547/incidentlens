@@ -18,7 +18,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, AsyncIterator
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 def _json_default(obj: Any) -> Any:
@@ -37,7 +37,7 @@ class SSEEvent(BaseModel):
     """
 
     event_type: str
-    data: dict[str, Any] = {}
+    data: dict[str, Any] = Field(default_factory=dict)
 
     def to_sse_message(self) -> str:
         """Format as SSE message: event: type\\ndata: json\\n\\n"""
@@ -65,10 +65,12 @@ class EventBus:
         """Subscribe to events for the given incident_id.
 
         Returns an async iterator that yields SSE-formatted strings.
+        The returned object has a ``_queue`` attribute so that
+        ``unsubscribe()`` can identify which queue to remove.
         """
         queue: asyncio.Queue[str] = asyncio.Queue()
         self._subscribers[incident_id].append(queue)
-        return _queue_iterator(queue)
+        return _QueueIteratorWrapper(queue)
 
     def unsubscribe(self, incident_id: str, iterator: AsyncIterator[str]) -> None:
         """Remove a subscriber's queue from the event bus."""
@@ -87,12 +89,24 @@ class EventBus:
                 del self._subscribers[incident_id]
 
 
-async def _queue_iterator(queue: asyncio.Queue[str]) -> AsyncIterator[str]:
-    """Async iterator that yields items from an asyncio.Queue."""
-    while True:
-        item = await queue.get()
-        yield item
-        queue.task_done()
+class _QueueIteratorWrapper:
+    """Wraps an asyncio.Queue as an async iterator with a ``_queue`` attribute.
+
+    The ``_queue`` attribute allows ``EventBus.unsubscribe()`` to identify
+    which queue to remove from the subscriber list, instead of clearing all
+    subscribers for an incident.
+    """
+
+    def __init__(self, queue: asyncio.Queue[str]) -> None:
+        self._queue = queue
+
+    def __aiter__(self) -> AsyncIterator[str]:
+        return self
+
+    async def __anext__(self) -> str:
+        item = await self._queue.get()
+        self._queue.task_done()
+        return item
 
 
 # Global event bus instance — shared across the application

@@ -92,6 +92,11 @@ class InvestigationEngine:
         """Public access to the checkpoint store for testing."""
         return self._checkpoint_store
 
+    @property
+    def audit_store(self) -> InvestigationAuditStore:
+        """Public access to the audit store for querying tool calls."""
+        return self._audit_store
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------

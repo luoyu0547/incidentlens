@@ -13,18 +13,29 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
-from incidentlens_control_plane.events import SSEEvent, _global_bus
+from incidentlens_control_plane.events import SSEEvent, EventBus
 
 router = APIRouter(prefix="/api/investigations", tags=["investigations"])
 
-# Engine is set by main.py during app startup
+# Engine and event bus are set by main.py during app startup
 _engine: Any = None
+_event_bus: EventBus | None = None
+
+# Track which tool_call audit entries have already been published as SSE events
+# to avoid duplicates when run_round is called multiple times.
+_published_tool_call_ids: set[int] = set()
 
 
 def set_engine(engine: Any) -> None:
     """Set the investigation engine for the routes."""
     global _engine
     _engine = engine
+
+
+def set_event_bus(bus: EventBus) -> None:
+    """Set the event bus for publishing SSE events."""
+    global _event_bus
+    _event_bus = bus
 
 
 # ---------------------------------------------------------------------------
@@ -83,14 +94,15 @@ async def start_investigation(
     state = _engine.start(alert)
 
     # Publish SSE event for the initial state
-    _global_bus.publish(state.incident_id, SSEEvent(
-        event_type="state_changed",
-        data={
-            "status": state.status.value if hasattr(state.status, "value") else str(state.status),
-            "round": state.current_round,
-            "phase": state.phase,
-        },
-    ))
+    if _event_bus is not None:
+        _event_bus.publish(state.incident_id, SSEEvent(
+            event_type="state_changed",
+            data={
+                "status": state.status.value if hasattr(state.status, "value") else str(state.status),
+                "round": state.current_round,
+                "phase": state.phase,
+            },
+        ))
 
     return InvestigationStateResponse(
         incident_id=state.incident_id,
@@ -122,19 +134,38 @@ async def run_round(incident_id: str) -> InvestigationStateResponse:
         )
 
     # Publish SSE events for the state change
-    _global_bus.publish(incident_id, SSEEvent(
-        event_type="state_changed",
-        data={
-            "status": state.status.value if hasattr(state.status, "value") else str(state.status),
-            "round": state.current_round,
-            "phase": state.phase,
-        },
-    ))
+    if _event_bus is not None:
+        _event_bus.publish(incident_id, SSEEvent(
+            event_type="state_changed",
+            data={
+                "status": state.status.value if hasattr(state.status, "value") else str(state.status),
+                "round": state.current_round,
+                "phase": state.phase,
+            },
+        ))
+
+    # Publish tool_called events for any new tool calls in this round
+    if _event_bus is not None and _engine is not None:
+        tool_call_entries = _engine.audit_store.list_for_incident(
+            incident_id, action="tool_call"
+        )
+        for entry in tool_call_entries:
+            if entry["id"] not in _published_tool_call_ids:
+                _published_tool_call_ids.add(entry["id"])
+                details = entry.get("details", {})
+                _event_bus.publish(incident_id, SSEEvent(
+                    event_type="tool_called",
+                    data={
+                        "tool": details.get("tool", "unknown"),
+                        "args": details.get("args", {}),
+                        "ok": details.get("ok", False),
+                    },
+                ))
 
     # Publish evidence_recorded events for new evidence
-    if state.evidence:
+    if state.evidence and _event_bus is not None:
         latest_evidence = state.evidence[-1]
-        _global_bus.publish(incident_id, SSEEvent(
+        _event_bus.publish(incident_id, SSEEvent(
             event_type="evidence_recorded",
             data={
                 "source_tool": latest_evidence.source_tool,
@@ -144,11 +175,12 @@ async def run_round(incident_id: str) -> InvestigationStateResponse:
 
     # Publish report_ready if applicable
     if (
-        (state.status.value if hasattr(state.status, "value") else str(state.status))
+        _event_bus is not None
+        and (state.status.value if hasattr(state.status, "value") else str(state.status))
         == "report_ready"
         and state.report
     ):
-        _global_bus.publish(incident_id, SSEEvent(
+        _event_bus.publish(incident_id, SSEEvent(
             event_type="report_ready",
             data=state.report,
         ))

@@ -285,6 +285,30 @@ class InvestigationAuditStore:
             session.add(row)
             session.commit()
 
+    def list_for_incident(
+        self, incident_id: str, action: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return audit entries for an incident, optionally filtered by action.
+
+        Returns a list of dicts with keys: id, incident_id, action, details.
+        """
+        with Session(self._engine) as session:
+            query = session.query(InvestigationAuditRow).filter_by(
+                incident_id=incident_id
+            )
+            if action is not None:
+                query = query.filter_by(action=action)
+            rows = query.order_by(InvestigationAuditRow.id).all()
+            return [
+                {
+                    "id": row.id,
+                    "incident_id": row.incident_id,
+                    "action": row.action,
+                    "details": json.loads(row.details_json) if row.details_json else {},
+                }
+                for row in rows
+            ]
+
 
 # ---------------------------------------------------------------------------
 # State machine phase definitions

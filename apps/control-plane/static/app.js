@@ -10,6 +10,17 @@ const API_BASE = window.location.origin;
 let eventSource = null;
 let incidentId = null;
 
+// ---- HTML escaping to prevent XSS ----
+function escapeHtml(str) {
+    if (typeof str !== 'string') return str;
+    return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 // ---- DOM references ----
 const startForm = document.getElementById('start-form');
 const alertStatus = document.getElementById('alert-status');
@@ -136,8 +147,8 @@ function addTimelineEntry(eventType, data) {
     const entry = document.createElement('div');
     entry.className = `timeline-entry ${eventType}`;
     entry.innerHTML = `
-        <div class="event-type">${eventType.replace('_', ' ')}</div>
-        <div class="event-data">${formatEventData(eventType, data)}</div>
+        <div class="event-type">${escapeHtml(eventType.replace('_', ' '))}</div>
+        <div class="event-data">${escapeHtml(formatEventData(eventType, data))}</div>
     `;
     timeline.appendChild(entry);
     timeline.scrollTop = timeline.scrollHeight;
@@ -161,33 +172,35 @@ function formatEventData(eventType, data) {
 function updateStatus(data) {
     if (data.status) {
         const statusEl = document.createElement('div');
-        statusEl.className = `status-badge ${data.status}`;
+        statusEl.className = `status-badge ${escapeHtml(data.status)}`;
         statusEl.textContent = data.status.replace('_', ' ');
+        alertStatus.textContent = '';
+        alertStatus.appendChild(statusEl);
     }
 }
 
 function addToolEntry(data) {
     const entry = document.createElement('div');
     entry.className = 'tool-entry';
-    entry.innerHTML = `<span class="tool-name">${data.tool || 'unknown'}</span> — ${JSON.stringify(data.args || {})}`;
+    entry.innerHTML = `<span class="tool-name">${escapeHtml(data.tool || 'unknown')}</span> — ${escapeHtml(JSON.stringify(data.args || {}))}`;
     toolSummary.appendChild(entry);
 }
 
 function addEvidenceEntry(data) {
     const entry = document.createElement('div');
     entry.className = 'evidence-entry';
-    entry.innerHTML = `<span class="evidence-source">${data.source_tool || 'unknown'}</span>: ${JSON.stringify(data.content || {}).substring(0, 150)}`;
+    entry.innerHTML = `<span class="evidence-source">${escapeHtml(data.source_tool || 'unknown')}</span>: ${escapeHtml(JSON.stringify(data.content || {}).substring(0, 150))}`;
     evidenceEl.appendChild(entry);
 }
 
 function renderReport(data) {
     reportEl.innerHTML = `
-        <div class="root-cause">${data.root_cause || 'No root cause identified'}</div>
+        <div class="root-cause">${escapeHtml(data.root_cause || 'No root cause identified')}</div>
         <div class="findings">
             <h3>Findings</h3>
             ${(data.findings || []).map(f => `
                 <div class="finding">
-                    <strong>${f.source_tool || 'Tool'}</strong>: ${JSON.stringify(f.content || {}).substring(0, 200)}
+                    <strong>${escapeHtml(f.source_tool || 'Tool')}</strong>: ${escapeHtml(JSON.stringify(f.content || {}).substring(0, 200))}
                 </div>
             `).join('')}
         </div>

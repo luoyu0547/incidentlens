@@ -9,6 +9,7 @@ Event types: state_changed, tool_called, evidence_recorded, report_ready
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -16,6 +17,8 @@ from fastapi.responses import JSONResponse, Response
 from sse_starlette.sse import EventSourceResponse
 
 from incidentlens_control_plane.events import EventBus
+
+logger = logging.getLogger("incidentlens_control_plane.events")
 
 router = APIRouter(prefix="/api/investigations", tags=["events"])
 
@@ -50,16 +53,16 @@ async def _event_generator(
             except asyncio.TimeoutError:
                 # Send heartbeat comment to keep connection alive
                 yield ": heartbeat\n\n"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"SSE event stream error: {e}")
     finally:
         bus.unsubscribe(incident_id, subscriber)
 
 
-@router.get("/{incident_id}/events")
+@router.get("/{incident_id}/events", response_model=None)
 async def investigation_events(
     incident_id: str, request: Request
-) -> Response:
+) -> EventSourceResponse | JSONResponse:
     """Stream SSE events for a specific investigation.
 
     Event types: state_changed, tool_called, evidence_recorded, report_ready
