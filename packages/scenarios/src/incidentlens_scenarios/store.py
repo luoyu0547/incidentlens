@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import Engine, String, Text, select
+from sqlalchemy import Engine, String, Text, delete, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from incidentlens_scenarios.models import SCENARIOS
@@ -150,7 +150,7 @@ class ScenarioStore:
     def reset(self) -> None:
         """Clear all active faults."""
         with Session(self._engine) as session:
-            session.query(ActiveScenarioRow).delete()
+            session.execute(delete(ActiveScenarioRow))
             session.commit()
 
     def runtime_for(self, service: str) -> dict[str, dict[str, Any]]:
