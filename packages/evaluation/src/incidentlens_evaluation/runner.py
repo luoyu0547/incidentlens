@@ -13,23 +13,22 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from incidentlens_contracts.models import TelemetryEvent
+from incidentlens_control_plane.agent.engine import InvestigationEngine
+from incidentlens_control_plane.memory.repository import CaseRepository
+from incidentlens_control_plane.tools.query import ReadOnlyToolkit
+from incidentlens_scenarios.models import SCENARIOS
+from incidentlens_telemetry.database import create_engine
+from incidentlens_telemetry.repository import TelemetryRepository
+
 from incidentlens_evaluation.metrics import (
     EvaluationResult,
     RunRecord,
     compute_metrics,
 )
-from incidentlens_scenarios.models import SCENARIOS
-from incidentlens_telemetry.database import create_engine
-from incidentlens_telemetry.repository import TelemetryRepository
-
-from datetime import datetime, timezone
-
-from incidentlens_control_plane.agent.engine import InvestigationEngine
-from incidentlens_control_plane.memory.repository import CaseRepository
-from incidentlens_control_plane.tools.query import ReadOnlyToolkit
 
 
 def _create_engine_components(

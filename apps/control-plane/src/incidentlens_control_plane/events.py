@@ -15,9 +15,17 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
+from datetime import datetime
 from typing import Any, AsyncIterator
 
 from pydantic import BaseModel
+
+
+def _json_default(obj: Any) -> Any:
+    """Fallback JSON serializer for non-standard types like datetime."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
 class SSEEvent(BaseModel):
@@ -33,7 +41,7 @@ class SSEEvent(BaseModel):
 
     def to_sse_message(self) -> str:
         """Format as SSE message: event: type\\ndata: json\\n\\n"""
-        return f"event: {self.event_type}\ndata: {json.dumps(self.data)}\n\n"
+        return f"event: {self.event_type}\ndata: {json.dumps(self.data, default=_json_default)}\n\n"
 
 
 class EventBus:

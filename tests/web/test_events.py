@@ -107,7 +107,7 @@ class TestSSEEndpoint:
         Verify the endpoint is wired correctly by checking it returns 200
         and the event bus publishes events that reach subscribers.
         """
-        from incidentlens_control_plane.events import _global_bus, SSEEvent
+        from incidentlens_control_plane.events import SSEEvent, _global_bus
 
         incident_id = "sse-test-incident"
 

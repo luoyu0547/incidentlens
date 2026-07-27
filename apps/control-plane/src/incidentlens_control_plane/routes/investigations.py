@@ -13,6 +13,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
+from incidentlens_control_plane.events import SSEEvent, _global_bus
+
 router = APIRouter(prefix="/api/investigations", tags=["investigations"])
 
 # Engine is set by main.py during app startup
@@ -80,6 +82,16 @@ async def start_investigation(
 
     state = _engine.start(alert)
 
+    # Publish SSE event for the initial state
+    _global_bus.publish(state.incident_id, SSEEvent(
+        event_type="state_changed",
+        data={
+            "status": state.status.value if hasattr(state.status, "value") else str(state.status),
+            "round": state.current_round,
+            "phase": state.phase,
+        },
+    ))
+
     return InvestigationStateResponse(
         incident_id=state.incident_id,
         status=state.status.value,
@@ -108,6 +120,38 @@ async def run_round(incident_id: str) -> InvestigationStateResponse:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         )
+
+    # Publish SSE events for the state change
+    _global_bus.publish(incident_id, SSEEvent(
+        event_type="state_changed",
+        data={
+            "status": state.status.value if hasattr(state.status, "value") else str(state.status),
+            "round": state.current_round,
+            "phase": state.phase,
+        },
+    ))
+
+    # Publish evidence_recorded events for new evidence
+    if state.evidence:
+        latest_evidence = state.evidence[-1]
+        _global_bus.publish(incident_id, SSEEvent(
+            event_type="evidence_recorded",
+            data={
+                "source_tool": latest_evidence.source_tool,
+                "content": latest_evidence.content,
+            },
+        ))
+
+    # Publish report_ready if applicable
+    if (
+        (state.status.value if hasattr(state.status, "value") else str(state.status))
+        == "report_ready"
+        and state.report
+    ):
+        _global_bus.publish(incident_id, SSEEvent(
+            event_type="report_ready",
+            data=state.report,
+        ))
 
     return InvestigationStateResponse(
         incident_id=state.incident_id,

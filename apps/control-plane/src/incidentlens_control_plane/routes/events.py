@@ -12,9 +12,10 @@ import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse, Response
 from sse_starlette.sse import EventSourceResponse
 
-from incidentlens_control_plane.events import EventBus, SSEEvent
+from incidentlens_control_plane.events import EventBus
 
 router = APIRouter(prefix="/api/investigations", tags=["events"])
 
@@ -58,14 +59,12 @@ async def _event_generator(
 @router.get("/{incident_id}/events")
 async def investigation_events(
     incident_id: str, request: Request
-) -> EventSourceResponse:
+) -> Response:
     """Stream SSE events for a specific investigation.
 
     Event types: state_changed, tool_called, evidence_recorded, report_ready
     """
     if _event_bus is None:
-        from fastapi.responses import JSONResponse
-
         return JSONResponse(
             status_code=503,
             content={"detail": "Event bus not configured"},

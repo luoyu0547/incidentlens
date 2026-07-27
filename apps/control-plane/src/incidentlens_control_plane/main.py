@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import pathlib
 
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
@@ -90,8 +91,6 @@ app.include_router(cases_router)
 app.include_router(events_router)
 
 # Mount static dashboard files
-import pathlib
-
 _static_dir = pathlib.Path(__file__).parent.parent.parent.parent / "static"
 if _static_dir.is_dir():
     app.mount("/", StaticFiles(directory=str(_static_dir), html=True), name="static")

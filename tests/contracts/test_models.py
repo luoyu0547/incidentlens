@@ -3,8 +3,6 @@
 from datetime import datetime, timezone
 
 import pytest
-from pydantic import ValidationError
-
 from incidentlens_contracts.models import (
     Evidence,
     Hypothesis,
@@ -13,6 +11,7 @@ from incidentlens_contracts.models import (
     TelemetryEvent,
     ToolResult,
 )
+from pydantic import ValidationError
 
 
 def now_utc() -> datetime:

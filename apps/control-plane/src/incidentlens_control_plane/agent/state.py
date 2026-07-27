@@ -23,7 +23,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
-
 # ---------------------------------------------------------------------------
 # ORM Base for investigation tables
 # ---------------------------------------------------------------------------

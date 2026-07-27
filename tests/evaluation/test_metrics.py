@@ -46,7 +46,7 @@ def test_metrics_use_records_not_fixed_scores() -> None:
 
 def test_compute_metrics_empty_records() -> None:
     """compute_metrics with empty records should return zeroed result."""
-    from incidentlens_evaluation.metrics import EvaluationResult, compute_metrics
+    from incidentlens_evaluation.metrics import compute_metrics
 
     result = compute_metrics([])
     assert result.root_service_accuracy == 0.0
