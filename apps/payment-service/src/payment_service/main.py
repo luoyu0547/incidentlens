@@ -8,6 +8,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import uuid
 from typing import Any
@@ -15,6 +16,7 @@ from typing import Any
 from fastapi import FastAPI, Header
 from fastapi.responses import JSONResponse
 from incidentlens_service_common.context import extract_context
+from incidentlens_service_common.runtime_client import RuntimeConfigClient
 from incidentlens_service_common.telemetry_client import TelemetryClient
 from pydantic import BaseModel
 
@@ -22,14 +24,45 @@ app = FastAPI(title="Payment Service", version="0.1.0")
 
 _telemetry = TelemetryClient("payment-service")
 
-# Module-level scenario service reference (set via set_scenario_service)
+# Control plane URL for runtime config (set in Compose mode)
+CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL", "")
+
+# Module-level scenario service reference (set via set_scenario_service for in-process tests)
 _scenario_service: Any | None = None
+
+# Runtime config client (created when CONTROL_PLANE_URL is set)
+_runtime_client: RuntimeConfigClient | None = None
 
 
 def set_scenario_service(svc: Any) -> None:
     """Set the scenario service for fault injection (used by tests)."""
     global _scenario_service
     _scenario_service = svc
+
+
+def _get_runtime_client() -> RuntimeConfigClient | None:
+    """Get or create the runtime config client (Compose mode only)."""
+    global _runtime_client
+    if not CONTROL_PLANE_URL:
+        return None
+    if _runtime_client is None:
+        _runtime_client = RuntimeConfigClient(CONTROL_PLANE_URL, "payment-service")
+    return _runtime_client
+
+
+async def _get_active_scenarios() -> dict[str, dict[str, Any]]:
+    """Get active scenarios for this service.
+
+    In Compose mode (CONTROL_PLANE_URL set), fetches from the control plane.
+    In test mode (_scenario_service set), uses the in-process ScenarioService.
+    Returns empty dict if neither is available.
+    """
+    if _scenario_service is not None:
+        return _scenario_service.active_for("payment-service")
+    client = _get_runtime_client()
+    if client is not None:
+        return await client.get_active()
+    return {}
 
 
 class ChargeRequest(BaseModel):
@@ -69,39 +102,43 @@ async def charge(
     _telemetry.emit_span(trace_id, span_id, "POST /charge")
     _telemetry.emit_log(trace_id, "INFO", f"Processing charge: {body.amount} {body.currency}")
 
+    # Fetch active scenarios (from control plane or in-process service)
+    active = await _get_active_scenarios()
+
     # Apply fault scenarios
-    if _scenario_service is not None:
-        # payment_delay: add real delay
-        params = _scenario_service.get_params("payment_delay")
-        if params is not None:
-            delay_ms = params.get("delay_ms", 200)
-            await asyncio.sleep(delay_ms / 1000.0)
+    # payment_delay: add real delay
+    params = active.get("payment_delay")
+    if params is not None:
+        delay_ms = params.get("delay_ms", 200)
+        await asyncio.sleep(delay_ms / 1000.0)
 
-        # payment_error_rate: return 500 at configured rate
-        params = _scenario_service.get_params("payment_error_rate")
-        if params is not None:
-            error_rate = params.get("error_rate", 0.3)
-            if random.random() < error_rate:
-                _telemetry.emit_log(trace_id, "ERROR", "Payment failed due to injected error rate")
-                return JSONResponse(
-                    status_code=500,
-                    content={"detail": "payment processing error", "trace_id": trace_id},
-                )
+    # payment_error_rate: return 500 at configured rate
+    params = active.get("payment_error_rate")
+    if params is not None:
+        error_rate = params.get("error_rate", 0.3)
+        if random.random() < error_rate:
+            err_event = _telemetry.emit_log(trace_id, "ERROR", "Payment failed due to injected error rate")
+            # Await telemetry delivery on error path to ensure it reaches the control plane
+            await _telemetry._post_event(err_event)
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "payment processing error", "trace_id": trace_id},
+            )
 
-        # deployment_regression: simulate buggy deployment
-        params = _scenario_service.get_params("deployment_regression")
-        if params is not None:
-            _telemetry.emit_log(
-                trace_id, "WARN", f"Running buggy version: {params.get('version', 'unknown')}"
-            )
-            # Buggy deployment returns wrong amounts
-            return ChargeResponse(
-                charge_id=f"chg-{uuid.uuid4().hex[:8]}",
-                status="approved",
-                trace_id=trace_id,
-                amount=0,  # Bug: amount is zero
-                currency=body.currency,
-            )
+    # deployment_regression: simulate buggy deployment
+    params = active.get("deployment_regression")
+    if params is not None:
+        _telemetry.emit_log(
+            trace_id, "WARN", f"Running buggy version: {params.get('version', 'unknown')}"
+        )
+        # Buggy deployment returns wrong amounts
+        return ChargeResponse(
+            charge_id=f"chg-{uuid.uuid4().hex[:8]}",
+            status="approved",
+            trace_id=trace_id,
+            amount=0,  # Bug: amount is zero
+            currency=body.currency,
+        )
 
     _telemetry.emit_metric(trace_id, "charge_amount", float(body.amount))
     _telemetry.emit_log(trace_id, "INFO", f"Charge approved: {body.amount} {body.currency}")

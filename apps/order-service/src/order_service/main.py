@@ -16,6 +16,7 @@ import httpx
 from fastapi import FastAPI, Header
 from fastapi.responses import JSONResponse
 from incidentlens_service_common.context import extract_context, propagate_headers
+from incidentlens_service_common.runtime_client import RuntimeConfigClient
 from incidentlens_service_common.telemetry_client import TelemetryClient
 from pydantic import BaseModel
 
@@ -26,14 +27,45 @@ _telemetry = TelemetryClient("order-service")
 # Payment service URL (configurable via env var, defaults to localhost)
 PAYMENT_SERVICE_URL = os.environ.get("PAYMENT_SERVICE_URL", "http://localhost:8002")
 
-# Module-level scenario service reference (set via set_scenario_service)
+# Control plane URL for runtime config (set in Compose mode)
+CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL", "")
+
+# Module-level scenario service reference (set via set_scenario_service for in-process tests)
 _scenario_service: Any | None = None
+
+# Runtime config client (created when CONTROL_PLANE_URL is set)
+_runtime_client: RuntimeConfigClient | None = None
 
 
 def set_scenario_service(svc: Any) -> None:
     """Set the scenario service for fault injection (used by tests)."""
     global _scenario_service
     _scenario_service = svc
+
+
+def _get_runtime_client() -> RuntimeConfigClient | None:
+    """Get or create the runtime config client (Compose mode only)."""
+    global _runtime_client
+    if not CONTROL_PLANE_URL:
+        return None
+    if _runtime_client is None:
+        _runtime_client = RuntimeConfigClient(CONTROL_PLANE_URL, "order-service")
+    return _runtime_client
+
+
+async def _get_active_scenarios() -> dict[str, dict[str, Any]]:
+    """Get active scenarios for this service.
+
+    In Compose mode (CONTROL_PLANE_URL set), fetches from the control plane.
+    In test mode (_scenario_service set), uses the in-process ScenarioService.
+    Returns empty dict if neither is available.
+    """
+    if _scenario_service is not None:
+        return _scenario_service.active_for("order-service")
+    client = _get_runtime_client()
+    if client is not None:
+        return await client.get_active()
+    return {}
 
 
 class OrderRequest(BaseModel):
@@ -74,29 +106,33 @@ async def create_order(
     _telemetry.emit_span(trace_id, span_id, "POST /orders")
     _telemetry.emit_log(trace_id, "INFO", f"Creating order: {body.item} x{body.quantity}")
 
-    # Apply fault scenarios
-    if _scenario_service is not None:
-        # db_pool_exhaustion: simulate connection pool exhaustion
-        params = _scenario_service.get_params("db_pool_exhaustion")
-        if params is not None:
-            _telemetry.emit_log(trace_id, "WARN", "DB pool exhausted, simulating slow query")
-            pool_size = params.get("pool_size", 2)
-            delay = max(0.1, 1.0 / pool_size)
-            await asyncio.sleep(delay)
+    # Fetch active scenarios (from control plane or in-process service)
+    active = await _get_active_scenarios()
 
-        # dependency_unavailable: return 502 without calling payment
-        params = _scenario_service.get_params("dependency_unavailable")
-        if params is not None:
-            _telemetry.emit_log(
-                trace_id, "ERROR", f"Dependency unavailable: {params.get('dependency', 'unknown')}"
-            )
-            return JSONResponse(
-                status_code=502,
-                content={
-                    "detail": "upstream service unavailable",
-                    "trace_id": trace_id,
-                },
-            )
+    # Apply fault scenarios
+    # db_pool_exhaustion: simulate connection pool exhaustion
+    params = active.get("db_pool_exhaustion")
+    if params is not None:
+        _telemetry.emit_log(trace_id, "WARN", "DB pool exhausted, simulating slow query")
+        pool_size = params.get("pool_size", 2)
+        delay = max(0.1, 1.0 / pool_size)
+        await asyncio.sleep(delay)
+
+    # dependency_unavailable: return 502 without calling payment
+    params = active.get("dependency_unavailable")
+    if params is not None:
+        err_event = _telemetry.emit_log(
+            trace_id, "ERROR", f"Dependency unavailable: {params.get('dependency', 'unknown')}"
+        )
+        # Await telemetry delivery on error path
+        await _telemetry._post_event(err_event)
+        return JSONResponse(
+            status_code=502,
+            content={
+                "detail": "upstream service unavailable",
+                "trace_id": trace_id,
+            },
+        )
 
     # Call payment service
     order_id = f"ord-{uuid.uuid4().hex[:8]}"

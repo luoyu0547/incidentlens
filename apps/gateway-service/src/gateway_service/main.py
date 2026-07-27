@@ -24,6 +24,9 @@ _telemetry = TelemetryClient("gateway-service")
 # Order service URL (configurable via env var, defaults to localhost)
 ORDER_SERVICE_URL = os.environ.get("ORDER_SERVICE_URL", "http://localhost:8001")
 
+# Control plane URL for runtime config (set in Compose mode)
+CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL", "")
+
 
 class OrderRequest(BaseModel):
     item: str
