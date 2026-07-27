@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IncidentLens Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header>
+        <h1>IncidentLens</h1>
+        <p class="subtitle">Evidence-Driven Incident Investigation</p>
+    </header>
+
+    <main>
+        <!-- Alert / Injection Panel -->
+        <section id="alert-panel" class="panel">
+            <h2>Alert</h2>
+            <form id="start-form">
+                <label for="service">Service:</label>
+                <select id="service" name="service" required>
+                    <option value="order-service">Order Service</option>
+                    <option value="payment-service">Payment Service</option>
+                    <option value="gateway-service">Gateway Service</option>
+                </select>
+                <label for="error-rate">Error Rate:</label>
+                <input type="number" id="error-rate" name="error_rate" step="0.01" min="0" max="1" value="0.3">
+                <label for="symptom">Symptom:</label>
+                <input type="text" id="symptom" name="symptom" placeholder="e.g. high error rate">
+                <button type="submit">Start Investigation</button>
+            </form>
+            <div id="alert-status" class="status-box"></div>
+        </section>
+
+        <!-- Timeline -->
+        <section id="timeline-panel" class="panel">
+            <h2>Timeline</h2>
+            <div id="timeline" class="timeline-container"></div>
+        </section>
+
+        <!-- Hypotheses -->
+        <section id="hypotheses-panel" class="panel">
+            <h2>Hypotheses</h2>
+            <div id="hypotheses" class="hypotheses-container"></div>
+        </section>
+
+        <!-- Tool Summary -->
+        <section id="tools-panel" class="panel">
+            <h2>Tool Calls</h2>
+            <div id="tool-summary" class="tools-container"></div>
+        </section>
+
+        <!-- Evidence -->
+        <section id="evidence-panel" class="panel">
+            <h2>Evidence</h2>
+            <div id="evidence" class="evidence-container"></div>
+        </section>
+
+        <!-- Cases -->
+        <section id="cases-panel" class="panel">
+            <h2>Historical Cases</h2>
+            <div id="cases" class="cases-container"></div>
+        </section>
+
+        <!-- Report -->
+        <section id="report-panel" class="panel">
+            <h2>Investigation Report</h2>
+            <div id="report" class="report-container"></div>
+        </section>
+
+        <!-- Confirmation Feedback -->
+        <section id="confirm-panel" class="panel">
+            <h2>Confirm Findings</h2>
+            <div id="confirm-feedback" class="confirm-container">
+                <p>Confirm or reject the investigation findings.</p>
+                <button id="confirm-btn" disabled>Confirm Root Cause</button>
+                <button id="reject-btn" disabled>Reject</button>
+                <div id="confirm-status" class="status-box"></div>
+            </div>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
