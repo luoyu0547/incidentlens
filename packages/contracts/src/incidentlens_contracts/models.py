@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from enum import StrEnum
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 
 T = TypeVar("T")
 
@@ -20,6 +22,14 @@ class InvestigationStatus(StrEnum):
     NEEDS_MORE_EVIDENCE = "needs_more_evidence"
 
 
+class HypothesisStatus(StrEnum):
+    """Status of a hypothesis during investigation."""
+
+    ACTIVE = "active"
+    RULED_OUT = "ruled_out"
+    CONFIRMED = "confirmed"
+
+
 class TelemetryEvent(BaseModel):
     """A single telemetry event emitted by a service.
 
@@ -30,7 +40,7 @@ class TelemetryEvent(BaseModel):
     event_type: str
     service: str
     trace_id: str
-    occurred_at: Any  # datetime, but typed as Any for flexibility
+    occurred_at: AwareDatetime
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -75,4 +85,4 @@ class Hypothesis(BaseModel):
     confidence: float = 0.0
     supporting_evidence_ids: list[str] = Field(default_factory=list)
     contradicting_evidence_ids: list[str] = Field(default_factory=list)
-    status: str = "active"
+    status: HypothesisStatus = HypothesisStatus.ACTIVE

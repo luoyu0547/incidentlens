@@ -3,6 +3,7 @@
 from incidentlens_contracts.models import (
     Evidence,
     Hypothesis,
+    HypothesisStatus,
     InvestigationStatus,
     TelemetryEvent,
     ToolResult,
@@ -11,6 +12,7 @@ from incidentlens_contracts.models import (
 __all__ = [
     "Evidence",
     "Hypothesis",
+    "HypothesisStatus",
     "InvestigationStatus",
     "TelemetryEvent",
     "ToolResult",
