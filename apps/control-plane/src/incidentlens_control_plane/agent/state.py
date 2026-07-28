@@ -100,6 +100,15 @@ class InvestigationState(BaseModel):
     phase: str = "parse_alert"
     retrieved_cases: list[dict[str, Any]] = Field(default_factory=list)
 
+    # LangGraph agent telemetry fields
+    loaded_skill_names: list[str] = Field(default_factory=list)
+    model_profile: str = ""
+    model_call_count: int = 0
+    tool_call_count: int = 0
+    fallback_used: bool = False
+    last_error_code: str | None = None
+    last_checkpoint_id: str | None = None
+
     model_config = {"use_enum_values": False}
 
     @property
@@ -147,7 +156,11 @@ class InvestigationState(BaseModel):
 
 
 class CheckpointStore:
-    """Manages investigation state persistence via SQLAlchemy."""
+    """Deterministic-baseline compatibility checkpoint store.
+
+    Persists and loads investigation state via SQLAlchemy.
+    For LLM agent mode, prefer LangGraph's ``AsyncSqliteSaver`` instead.
+    """
 
     def __init__(self, engine: Any) -> None:
         self._engine = engine
@@ -203,7 +216,10 @@ class CheckpointStore:
             session.commit()
 
     def load(self, incident_id: str) -> InvestigationState | None:
-        """Load investigation state from the database."""
+        """Load the latest investigation checkpoint for *incident_id*.
+
+        Returns ``None`` if no checkpoint exists.
+        """
         from sqlalchemy import select
 
         with Session(self._engine) as session:
@@ -227,7 +243,7 @@ class CheckpointStore:
             retrieved_cases = json.loads(row.retrieved_cases_json)
 
             return InvestigationState(
-                incident_id=row.incident_id,
+                incident_id=incident_id,
                 status=InvestigationStatus(row.status),
                 current_round=row.current_round,
                 max_rounds=row.max_rounds,
