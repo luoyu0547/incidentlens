@@ -89,7 +89,11 @@ class TestAssessEvidencePaymentDelay:
         assert assessments[0].supports is True
 
     def test_slow_traces_payment_service_creates_payment_latency(self) -> None:
-        """Slow traces for payment-service maps to payment-service / payment_latency_spike."""
+        """Slow traces with high duration maps to payment-service / payment_latency_spike.
+
+        GetSlowTracesTool returns items with {trace_id, duration_seconds, span_count}
+        but no service field.  The assessor matches by duration threshold.
+        """
         from incidentlens_control_plane.agent.evidence_rules import assess_evidence
 
         evidence = _make_evidence(
@@ -100,7 +104,6 @@ class TestAssessEvidencePaymentDelay:
                         "trace_id": "trace-1",
                         "duration_seconds": 12.5,
                         "span_count": 3,
-                        "service": "payment-service",
                     }
                 ]
             },
@@ -270,24 +273,43 @@ class TestAssessEvidenceDeploymentRegression:
         assert assessments[0].root_cause == "bad_deployment"
 
     def test_deployment_with_errors_creates_bad_deployment(self) -> None:
-        """Deployment evidence combined with error logs maps to bad_deployment."""
+        """Deployment evidence combined with error logs produces bad_deployment for payment-service."""
         from incidentlens_control_plane.agent.evidence_rules import assess_evidence
 
-        evidence = _make_evidence(
+        # Deployment evidence with a non-buggy version (just a recent deploy)
+        deployment_evidence = _make_evidence(
             source_tool="list_recent_deployments",
             content={
                 "items": [
                     {
                         "service": "payment-service",
-                        "version": "v2.0.0-buggy",
+                        "version": "v2.0.0",
                     }
                 ]
             },
         )
-        assessments = assess_evidence(evidence)
-        assert len(assessments) > 0
-        assert assessments[0].candidate_service == "payment-service"
-        assert assessments[0].root_cause == "bad_deployment"
+        deployment_assessments = assess_evidence(deployment_evidence)
+        assert len(deployment_assessments) > 0
+        assert deployment_assessments[0].candidate_service == "payment-service"
+        assert deployment_assessments[0].root_cause == "bad_deployment"
+
+        # Error log evidence corroborates the deployment issue
+        error_evidence = _make_evidence(
+            source_tool="search_logs",
+            content={
+                "items": [
+                    {
+                        "service": "payment-service",
+                        "level": "ERROR",
+                        "message": "Payment processing delay after deployment",
+                    }
+                ]
+            },
+        )
+        error_assessments = assess_evidence(error_evidence)
+        assert len(error_assessments) > 0
+        # Both deployment and error evidence point to payment-service
+        assert error_assessments[0].candidate_service == "payment-service"
 
 
 class TestAssessEvidenceNoMatch:
@@ -415,6 +437,42 @@ class TestReportGuardNoConfirmedHypothesis:
             cause_code="payment_latency_spike",
         )
         state = _make_state(hypotheses=[hyp], evidence=[])
+        assert can_generate_report(state) is False
+
+
+class TestReportGuardNonEmptyEvidenceIds:
+    """Report guard requires non-empty supporting_evidence_ids on confirmed hypothesis."""
+
+    def test_report_rejects_empty_evidence_ids(self) -> None:
+        """Report cannot be generated if confirmed hypothesis has empty supporting_evidence_ids."""
+        hyp = Hypothesis(
+            id=str(uuid4()),
+            description="Payment service is slow",
+            confidence=0.85,
+            supporting_evidence_ids=[],
+            contradicting_evidence_ids=[],
+            status=HypothesisStatus.CONFIRMED,
+            root_service="payment-service",
+            cause_code="payment_latency_spike",
+        )
+        state = _make_state(hypotheses=[hyp], evidence=[])
+        assert can_generate_report(state) is False
+
+    def test_report_rejects_empty_evidence_ids_even_with_evidence_present(self) -> None:
+        """Report cannot be generated if confirmed hypothesis has empty evidence_ids,
+        even when the state has other evidence present."""
+        ev = _make_evidence()
+        hyp = Hypothesis(
+            id=str(uuid4()),
+            description="Payment service is slow",
+            confidence=0.85,
+            supporting_evidence_ids=[],
+            contradicting_evidence_ids=[],
+            status=HypothesisStatus.CONFIRMED,
+            root_service="payment-service",
+            cause_code="payment_latency_spike",
+        )
+        state = _make_state(hypotheses=[hyp], evidence=[ev])
         assert can_generate_report(state) is False
 
 
@@ -647,3 +705,122 @@ class TestReportUncertainty:
         assert "uncertainty" in report
         # uncertainty = 1.0 - confidence = 1.0 - 0.85 = 0.15
         assert abs(report["uncertainty"] - 0.15) < 0.01
+
+
+# ===================================================================
+# CONTRADICTS ASSESSMENTS: evidence that contradicts a hypothesis
+# ===================================================================
+
+
+class TestContradictsAssessments:
+    """Tests for contradicts=True assessments from evidence patterns."""
+
+    def test_normal_latency_metrics_contradict_payment_latency_spike(self) -> None:
+        """Normal latency metrics should contradict payment_latency_spike."""
+        from incidentlens_control_plane.agent.evidence_rules import assess_evidence
+
+        evidence = _make_evidence(
+            source_tool="query_metrics",
+            content={
+                "items": [
+                    {
+                        "service": "payment-service",
+                        "name": "latency_p99",
+                        "value": 50,
+                    }
+                ]
+            },
+        )
+        assessments = assess_evidence(evidence)
+        contradicts = [a for a in assessments if a.contradicts]
+        assert len(contradicts) > 0
+        latency_contradicts = [a for a in contradicts if a.root_cause == "payment_latency_spike"]
+        assert len(latency_contradicts) > 0
+        assert latency_contradicts[0].supports is False
+
+    def test_low_error_rate_metrics_contradict_payment_degradation(self) -> None:
+        """Low error rate metrics should contradict payment_service_degradation."""
+        from incidentlens_control_plane.agent.evidence_rules import assess_evidence
+
+        evidence = _make_evidence(
+            source_tool="query_metrics",
+            content={
+                "items": [
+                    {
+                        "service": "payment-service",
+                        "name": "error_rate",
+                        "value": 0.01,
+                    }
+                ]
+            },
+        )
+        assessments = assess_evidence(evidence)
+        contradicts = [a for a in assessments if a.contradicts]
+        assert len(contradicts) > 0
+        degradation_contradicts = [a for a in contradicts if a.root_cause == "payment_service_degradation"]
+        assert len(degradation_contradicts) > 0
+        assert degradation_contradicts[0].supports is False
+
+    def test_healthy_pool_metrics_contradict_database_connection_leak(self) -> None:
+        """Healthy pool metrics should contradict database_connection_leak."""
+        from incidentlens_control_plane.agent.evidence_rules import assess_evidence
+
+        evidence = _make_evidence(
+            source_tool="query_metrics",
+            content={
+                "items": [
+                    {
+                        "service": "order-service",
+                        "name": "db_pool_active",
+                        "value": 2,
+                    }
+                ]
+            },
+        )
+        assessments = assess_evidence(evidence)
+        contradicts = [a for a in assessments if a.contradicts]
+        assert len(contradicts) > 0
+        db_contradicts = [a for a in contradicts if a.root_cause == "database_connection_leak"]
+        assert len(db_contradicts) > 0
+        assert db_contradicts[0].supports is False
+
+    def test_normal_payment_log_contradicts_latency_spike(self) -> None:
+        """Normal payment-service logs should contradict latency spike and degradation."""
+        from incidentlens_control_plane.agent.evidence_rules import assess_evidence
+
+        evidence = _make_evidence(
+            source_tool="search_logs",
+            content={
+                "items": [
+                    {
+                        "service": "payment-service",
+                        "level": "INFO",
+                        "message": "Payment completed successfully, normal latency",
+                    }
+                ]
+            },
+        )
+        assessments = assess_evidence(evidence)
+        contradicts = [a for a in assessments if a.contradicts]
+        assert len(contradicts) >= 2  # Should contradict both latency_spike and degradation
+
+    def test_stable_deployment_contradicts_bad_deployment(self) -> None:
+        """Same version deployment should contradict bad_deployment."""
+        from incidentlens_control_plane.agent.evidence_rules import assess_evidence
+
+        evidence = _make_evidence(
+            source_tool="list_recent_deployments",
+            content={
+                "items": [
+                    {
+                        "service": "payment-service",
+                        "version": "same-as-previous",
+                    }
+                ]
+            },
+        )
+        assessments = assess_evidence(evidence)
+        contradicts = [a for a in assessments if a.contradicts]
+        assert len(contradicts) > 0
+        assert contradicts[0].root_cause == "bad_deployment"
+        assert contradicts[0].supports is False

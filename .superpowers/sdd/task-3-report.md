@@ -1,186 +1,147 @@
-# Task 3 Report: Three-Service Call Chain & Fault Scenarios
+# Task 3 Report: Evidence Rules and Guarded Root-Service Reports
 
 ## What Was Implemented
 
-### Three FastAPI Services (Call Chain: Gateway -> Order -> Payment)
+### 1. Evidence Rules Module (`evidence_rules.py`)
+- Created `EvidenceAssessment` Pydantic model with `candidate_service`, `root_cause`, `supports`, `contradicts` fields
+- Implemented `assess_evidence(evidence) -> list[EvidenceAssessment]` with deterministic pattern matching
+- Five mappings implemented:
+  - `payment_delay` -> `payment-service` / `payment_latency_spike` (via search_logs latency keywords, get_slow_traces duration, query_metrics latency values)
+  - `payment_error_rate` -> `payment-service` / `payment_service_degradation` (via search_logs error keywords, query_metrics error_rate values)
+  - `db_pool_exhaustion` -> `order-service` / `database_connection_leak` (via search_logs pool/connection keywords, query_metrics pool metrics)
+  - `dependency_unavailable` -> `order-service` / `network_partition` (via search_logs dependency/502 keywords, get_service_dependencies order->payment edges)
+  - `deployment_regression` -> `payment-service` / `bad_deployment` (via list_recent_deployments with any version for payment-service)
+- Pattern matchers are dispatched by `source_tool` to the appropriate assessor function
+- Evidence that doesn't match any pattern returns an empty list
 
-1. **Gateway Service** (`apps/gateway-service/src/gateway_service/main.py`)
-   - `POST /orders` - proxies to order-service, propagates X-Request-ID and X-Trace-ID
-   - `GET /healthz` - returns `{"status": "ok"}`
-   - Emits span, log, and metric telemetry events
+### 2. Hypothesis Model Extension (`models.py`)
+- Added `root_service: str = ""` field to `Hypothesis` model
+- Added `cause_code: str = ""` field to `Hypothesis` model
+- Both default to empty string for backward compatibility
 
-2. **Order Service** (`apps/order-service/src/order_service/main.py`)
-   - `POST /orders` - creates order, calls payment-service for charge
-   - `GET /healthz` - returns `{"status": "ok"}`
-   - Applies `db_pool_exhaustion` and `dependency_unavailable` fault scenarios
-   - Emits span, log, and metric telemetry events
+### 3. Report Guard Enhancement (`reporting.py`)
+- `can_generate_report(state)` now requires:
+  1. At least one CONFIRMED hypothesis
+  2. The confirmed hypothesis must have a non-empty `root_service`
+  3. All `supporting_evidence_ids` must be owned by the current incident (present in `state.evidence`)
+- `generate_report(state)` now returns:
+  - `root_service`: from confirmed hypothesis
+  - `root_cause`: cause_code from confirmed hypothesis (falls back to description)
+  - `evidence_ids`: supporting evidence IDs from confirmed hypothesis
+  - `findings`: evidence summaries (unchanged)
+  - `hypotheses`: all hypotheses with final status (unchanged)
+  - `rounds_completed`: round count (unchanged)
+  - `incident_id`: incident identifier (unchanged)
+  - `uncertainty`: 1.0 - confidence of primary confirmed hypothesis
 
-3. **Payment Service** (`apps/payment-service/src/payment_service/main.py`)
-   - `POST /charge` - processes payment charges
-   - `GET /healthz` - returns `{"status": "ok"}`
-   - Applies `payment_delay`, `payment_error_rate`, and `deployment_regression` fault scenarios
-   - Emits span, log, and metric telemetry events
+### 4. Engine Integration (`engine.py`)
+- Imported `assess_evidence` from `evidence_rules`
+- `_generate_hypotheses()`: sets `root_service` on initial hypotheses from alert service and `cause_code` from historical cases
+- `_update_hypotheses()`: uses `assess_evidence()` for deterministic pattern matching, creates new hypotheses when assessments don't match existing ones, merges assessments into existing hypotheses by (service, cause_code) key
+- Legacy keyword-based evidence association preserved as fallback for hypotheses without root_service/cause_code
+- Bug fix: corrected cross-reference logic (`ev.id not in ev.supports_hypothesis_ids` -> `hyp.id not in ev.supports_hypothesis_ids`)
 
-### Shared Service Common Code (`apps/shared-service/src/incidentlens_service_common/`)
-
-- **context.py** - `extract_context()`, `propagate_headers()`, `generate_request_id()`, `generate_trace_id()`
-- **telemetry_client.py** - `TelemetryClient` with `emit_log()`, `emit_metric()`, `emit_span()` methods
-
-### Scenarios Package (`packages/scenarios/src/incidentlens_scenarios/`)
-
-- **models.py** - `SCENARIOS` dict with 5 fault definitions, each with `target_service`, `root_cause_label`, and `default_params`
-- **service.py** - `ScenarioService` with `enable()`, `disable()`, `reset()`, `active_for()`, `is_active()`, `get_params()`
-
-### Five Fault Scenarios
-
-| Scenario | Target Service | Root Cause Label | Behavior |
-|---|---|---|---|
-| `payment_delay` | payment-service | payment_latency_spike | Adds real `asyncio.sleep()` delay |
-| `payment_error_rate` | payment-service | payment_service_degradation | Returns HTTP 500 at configured rate |
-| `db_pool_exhaustion` | order-service | database_connection_leak | Simulates slow DB with 0.5s delay |
-| `dependency_unavailable` | order-service | network_partition | Returns HTTP 502 without calling payment |
-| `deployment_regression` | payment-service | bad_deployment | Returns approved charge with amount=0 |
-
-### Workspace Configuration
-
-- Added 5 new workspace members to root `pyproject.toml`
-- Added `pytest-asyncio>=0.24` to dev dependencies
-- Set `asyncio_mode = "auto"` in pytest config
-- Each new package has its own `pyproject.toml` with proper workspace dependencies
+### 5. Routes (`investigations.py`)
+- No explicit changes needed; SSE `report_ready` event already forwards `state.report` dict which now includes new fields
 
 ## What Was Tested and Test Results
 
-### Test Files
+### Test File: `tests/agent/test_evidence_rules.py` (30 tests)
+- `TestAssessEvidencePaymentDelay` (2 tests): payment latency logs and slow traces
+- `TestAssessEvidencePaymentErrorRate` (2 tests): payment error logs and high error rate metrics
+- `TestAssessEvidenceDBPoolExhaustion` (2 tests): pool exhaustion logs and pool metrics
+- `TestAssessEvidenceDependencyUnavailable` (2 tests): dependency failure logs and dependency graph
+- `TestAssessEvidenceDeploymentRegression` (2 tests): deployment with buggy version
+- `TestAssessEvidenceNoMatch` (2 tests): unrelated evidence and empty evidence
+- `TestReportGuardRootService` (2 tests): missing root_service rejected, present root_service accepted
+- `TestReportGuardEvidenceOwnership` (2 tests): foreign evidence rejected, owned evidence accepted
+- `TestReportGuardNoConfirmedHypothesis` (1 test): active hypothesis rejected
+- `TestReportFormat` (4 tests): root_service, cause_code, evidence_ids, no root_cause_label
+- `TestHypothesisFields` (4 tests): root_service and cause_code fields with defaults
+- `TestEvidenceAssessmentModel` (2 tests): model creation and defaults
+- `TestReportGuardPartialEvidence` (2 tests): partially owned evidence rejected, all owned accepted
+- `TestReportUncertainty` (1 test): uncertainty field present and correct
 
-1. `tests/services/test_request_flow.py` - 8 tests
-   - 3 health check tests (one per service)
-   - 5 call chain tests (trace propagation, auto-generation, order details, direct payment, direct order)
-
-2. `tests/scenarios/test_lifecycle.py` - 14 tests
-   - 9 lifecycle tests (enable 5 scenarios, disable, reset, empty, unknown raises)
-   - 2 root cause isolation tests (not exposed in API, stored internally)
-   - 3 fault behavior tests (real delay, error rate 500, dependency 502)
-
-### Test Results
-
-```
-53 passed in 1.72s  (22 new + 31 existing)
-```
-
-All tests pass, no regressions.
+### All test results: 218 passed (including 30 new + 21 existing engine + 36 tools + 131 others)
 
 ## TDD Evidence
 
 ### RED Phase
-- Wrote all 22 tests first before any implementation code existed
-- Ran `uv run pytest tests/services/test_request_flow.py tests/scenarios/test_lifecycle.py -q`
-- Result: 11 FAILED, 11 ERRORS (ModuleNotFoundError for missing modules)
+- Ran `uv run pytest tests/agent/test_evidence_rules.py` before implementation
+- 21 tests failed (AttributeError for missing `cause_code`/`root_service` on Hypothesis, ImportError for missing `evidence_rules` module, AssertionError for report guard/format)
+- 4 tests passed (report guard tests that happened to work with existing `can_generate_report` logic)
 
 ### GREEN Phase
-- Implemented all packages and services
-- Ran same test command
-- Result: 22 passed
-
-### REFACTOR Phase
-- Removed unused `Request` parameter from service endpoints
-- Removed unused `generate_trace_id` import from payment service
-- Removed unused `Any` import from context.py
-- Fixed import ordering via ruff
-- All 53 tests still pass after refactoring
+- Implemented all code changes
+- All 30 evidence rules tests pass
+- All 21 existing engine tests still pass
+- All 36 tools tests still pass
+- Full suite: 218 passed, 0 failed
 
 ## Files Changed
 
-### New Files (20)
-- `apps/gateway-service/pyproject.toml`
-- `apps/gateway-service/src/gateway_service/__init__.py`
-- `apps/gateway-service/src/gateway_service/main.py`
-- `apps/order-service/pyproject.toml`
-- `apps/order-service/src/order_service/__init__.py`
-- `apps/order-service/src/order_service/main.py`
-- `apps/payment-service/pyproject.toml`
-- `apps/payment-service/src/payment_service/__init__.py`
-- `apps/payment-service/src/payment_service/main.py`
-- `apps/shared-service/pyproject.toml`
-- `apps/shared-service/src/incidentlens_service_common/__init__.py`
-- `apps/shared-service/src/incidentlens_service_common/context.py`
-- `apps/shared-service/src/incidentlens_service_common/telemetry_client.py`
-- `packages/scenarios/pyproject.toml`
-- `packages/scenarios/src/incidentlens_scenarios/__init__.py`
-- `packages/scenarios/src/incidentlens_scenarios/models.py`
-- `packages/scenarios/src/incidentlens_scenarios/service.py`
-- `tests/scenarios/__init__.py`
-- `tests/scenarios/test_lifecycle.py`
-- `tests/services/__init__.py`
-- `tests/services/test_request_flow.py`
-
-### Modified Files (2)
-- `pyproject.toml` - added workspace members, source mappings, pytest-asyncio
-- `uv.lock` - updated lockfile
+1. **Created**: `apps/control-plane/src/incidentlens_control_plane/agent/evidence_rules.py` (239 lines)
+2. **Created**: `tests/agent/test_evidence_rules.py` (649 lines)
+3. **Modified**: `packages/contracts/src/incidentlens_contracts/models.py` (+2 lines: root_service, cause_code)
+4. **Modified**: `apps/control-plane/src/incidentlens_control_plane/agent/reporting.py` (rewritten guard and report format)
+5. **Modified**: `apps/control-plane/src/incidentlens_control_plane/agent/engine.py` (+107 lines: assess_evidence integration, hypothesis field updates)
+6. **Modified**: `uv.lock` (dependency update from previous work)
 
 ## Self-Review Findings
 
-1. **Context propagation works correctly**: X-Trace-ID and X-Request-ID are extracted from incoming headers, generated if missing, and propagated to downstream services via `propagate_headers()`.
-
-2. **Root cause labels are properly isolated**: The `SCENARIOS` dict stores `root_cause_label` internally, but `active_for()` explicitly filters it out. Tests verify both that labels exist internally and are not leaked.
-
-3. **Fault scenarios actually change behavior**: Each fault type has a real, observable effect (delays, error responses, wrong data). The `payment_error_rate` uses `random.random()` which is non-deterministic, but the test uses `error_rate=1.0` for deterministic behavior.
-
-4. **Service-to-service calls use ASGI transport**: In the current implementation, services call each other via `httpx.ASGITransport` for in-process testing. For production deployment, this would need to be changed to actual HTTP calls using the configured service URLs.
-
-5. **Scenario service injection uses module-level global**: The `set_scenario_service()` function sets a module-level `_scenario_service` variable. This is simple and works for testing but is not thread-safe for concurrent production use. This is acceptable for the current phase since the control plane (Task 4) will manage scenario lifecycle.
-
-6. **Minor concern**: The `payment_error_rate` fault with `error_rate < 1.0` is probabilistic. Tests only verify the deterministic case (`error_rate=1.0`). A more robust test could seed the random number generator, but this is adequate for the current scope.
+1. **Design constraint satisfied**: The engine consumes persisted Evidence only and does NOT import scenario definitions. The `evidence_rules.py` module uses pattern matching on evidence content, not `root_cause_label`.
+2. **root_cause_label never leaks**: Verified that `root_cause_label` does not appear in hypothesis model_dump(), report dict, or any API output. The scenarios routes already explicitly exclude it.
+3. **Backward compatibility**: `root_service` and `cause_code` default to empty string, so existing code that creates Hypothesis without these fields continues to work.
+4. **Bug fix**: Corrected cross-reference logic in `_update_hypotheses` where `ev.id not in ev.supports_hypothesis_ids` should have been `hyp.id not in ev.supports_hypothesis_ids`.
+5. **Legacy fallback**: The keyword-based evidence association is preserved for hypotheses that don't have root_service/cause_code yet, ensuring smooth transition.
 
 ## Issues or Concerns
 
-- None blocking. The implementation meets all acceptance criteria from the task brief.
+1. The `deployment_regression` mapping creates a `bad_deployment` assessment for ANY deployment to payment-service (not just buggy versions). This is by design per the task brief -- any recent deployment is a candidate for regression. However, this could create false positives in production. The pattern could be refined later to require additional error evidence.
+2. ~~The `get_slow_traces` assessor requires a `service` field in the trace item, but the actual tool output from `GetSlowTracesTool` doesn't include `service` in the trace items. This means slow trace evidence won't match the payment_latency_spike pattern in practice. The engine's legacy keyword-based fallback will still handle this case.~~ **FIXED**: The slow trace assessor now matches by duration threshold only, without requiring a `service` field.
 
 ---
 
-## Task 3 Review Fixes
+## Code Review Fix Report (2026-07-28)
 
-### Fix 1: `get_params()` root_cause_label filtering (defense-in-depth)
+### Findings Fixed
 
-**File**: `packages/scenarios/src/incidentlens_scenarios/service.py`
+#### Critical: Report guard does not enforce non-empty evidence_ids
+- **File**: `apps/control-plane/src/incidentlens_control_plane/agent/reporting.py`
+- **Fix**: Added `if not primary.supporting_evidence_ids: return False` check before the subset check. The empty-set-vacuous-truth problem is now eliminated.
+- **Test**: Added `TestReportGuardNonEmptyEvidenceIds` class with 2 tests: `test_report_rejects_empty_evidence_ids` and `test_report_rejects_empty_evidence_ids_even_with_evidence_present`.
 
-`get_params()` previously returned the raw `_active[name]` dict without filtering `root_cause_label`. Now it applies the same filter as `active_for()`, excluding `root_cause_label` from the returned dict. A corresponding test (`test_get_params_does_not_expose_root_cause`) was added.
+#### Important: `_assess_slow_trace_item` will never match real tool output
+- **File**: `apps/control-plane/src/incidentlens_control_plane/agent/evidence_rules.py`
+- **Fix**: Removed the `item.get("service", "")` check. The assessor now matches any slow trace with `duration_seconds > 5` as supporting evidence for `payment_latency_spike`. This aligns with `GetSlowTracesTool` output format which returns `{trace_id, duration_seconds, span_count}` without a `service` field.
+- **Test**: Updated `test_slow_traces_payment_service_creates_payment_latency` to use realistic tool output format (trace items without `service` field).
 
-### Fix 2: `db_pool_exhaustion` parameterized delay
+#### Important: No assessor ever sets `contradicts=True`
+- **File**: `apps/control-plane/src/incidentlens_control_plane/agent/evidence_rules.py`
+- **Fix**: Added contradicts assessments in 4 assessor functions:
+  - `_assess_log_item`: Normal payment-service logs (INFO/WARN with "normal", "ok", "healthy", etc.) contradict `payment_latency_spike` and `payment_service_degradation`. Healthy order-service logs contradict `database_connection_leak` and `network_partition`.
+  - `_assess_metric_item`: Low error rate (<=0.05) contradicts `payment_service_degradation`. Normal latency (<=100) contradicts `payment_latency_spike`. Healthy pool (<=5) contradicts `database_connection_leak`.
+  - `_assess_deployment_item`: Same version deployment ("same" in version string) contradicts `bad_deployment`.
+- **Tests**: Added `TestContradictsAssessments` class with 5 tests covering all contradicts patterns.
 
-**File**: `apps/order-service/src/order_service/main.py`
+#### Minor: Redundant branches in `_assess_deployment_item`
+- **File**: `apps/control-plane/src/incidentlens_control_plane/agent/evidence_rules.py`
+- **Fix**: Simplified the `if` (buggy keyword) and `elif` (any version) branches to a single `if version:` check, since both produced the identical `EvidenceAssessment`.
 
-The scenario previously hardcoded `asyncio.sleep(0.5)`. Now it uses the `pool_size` parameter to influence the delay: `delay = max(0.1, 1.0 / pool_size)`. For example, `pool_size=2` gives 0.5s, `pool_size=1` gives 1.0s, `pool_size=4` gives 0.25s. A test (`test_db_pool_exhaustion_causes_delay`) was added.
+#### Minor: Duplicate test `test_deployment_with_errors_creates_bad_deployment`
+- **File**: `tests/agent/test_evidence_rules.py`
+- **Fix**: Replaced the duplicate test with a genuinely different scenario: it now tests deployment evidence with a non-buggy version combined with error log evidence, verifying both produce assessments pointing to payment-service.
 
-### Fix 3: Missing fault behavior tests
+### Test Results
 
-**File**: `tests/scenarios/test_lifecycle.py`
+**Command**: `.venv/bin/python -m pytest tests/agent/test_evidence_rules.py tests/agent/test_investigation_engine.py -v`
 
-Two new tests added:
-1. `test_db_pool_exhaustion_causes_delay` — enables the fault, calls the order endpoint, verifies increased latency matching the parameterized delay.
-2. `test_deployment_regression_returns_zero_amount` — enables the fault, calls the payment endpoint, verifies `amount=0` in the response.
+**Results**: 58 passed, 0 failed
+- `tests/agent/test_evidence_rules.py`: 37 passed (was 30, +7 new tests)
+- `tests/agent/test_investigation_engine.py`: 21 passed (unchanged)
 
-### Fix 4: Configurable transport (ASGI vs HTTP)
+### Files Changed
 
-**Files**: `apps/gateway-service/src/gateway_service/main.py`, `apps/order-service/src/order_service/main.py`
-
-Inter-service calls now read `ORDER_SERVICE_URL` / `PAYMENT_SERVICE_URL` from environment variables. When set (non-empty), real HTTP transport is used (suitable for Docker/production). When empty, ASGI transport is used (fast in-process testing). Test files patch these module-level constants to empty strings so ASGI transport is used during testing.
-
-### Minor fixes
-
-1. **Module-level imports**: Moved `import asyncio`, `import random`, `import os`, and `from fastapi.responses import JSONResponse` from inside function bodies to module-level imports in order-service and payment-service.
-2. **X-Request-ID propagation test**: Added `test_request_id_propagates_across_hops` in `tests/services/test_request_flow.py` verifying the full call chain preserves headers.
-3. **`get_params` isolation test**: Added `test_get_params_does_not_expose_root_cause` in `tests/scenarios/test_lifecycle.py`.
-
-### Test Results After Fixes
-
-```
-uv run pytest tests/services/test_request_flow.py tests/scenarios/test_lifecycle.py -q
-26 passed in 1.64s
-```
-
-```
-uv run pytest -q
-57 passed in 1.78s
-```
-
-All tests pass with no regressions.
+1. `apps/control-plane/src/incidentlens_control_plane/agent/reporting.py` — Added non-empty evidence_ids guard
+2. `apps/control-plane/src/incidentlens_control_plane/agent/evidence_rules.py` — Fixed slow trace assessor, added contradicts patterns, simplified deployment branches
+3. `tests/agent/test_evidence_rules.py` — Added 7 new tests, updated 2 existing tests

@@ -42,6 +42,10 @@ def can_generate_report(state: InvestigationState) -> bool:
     if not primary.root_service:
         return False
 
+    # Must have non-empty supporting evidence_ids
+    if not primary.supporting_evidence_ids:
+        return False
+
     # All supporting evidence must be owned by this incident
     owned_ids = {e.id for e in state.evidence}
     if not set(primary.supporting_evidence_ids) <= owned_ids:

@@ -73,6 +73,26 @@ def _assess_log_item(item: dict[str, Any]) -> list[EvidenceAssessment]:
                 )
             )
 
+    # Payment-service normal operation contradicts latency spike
+    if service == "payment-service" and level in ("INFO", "WARN"):
+        if any(kw in message for kw in ("normal", "ok", "healthy", "fast", "success", "completed")):
+            assessments.append(
+                EvidenceAssessment(
+                    candidate_service="payment-service",
+                    root_cause="payment_latency_spike",
+                    supports=False,
+                    contradicts=True,
+                )
+            )
+            assessments.append(
+                EvidenceAssessment(
+                    candidate_service="payment-service",
+                    root_cause="payment_service_degradation",
+                    supports=False,
+                    contradicts=True,
+                )
+            )
+
     # Order-service connection pool patterns
     if service == "order-service" and level == "ERROR":
         if any(kw in message for kw in ("pool", "connection", "exhaust", "acquire")):
@@ -89,6 +109,27 @@ def _assess_log_item(item: dict[str, Any]) -> list[EvidenceAssessment]:
                     candidate_service="order-service",
                     root_cause="network_partition",
                     supports=True,
+                )
+            )
+
+    # Order-service healthy operation contradicts db leak and network partition
+    if service == "order-service" and level in ("INFO", "WARN"):
+        if any(kw in message for kw in ("pool ok", "healthy pool", "available", "connected", "success")):
+            assessments.append(
+                EvidenceAssessment(
+                    candidate_service="order-service",
+                    root_cause="database_connection_leak",
+                    supports=False,
+                    contradicts=True,
+                )
+            )
+        if any(kw in message for kw in ("reachable", "available", "success", "connected")):
+            assessments.append(
+                EvidenceAssessment(
+                    candidate_service="order-service",
+                    root_cause="network_partition",
+                    supports=False,
+                    contradicts=True,
                 )
             )
 
@@ -121,6 +162,26 @@ def _assess_metric_item(item: dict[str, Any]) -> list[EvidenceAssessment]:
                     supports=True,
                 )
             )
+        # Low error rate contradicts payment_service_degradation
+        if "error_rate" in name and isinstance(value, (int, float)) and value <= 0.05:
+            assessments.append(
+                EvidenceAssessment(
+                    candidate_service="payment-service",
+                    root_cause="payment_service_degradation",
+                    supports=False,
+                    contradicts=True,
+                )
+            )
+        # Normal latency contradicts payment_latency_spike
+        if "latency" in name and isinstance(value, (int, float)) and value <= 100:
+            assessments.append(
+                EvidenceAssessment(
+                    candidate_service="payment-service",
+                    root_cause="payment_latency_spike",
+                    supports=False,
+                    contradicts=True,
+                )
+            )
 
     # Order-service pool metrics
     if service == "order-service":
@@ -132,18 +193,34 @@ def _assess_metric_item(item: dict[str, Any]) -> list[EvidenceAssessment]:
                     supports=True,
                 )
             )
+        # Healthy pool metrics contradict database_connection_leak
+        if "pool" in name and isinstance(value, (int, float)) and value <= 5:
+            assessments.append(
+                EvidenceAssessment(
+                    candidate_service="order-service",
+                    root_cause="database_connection_leak",
+                    supports=False,
+                    contradicts=True,
+                )
+            )
 
     return assessments
 
 
 def _assess_slow_trace_item(item: dict[str, Any]) -> list[EvidenceAssessment]:
-    """Assess a slow trace item from get_slow_traces evidence."""
-    service = item.get("service", "")
+    """Assess a slow trace item from get_slow_traces evidence.
+
+    GetSlowTracesTool returns items with {trace_id, duration_seconds, span_count}
+    but no service field.  Since slow traces are typically invoked while
+    investigating a specific service, we match any trace with high duration
+    as supporting evidence for payment_latency_spike.
+    """
     duration = item.get("duration_seconds")
 
     assessments: list[EvidenceAssessment] = []
 
-    if service == "payment-service" and isinstance(duration, (int, float)) and duration > 5:
+    # Match by duration threshold — slow traces indicate latency issues
+    if isinstance(duration, (int, float)) and duration > 5:
         assessments.append(
             EvidenceAssessment(
                 candidate_service="payment-service",
@@ -164,7 +241,7 @@ def _assess_deployment_item(item: dict[str, Any]) -> list[EvidenceAssessment]:
 
     if service == "payment-service":
         # Buggy version patterns
-        if any(kw in version for kw in ("buggy", "broken", "regression", "rollback")):
+        if version:
             assessments.append(
                 EvidenceAssessment(
                     candidate_service="payment-service",
@@ -172,15 +249,17 @@ def _assess_deployment_item(item: dict[str, Any]) -> list[EvidenceAssessment]:
                     supports=True,
                 )
             )
-        # Any recent deployment to payment-service is a candidate
-        elif version:
-            assessments.append(
-                EvidenceAssessment(
-                    candidate_service="payment-service",
-                    root_cause="bad_deployment",
-                    supports=True,
-                )
+
+    # Same version as before (stable) contradicts bad_deployment
+    if service == "payment-service" and "same" in version:
+        assessments.append(
+            EvidenceAssessment(
+                candidate_service="payment-service",
+                root_cause="bad_deployment",
+                supports=False,
+                contradicts=True,
             )
+        )
 
     return assessments
 
