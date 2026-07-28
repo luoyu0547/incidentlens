@@ -48,9 +48,9 @@ def toolkit(telemetry_repo):
 @pytest.fixture()
 def engine(telemetry_repo, toolkit):
     """Create an InvestigationEngine with toolkit and telemetry."""
-    from incidentlens_control_plane.agent.engine import InvestigationEngine
+    from incidentlens_control_plane.agent.baseline import DeterministicInvestigationEngine
 
-    return InvestigationEngine(
+    return DeterministicInvestigationEngine(
         telemetry_repo=telemetry_repo,
         toolkit=toolkit,
     )
