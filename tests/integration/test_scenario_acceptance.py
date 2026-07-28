@@ -100,9 +100,10 @@ async def test_scenario_has_cross_service_evidence(
     metric_sources = {s for s in sources if "metric" in s.lower()}
     # At least one trace source
     trace_sources = {s for s in sources if "trace" in s.lower()}
-    assert log_sources or metric_sources or trace_sources, (
-        f"Scenario {scenario}: no trace/log/metric evidence found in findings. "
-        f"Sources: {sources}"
+    assert log_sources and metric_sources and trace_sources, (
+        f"Scenario {scenario}: expected at least one trace, one log, AND one metric "
+        f"evidence source. Got traces={trace_sources}, logs={log_sources}, "
+        f"metrics={metric_sources}. All sources: {sources}"
     )
 
 
