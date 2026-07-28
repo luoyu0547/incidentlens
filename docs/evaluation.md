@@ -49,6 +49,36 @@ result = run_evaluation("incidentlens_verified", "payment_delay")
 result = run_evaluation("incidentlens_verified", "all")
 ```
 
+## Compose Acceptance Validation
+
+In addition to the strategy-comparison metrics above, five Compose acceptance
+runs validate the pipeline end-to-end using Docker Compose with deterministic
+parameters (`payment_error_rate=1.0` for the `payment_error_rate` scenario).
+
+Each of the five scenarios is run via `DemoRunner(compose=True)` and must:
+
+1. Produce a report with the expected `root_service`
+2. Cite non-empty `evidence_ids` in the report
+3. Never expose `root_cause_label` in any output
+
+| Scenario | Expected root_service |
+|----------|-----------------------|
+| payment_delay | payment-service |
+| payment_error_rate | payment-service |
+| db_pool_exhaustion | order-service |
+| dependency_unavailable | order-service |
+| deployment_regression | payment-service |
+
+Run the acceptance tests:
+
+```bash
+docker compose -f infra/compose/compose.yaml up --build
+uv run pytest tests/integration/test_scenario_acceptance.py -q
+```
+
+These acceptance runs are independent of the strategy-comparison evaluation
+metrics and serve as a quality gate for the full investigation pipeline.
+
 ## Expected Outcomes
 
 The `incidentlens_verified` strategy should outperform `react_no_memory` on:

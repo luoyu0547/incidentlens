@@ -56,6 +56,22 @@ uv run python scripts/generate_traffic.py --url http://localhost:8000
 open http://localhost:8003
 ```
 
+### Verified End-to-End Workflow
+
+```bash
+# 1. Start the full stack
+docker compose -f infra/compose/compose.yaml up --build
+
+# 2. Run all demo scenarios via the CLI
+uv run python scripts/run_demo.py --all --compose
+
+# 3. Run the five-scenario Compose acceptance tests
+uv run pytest tests/integration/test_scenario_acceptance.py -q
+
+# 4. Tear down when done
+docker compose -f infra/compose/compose.yaml down -v
+```
+
 ## Services
 
 | Service | Port | Description |
