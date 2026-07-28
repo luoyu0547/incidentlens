@@ -4,16 +4,23 @@ Provides:
   - ``InvestigationEngineProtocol`` -- async protocol for all engine runtimes
   - ``LLMInvestigationEngine`` -- LangGraph-based async investigation engine
   - ``AsyncBaselineAdapter`` -- wraps the synchronous baseline for the shared API
+  - ``InvestigationError`` -- base exception for investigation failures
+  - ``CheckpointCorruptError`` -- re-export from checkpoint module
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
 
 from incidentlens_contracts.models import InvestigationStatus
+from langgraph.errors import EmptyInputError
+from langgraph.types import Command
 
 from incidentlens_control_plane.agent.baseline import DeterministicInvestigationEngine
+from incidentlens_control_plane.agent.checkpoint import CheckpointCorruptError
 from incidentlens_control_plane.agent.state import (
     InvestigationAuditStore,
     InvestigationState,
@@ -22,6 +29,18 @@ from incidentlens_control_plane.llm.config import RuntimeMode
 from incidentlens_control_plane.llm.registry import ModelIdentity
 from incidentlens_control_plane.memory.repository import CaseRepository
 
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Error taxonomy
+# ---------------------------------------------------------------------------
+
+ERROR_MODEL_TIMEOUT = "model_timeout"
+ERROR_MODEL_UNAVAILABLE = "model_unavailable"
+ERROR_BUDGET_EXHAUSTED = "budget_exhausted"
+ERROR_MODEL_OUTPUT_INVALID = "model_output_invalid"
+ERROR_SKILL_LOAD_FAILED = "skill_load_failed"
+ERROR_CHECKPOINT_CORRUPT = "checkpoint_corrupt"
 
 # ---------------------------------------------------------------------------
 # Shared async protocol
@@ -86,7 +105,8 @@ class LLMInvestigationEngine:
         ``case_repository`` when present, filters to ``human_verified``
         cases, builds the initial state, and invokes the graph.
         """
-        incident_id = str(uuid4())
+        # Use incident_id from alert if provided, otherwise generate one
+        incident_id = alert.get("incident_id") or str(uuid4())
 
         # Build initial state
         state_dict: dict[str, Any] = {
@@ -138,11 +158,18 @@ class LLMInvestigationEngine:
             {"from": "init", "to": "agent_loop"},
         )
 
-        # Invoke the graph
-        await self._graph.ainvoke(
-            state_dict,
-            config={"configurable": {"thread_id": incident_id}},
-        )
+        # Invoke the graph with total timeout
+        config = {"configurable": {"thread_id": incident_id}}
+        try:
+            async with asyncio.timeout(self._total_timeout_seconds):
+                await self._graph.ainvoke(state_dict, config)
+        except TimeoutError:
+            await self._record_recoverable_failure(
+                incident_id,
+                code=ERROR_MODEL_TIMEOUT,
+                safe_details={"profile": self._model_identity.profile},
+            )
+            return await self._load_projected_state(incident_id)
 
         # Project the saved state from the graph
         saved = await self._project_state(incident_id)
@@ -175,7 +202,12 @@ class LLMInvestigationEngine:
         return await self._project_state(incident_id)
 
     async def resume(self, incident_id: str) -> InvestigationState | None:
-        """Load the latest graph state and continue only if non-terminal."""
+        """Load the latest graph state and continue only if non-terminal.
+
+        If the snapshot contains a pending interrupt, resumes with
+        ``Command(resume=True)``.  Otherwise invokes the normal bounded
+        continuation.
+        """
         saved = await self._project_state(incident_id)
         if saved is None:
             return None
@@ -187,7 +219,19 @@ class LLMInvestigationEngine:
         ):
             return saved
 
-        return await self.run_round(incident_id)
+        config = {"configurable": {"thread_id": incident_id}}
+        snapshot = await self._graph.aget_state(config)
+
+        # Detect pending interrupt
+        try:
+            if snapshot and snapshot.interrupts:
+                await self._graph.ainvoke(Command(resume=True), config)
+            else:
+                await self._graph.ainvoke(None, config)
+        except EmptyInputError as exc:
+            raise CheckpointCorruptError(incident_id, str(exc)) from exc
+
+        return await self._project_state(incident_id)
 
     async def load(self, incident_id: str) -> InvestigationState | None:
         """Load the current LangGraph state without advancing."""
@@ -197,10 +241,37 @@ class LLMInvestigationEngine:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    async def _load_projected_state(self, incident_id: str) -> InvestigationState | None:
+        """Alias for _project_state; loads state without advancing the graph."""
+        return await self._project_state(incident_id)
+
+    async def _record_recoverable_failure(
+        self,
+        incident_id: str,
+        code: str,
+        safe_details: dict[str, Any] | None = None,
+    ) -> None:
+        """Record a recoverable failure and persist the error code.
+
+        Updates the graph state with ``last_error_code`` and records an
+        audit entry.  No secrets or complete request content is stored.
+        """
+        config = {"configurable": {"thread_id": incident_id}}
+        await self._graph.aupdate_state(config, {"last_error_code": code})
+        self._audit_store.record(
+            incident_id,
+            "recoverable_failure",
+            {"code": code, **(safe_details or {})},
+        )
+
     async def _project_state(self, incident_id: str) -> InvestigationState | None:
         """Read the LangGraph checkpoint and project to InvestigationState."""
         config = {"configurable": {"thread_id": incident_id}}
-        snapshot = await self._graph.aget_state(config)
+        try:
+            snapshot = await self._graph.aget_state(config)
+        except Exception as exc:
+            raise CheckpointCorruptError(incident_id, str(exc)) from exc
+
         values = snapshot.values if snapshot else None
         if values is None:
             return None
@@ -227,6 +298,11 @@ class LLMInvestigationEngine:
                 return values.get(key, default)
             return getattr(values, key, default)
 
+        # Extract checkpoint_id from snapshot config
+        checkpoint_id = None
+        if snapshot and snapshot.config:
+            checkpoint_id = snapshot.config.get("configurable", {}).get("checkpoint_id")
+
         return InvestigationState(
             incident_id=_get("incident_id", incident_id),
             status=status,
@@ -243,6 +319,8 @@ class LLMInvestigationEngine:
             model_call_count=_get("model_call_count", 0),
             tool_call_count=_get("tool_call_count", 0),
             fallback_used=_get("fallback_used", False),
+            last_error_code=_get("last_error_code"),
+            last_checkpoint_id=checkpoint_id,
         )
 
 
