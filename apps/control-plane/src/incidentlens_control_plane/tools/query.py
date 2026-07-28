@@ -41,6 +41,7 @@ MAX_TEXT_LENGTH_BYTES = 16 * 1024  # 16 KiB
 class QueryMetricsArgs(BaseModel):
     """Arguments for query_metrics tool."""
 
+    incident_id: str = ""
     service: str
     name: str | None = None
     trace_id: str | None = None
@@ -74,6 +75,7 @@ class QueryMetricsArgs(BaseModel):
 class SearchLogsArgs(BaseModel):
     """Arguments for search_logs tool."""
 
+    incident_id: str = ""
     service: str
     keyword: str = ""
     trace_id: str | None = None
@@ -107,6 +109,7 @@ class SearchLogsArgs(BaseModel):
 class GetSlowTracesArgs(BaseModel):
     """Arguments for get_slow_traces tool."""
 
+    incident_id: str = ""
     service: str
     threshold_seconds: float = 5.0
     limit: int = Field(default=100)
@@ -129,6 +132,7 @@ class GetSlowTracesArgs(BaseModel):
 class GetTraceArgs(BaseModel):
     """Arguments for get_trace tool."""
 
+    incident_id: str = ""
     trace_id: str
 
     @field_validator("trace_id")
@@ -144,6 +148,7 @@ class GetTraceArgs(BaseModel):
 class GetServiceDependenciesArgs(BaseModel):
     """Arguments for get_service_dependencies tool."""
 
+    incident_id: str = ""
     limit: int = Field(default=100)
 
     @field_validator("limit")
@@ -155,6 +160,7 @@ class GetServiceDependenciesArgs(BaseModel):
 class ListRecentDeploymentsArgs(BaseModel):
     """Arguments for list_recent_deployments tool."""
 
+    incident_id: str = ""
     service: str
     limit: int = Field(default=100)
 
@@ -176,6 +182,7 @@ class ListRecentDeploymentsArgs(BaseModel):
 class GetRunbookArgs(BaseModel):
     """Arguments for get_runbook tool."""
 
+    incident_id: str = ""
     service: str
 
     @field_validator("service")
