@@ -42,9 +42,15 @@ async def send_order(
     base_url: str,
     item: str,
     quantity: int,
-) -> dict[str, Any] | None:
-    """Send a single order request to the gateway."""
-    trace_id = f"trace-{time.time_ns()}"
+    trace_id: str | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Send a single order request to the gateway.
+
+    Returns (response_json_or_None, trace_id_used).
+    If trace_id is not provided, one is generated.
+    """
+    if trace_id is None:
+        trace_id = f"trace-{time.time_ns()}"
     try:
         response = await client.post(
             f"{base_url}/orders",
@@ -54,10 +60,10 @@ async def send_order(
                 "X-Trace-ID": trace_id,
             },
         )
-        return response.json()
+        return response.json(), trace_id
     except Exception as exc:
         print(f"  Error sending order: {exc}", file=sys.stderr)
-        return None
+        return None, trace_id
 
 
 async def generate_traffic(count: int, base_url: str) -> TrafficSummary:
@@ -84,8 +90,8 @@ async def generate_traffic(count: int, base_url: str) -> TrafficSummary:
         for i in range(count):
             item = items[i % len(items)]
             trace_id = f"trace-{time.time_ns()}"
+            result, _ = await send_order(client, base_url, item, (i % 3) + 1, trace_id=trace_id)
             summary.trace_ids.append(trace_id)
-            result = await send_order(client, base_url, item, (i % 3) + 1)
             if result and "order_id" in result:
                 summary.success_count += 1
                 print(f"  [{i+1}/{count}] Order created: {result.get('order_id', 'N/A')}")

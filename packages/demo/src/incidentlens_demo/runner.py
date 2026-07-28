@@ -30,7 +30,6 @@ SCENARIO_NAMES: list[str] = list(SCENARIOS.keys())
 # Polling defaults
 _RUNTIME_POLL_INTERVAL = 0.5  # seconds
 _RUNTIME_POLL_TIMEOUT = 10.0  # seconds
-_ROUND_POLL_INTERVAL = 0.2  # seconds
 _MAX_ROUNDS = 20  # safety limit for investigation rounds
 
 
