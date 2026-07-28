@@ -1,0 +1,9 @@
+skill_name: dependency-unavailable
+cause_code: network_partition
+required_evidence_types:
+  - log
+  - trace
+  - metric
+minimum_independent_evidence: 2
+direct_contradictions:
+  - successful dependency calls continue through the same incident window

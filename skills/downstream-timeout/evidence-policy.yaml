@@ -1,0 +1,9 @@
+skill_name: downstream-timeout
+cause_code: payment_latency_spike
+required_evidence_types:
+  - trace
+  - log
+  - metric
+minimum_independent_evidence: 2
+direct_contradictions:
+  - downstream span latency is normal in the incident window

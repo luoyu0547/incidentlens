@@ -1,0 +1,9 @@
+skill_name: database-pool-exhaustion
+cause_code: database_connection_leak
+required_evidence_types:
+  - log
+  - metric
+  - trace
+minimum_independent_evidence: 2
+direct_contradictions:
+  - available pool capacity remains healthy during failed requests
