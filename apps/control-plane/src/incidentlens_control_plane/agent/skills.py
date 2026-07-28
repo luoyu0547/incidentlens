@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from langchain.agents.middleware import AgentMiddleware
 from pydantic import BaseModel, ConfigDict
 
 from deepagents.backends.composite import CompositeBackend
@@ -335,6 +336,16 @@ class SkillRuntime:
             self.validate()
         return self._cause_code_map[cause_code]
 
+    @property
+    def policies_by_cause_code(self) -> dict[str, EvidencePolicy]:
+        """Return the mapping of cause codes to evidence policies.
+
+        Lazily validates if not already done.
+        """
+        if self._definitions is None:
+            self.validate()
+        return self._cause_code_map
+
     # ------------------------------------------------------------------
     # Read / Write with permission enforcement
     # ------------------------------------------------------------------
@@ -415,8 +426,12 @@ class SkillRuntime:
 # ---------------------------------------------------------------------------
 
 
-class _SkillReadAudit:
-    """Records audit entries for ``/skills/`` reads via the FilesystemMiddleware."""
+class _SkillReadAudit(AgentMiddleware):
+    """Records audit entries for ``/skills/`` reads via the FilesystemMiddleware.
+
+    This is a lightweight middleware that extends AgentMiddleware with no-op
+    implementations, allowing it to be included in the middleware list.
+    """
 
     def __init__(self, audit_store: Any) -> None:
         self._audit_store = audit_store
