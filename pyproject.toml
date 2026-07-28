@@ -14,6 +14,7 @@ dependencies = [
     "incidentlens-order-service",
     "incidentlens-payment-service",
     "incidentlens-evaluation",
+    "incidentlens-demo",
     "pydantic>=2.0,<3",
     "sqlalchemy>=2.0,<3",
     "httpx>=0.28,<1",
@@ -31,6 +32,7 @@ members = [
     "apps/payment-service",
     "apps/control-plane",
     "packages/evaluation",
+    "packages/demo",
 ]
 
 [tool.uv.sources]
@@ -43,6 +45,7 @@ incidentlens-gateway-service = { workspace = true }
 incidentlens-order-service = { workspace = true }
 incidentlens-payment-service = { workspace = true }
 incidentlens-evaluation = { workspace = true }
+incidentlens-demo = { workspace = true }
 
 [dependency-groups]
 dev = [

@@ -81,6 +81,13 @@ open http://localhost:8003
 - `POST /api/cases` — Save a new case
 - `POST /api/cases/{case_id}/confirm` — Confirm a case
 
+### Scenarios
+- `GET /api/scenarios` — List all scenario definitions
+- `POST /api/scenarios/{name}/enable` — Activate a scenario
+- `POST /api/scenarios/{name}/disable` — Deactivate a scenario
+- `POST /api/scenarios/reset` — Reset all scenarios and demo data
+- `GET /api/scenarios/runtime/{service}` — Get active scenarios for a service
+
 ### Health
 - `GET /healthz` — Health check
 
@@ -97,6 +104,33 @@ open http://localhost:8003
 ## Evaluation
 
 See [docs/evaluation.md](docs/evaluation.md) for evaluation methodology.
+
+## Demo Runner
+
+The reusable demo runner orchestrates end-to-end scenarios via public APIs:
+
+```bash
+# Run a single scenario
+uv run python scripts/run_demo.py --scenario payment_delay
+
+# Run all scenarios
+uv run python scripts/run_demo.py --all
+
+# With custom URLs and traffic count
+uv run python scripts/run_demo.py --all \
+  --control-plane-url http://localhost:8003 \
+  --gateway-url http://localhost:8000 \
+  --traffic-count 5
+
+# In Docker Compose mode (deterministic params)
+uv run python scripts/run_demo.py --all --compose
+
+# Reset demo state
+uv run python scripts/reset_demo.py
+
+# Generate traffic
+uv run python scripts/generate_traffic.py --count 20 --url http://localhost:8000
+```
 
 ## Constraints
 

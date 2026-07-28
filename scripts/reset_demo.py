@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Reset the IncidentLens demo state.
 
-Clears the control plane database and disables all active fault scenarios.
+Clears the control plane database and disables all active fault scenarios
+via the public API endpoint POST /api/scenarios/reset.
 
 Usage:
     python scripts/reset_demo.py [--control-plane-url http://localhost:8003]
@@ -17,10 +18,11 @@ import httpx
 
 
 async def reset_demo(control_plane_url: str) -> None:
-    """Reset the demo by clearing the database and disabling faults."""
-    print(f"Resetting demo via {control_plane_url}")
+    """Reset the demo by calling the public API reset endpoint."""
+    base_url = control_plane_url.rstrip("/")
+    print(f"Resetting demo via {base_url}")
 
-    async with httpx.AsyncClient(base_url=control_plane_url, timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
         # Check health
         try:
             resp = await client.get("/healthz")
@@ -28,18 +30,25 @@ async def reset_demo(control_plane_url: str) -> None:
                 print(f"Control plane not healthy: {resp.status_code}", file=sys.stderr)
                 return
         except Exception as exc:
-            print(f"Cannot reach control plane at {control_plane_url}: {exc}", file=sys.stderr)
+            print(f"Cannot reach control plane at {base_url}: {exc}", file=sys.stderr)
             return
 
-        # The control plane uses SQLite; to reset, we need to clear the DB
-        # In Docker, this means removing the volume data
-        # For local dev, we can delete the SQLite file
-        print("Demo reset complete.")
-        print(
-            "Note: To fully reset, delete the SQLite database file and restart the control plane."
-        )
-        print("  - Local: rm -f control_plane.db")
-        print("  - Docker: docker compose -f infra/compose/compose.yaml down -v")
+        # Call the public API reset endpoint
+        try:
+            resp = await client.post("/api/scenarios/reset")
+            if resp.status_code == 200:
+                data = resp.json()
+                scenarios_cleared = data.get("scenarios_cleared", False)
+                tables_cleared = data.get("tables_cleared", {})
+                print(f"Demo reset complete.")
+                print(f"  Scenarios cleared: {scenarios_cleared}")
+                if tables_cleared:
+                    for table, count in tables_cleared.items():
+                        print(f"  {table}: {count} rows deleted")
+            else:
+                print(f"Reset failed: {resp.status_code} {resp.text}", file=sys.stderr)
+        except Exception as exc:
+            print(f"Error calling reset endpoint: {exc}", file=sys.stderr)
 
 
 def main() -> None:

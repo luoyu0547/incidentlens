@@ -7,6 +7,7 @@ members = [
     "incidentlens",
     "incidentlens-contracts",
     "incidentlens-control-plane",
+    "incidentlens-demo",
     "incidentlens-evaluation",
     "incidentlens-gateway-service",
     "incidentlens-order-service",
@@ -164,6 +165,7 @@ dependencies = [
     { name = "httpx" },
     { name = "incidentlens-contracts" },
     { name = "incidentlens-control-plane" },
+    { name = "incidentlens-demo" },
     { name = "incidentlens-evaluation" },
     { name = "incidentlens-gateway-service" },
     { name = "incidentlens-order-service" },
@@ -191,6 +193,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "incidentlens-contracts", editable = "packages/contracts" },
     { name = "incidentlens-control-plane", editable = "apps/control-plane" },
+    { name = "incidentlens-demo", editable = "packages/demo" },
     { name = "incidentlens-evaluation", editable = "packages/evaluation" },
     { name = "incidentlens-gateway-service", editable = "apps/gateway-service" },
     { name = "incidentlens-order-service", editable = "apps/order-service" },
@@ -248,6 +251,23 @@ requires-dist = [
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
     { name = "sse-starlette", specifier = ">=2.0,<3" },
     { name = "uvicorn", specifier = ">=0.30,<1" },
+]
+
+[[package]]
+name = "incidentlens-demo"
+version = "0.1.0"
+source = { editable = "packages/demo" }
+dependencies = [
+    { name = "httpx" },
+    { name = "incidentlens-contracts" },
+    { name = "incidentlens-scenarios" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "incidentlens-contracts", editable = "packages/contracts" },
+    { name = "incidentlens-scenarios", editable = "packages/scenarios" },
 ]
 
 [[package]]
