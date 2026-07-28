@@ -239,9 +239,19 @@ def _assess_deployment_item(item: dict[str, Any]) -> list[EvidenceAssessment]:
 
     assessments: list[EvidenceAssessment] = []
 
-    if service == "payment-service":
-        # Buggy version patterns
-        if version:
+    if service == "payment-service" and version:
+        # Stable/same version deployment contradicts bad_deployment
+        if "same" in version:
+            assessments.append(
+                EvidenceAssessment(
+                    candidate_service="payment-service",
+                    root_cause="bad_deployment",
+                    supports=False,
+                    contradicts=True,
+                )
+            )
+        else:
+            # Any other version is a candidate for bad_deployment
             assessments.append(
                 EvidenceAssessment(
                     candidate_service="payment-service",
@@ -249,17 +259,6 @@ def _assess_deployment_item(item: dict[str, Any]) -> list[EvidenceAssessment]:
                     supports=True,
                 )
             )
-
-    # Same version as before (stable) contradicts bad_deployment
-    if service == "payment-service" and "same" in version:
-        assessments.append(
-            EvidenceAssessment(
-                candidate_service="payment-service",
-                root_cause="bad_deployment",
-                supports=False,
-                contradicts=True,
-            )
-        )
 
     return assessments
 
