@@ -98,26 +98,28 @@ class TestSSEEndpoint:
         is established successfully, then close it.
         """
         import httpx
-        from incidentlens_control_plane.main import app
+        from incidentlens_control_plane.main import create_app
 
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            # Use asyncio.wait_for to enforce a timeout on the entire
-            # streaming interaction so the test cannot hang indefinitely.
-            async def _check_status() -> None:
-                async with client.stream(
-                    "GET", "/api/investigations/test-id/events"
-                ) as response:
-                    assert response.status_code == 200
+        app = create_app()
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                # Use asyncio.wait_for to enforce a timeout on the entire
+                # streaming interaction so the test cannot hang indefinitely.
+                async def _check_status() -> None:
+                    async with client.stream(
+                        "GET", "/api/investigations/test-id/events"
+                    ) as response:
+                        assert response.status_code == 200
 
-            try:
-                await asyncio.wait_for(_check_status(), timeout=5.0)
-            except asyncio.TimeoutError:
-                # Timeout is acceptable — the SSE stream stays open.
-                # The important thing is that the connection was established
-                # (status 200) before the timeout. If we reach here, the
-                # stream was still open which means the connection succeeded.
-                pass
+                try:
+                    await asyncio.wait_for(_check_status(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    # Timeout is acceptable — the SSE stream stays open.
+                    # The important thing is that the connection was established
+                    # (status 200) before the timeout. If we reach here, the
+                    # stream was still open which means the connection succeeded.
+                    pass
 
     @pytest.mark.asyncio
     async def test_sse_endpoint_streams_events(self) -> None:

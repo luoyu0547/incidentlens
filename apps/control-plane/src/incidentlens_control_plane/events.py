@@ -1,10 +1,12 @@
 """SSE event models and in-process event bus.
 
-Event types:
+Event types (all safe for public SSE/audit exposure):
   - state_changed: investigation status or phase changed
-  - tool_called: a read-only tool was invoked
+  - tool_called: a read-only tool was invoked (normalized, bounded args)
   - evidence_recorded: new evidence was recorded
   - report_ready: investigation report is available
+  - model_called: LLM model invoked (profile/model/host/duration/tokens only)
+  - skill_loaded: agent skill loaded (name/path only)
 
 The EventBus allows publishing events and subscribing to them via async iterators,
 which the SSE endpoint consumes to stream events to clients.
@@ -19,6 +21,29 @@ from datetime import datetime
 from typing import Any, AsyncIterator
 
 from pydantic import BaseModel, Field
+
+# ---------------------------------------------------------------------------
+# Safe event type constants — these are the only event types published
+# to SSE and audit.  All payloads must be redacted before serialization.
+# ---------------------------------------------------------------------------
+
+EVENT_STATE_CHANGED = "state_changed"
+EVENT_TOOL_CALLED = "tool_called"
+EVENT_EVIDENCE_RECORDED = "evidence_recorded"
+EVENT_REPORT_READY = "report_ready"
+EVENT_MODEL_CALLED = "model_called"
+EVENT_SKILL_LOADED = "skill_loaded"
+
+SAFE_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        EVENT_STATE_CHANGED,
+        EVENT_TOOL_CALLED,
+        EVENT_EVIDENCE_RECORDED,
+        EVENT_REPORT_READY,
+        EVENT_MODEL_CALLED,
+        EVENT_SKILL_LOADED,
+    }
+)
 
 
 def _json_default(obj: Any) -> Any:

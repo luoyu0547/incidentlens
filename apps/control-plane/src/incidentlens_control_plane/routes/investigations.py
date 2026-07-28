@@ -65,6 +65,41 @@ class InvestigationStateResponse(BaseModel):
     hypothesis_count: int
     evidence_count: int
     report: dict[str, Any] | None = None
+    mode: str = ""
+    model_profile: str = ""
+    model_call_count: int = 0
+    tool_call_count: int = 0
+    loaded_skill_names: list[str] = Field(default_factory=list)
+    fallback_used: bool = False
+    last_error_code: str | None = None
+    last_checkpoint_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Route helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_state_response(state, *, include_mode: str = "") -> InvestigationStateResponse:
+    """Build an InvestigationStateResponse from an InvestigationState."""
+    return InvestigationStateResponse(
+        incident_id=state.incident_id,
+        status=state.status.value,
+        current_round=state.current_round,
+        max_rounds=state.max_rounds,
+        phase=state.phase,
+        hypothesis_count=len(state.hypotheses),
+        evidence_count=len(state.evidence),
+        report=state.report,
+        mode=include_mode,
+        model_profile=getattr(state, "model_profile", ""),
+        model_call_count=getattr(state, "model_call_count", 0),
+        tool_call_count=getattr(state, "tool_call_count", 0),
+        loaded_skill_names=getattr(state, "loaded_skill_names", []),
+        fallback_used=getattr(state, "fallback_used", False),
+        last_error_code=getattr(state, "last_error_code", None),
+        last_checkpoint_id=getattr(state, "last_checkpoint_id", None),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +127,7 @@ async def start_investigation(
         alert["trace_id"] = request.trace_id
     alert.update(request.extra)
 
-    state = _engine.start(alert)
+    state = await _engine.start(alert)
 
     # Initialize the per-incident published tool call tracker
     _published_tool_call_ids.setdefault(state.incident_id, set())
@@ -112,16 +147,7 @@ async def start_investigation(
             },
         ))
 
-    return InvestigationStateResponse(
-        incident_id=state.incident_id,
-        status=state.status.value,
-        current_round=state.current_round,
-        max_rounds=state.max_rounds,
-        phase=state.phase,
-        hypothesis_count=len(state.hypotheses),
-        evidence_count=len(state.evidence),
-        report=state.report,
-    )
+    return _build_state_response(state, include_mode=str(getattr(_engine, "mode", "")))
 
 
 @router.post("/{incident_id}/round")
@@ -202,16 +228,7 @@ async def run_round(incident_id: str) -> InvestigationStateResponse:
     if state.status.value in ("report_ready", "needs_more_evidence"):
         _published_tool_call_ids.pop(incident_id, None)
 
-    return InvestigationStateResponse(
-        incident_id=state.incident_id,
-        status=state.status.value,
-        current_round=state.current_round,
-        max_rounds=state.max_rounds,
-        phase=state.phase,
-        hypothesis_count=len(state.hypotheses),
-        evidence_count=len(state.evidence),
-        report=state.report,
-    )
+    return _build_state_response(state, include_mode=str(getattr(_engine, "mode", "")))
 
 
 @router.post("/{incident_id}/resume")
@@ -230,13 +247,4 @@ async def resume_investigation(incident_id: str) -> InvestigationStateResponse:
             detail=f"Investigation not found: {incident_id}",
         )
 
-    return InvestigationStateResponse(
-        incident_id=state.incident_id,
-        status=state.status.value,
-        current_round=state.current_round,
-        max_rounds=state.max_rounds,
-        phase=state.phase,
-        hypothesis_count=len(state.hypotheses),
-        evidence_count=len(state.evidence),
-        report=state.report,
-    )
+    return _build_state_response(state, include_mode=str(getattr(_engine, "mode", "")))

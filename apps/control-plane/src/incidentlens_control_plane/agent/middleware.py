@@ -423,6 +423,84 @@ def can_generate_guarded_report(
 
 
 # ---------------------------------------------------------------------------
+# Secret redaction for SSE / audit safety
+# ---------------------------------------------------------------------------
+
+_REDACTED = "**REDACTED**"
+
+_SENSITIVE_KEY_NAMES: frozenset[str] = frozenset(
+    {
+        "authorization",
+        "api_key",
+        "token",
+        "secret",
+        "api-key",
+        "x-api-key",
+        "password",
+        "credential",
+    }
+)
+
+
+def redact_sensitive_payload(
+    payload: dict[str, Any],
+    *,
+    secret_values: set[str] | None = None,
+) -> dict[str, Any]:
+    """Return a deep copy of *payload* with sensitive values replaced.
+
+    A key is considered sensitive when its lowercased name matches one of the
+    well-known patterns (``api_key``, ``authorization``, ``token``, etc.) **or**
+    when its value appears in the caller-supplied *secret_values* set.
+
+    The redaction is shallow on purpose: nested dicts are recursed into, but
+    lists are iterated element-wise only if they contain dicts.  Primitive
+    list elements that match a secret value are replaced by ``"**REDACTED**"``.
+    """
+    secrets = set(secret_values or set())
+    return _redact_node(payload, secrets)
+
+
+def _redact_node(node: Any, secrets: set[str]) -> Any:
+    """Recursively redact a nested structure."""
+    if isinstance(node, dict):
+        result: dict[str, Any] = {}
+        for k, v in node.items():
+            # Redact value if the key is a known sensitive name
+            if _is_sensitive_key(k):
+                result[k] = _REDACTED
+            else:
+                result[k] = _redact_value(v, secrets)
+        return result
+    if isinstance(node, list):
+        return [_redact_value(item, secrets) for item in node]
+    if isinstance(node, str) and node in secrets:
+        return _REDACTED
+    return node
+
+
+def _redact_value(value: Any, secrets: set[str]) -> Any:
+    """Redact a value if it contains a secret."""
+    if isinstance(value, str):
+        if value in secrets:
+            return _REDACTED
+        # Strip values that contain secret substrings
+        for secret in secrets:
+            if secret in value:
+                return _REDACTED
+    if isinstance(value, dict):
+        return _redact_node(value, secrets)
+    if isinstance(value, list):
+        return [_redact_value(item, secrets) for item in value]
+    return value
+
+
+def _is_sensitive_key(key: str) -> bool:
+    """Return True if the key name matches well-known sensitive patterns."""
+    return key.lower() in _SENSITIVE_KEY_NAMES
+
+
+# ---------------------------------------------------------------------------
 # Policy access helper
 # ---------------------------------------------------------------------------
 
