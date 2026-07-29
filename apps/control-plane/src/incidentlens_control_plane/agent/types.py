@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Any, NotRequired
+from typing import Annotated, Any, Literal, NotRequired
 
 from incidentlens_contracts.models import Evidence, Hypothesis
 from langchain.agents.middleware import AgentState
@@ -70,4 +70,4 @@ class RootCauseProposal(BaseModel):
     cause_code: str = Field(min_length=1)
     evidence_ids: list[str] = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
-    next_action: str = Field(min_length=1)
+    next_action: Literal["finish", "needs_more_evidence"]
