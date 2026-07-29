@@ -24,7 +24,10 @@ from langchain_core.tools import BaseTool
 from incidentlens_control_plane.agent.middleware import (
     AuditMiddleware,
     BudgetEnforcementMiddleware,
+    DuplicateToolCallMiddleware,
     EvidenceRecordingMiddleware,
+    IncidentToolContextMiddleware,
+    InvestigationContextMiddleware,
     ReportGateMiddleware,
 )
 from incidentlens_control_plane.agent.prompts import SYSTEM_PROMPT
@@ -79,7 +82,10 @@ def build_investigation_agent(
     middleware.extend([fs_middleware, skills_middleware, skill_audit])
 
     # Audit middleware
+    middleware.append(InvestigationContextMiddleware())
     middleware.append(AuditMiddleware(audit_store))
+    middleware.append(IncidentToolContextMiddleware())
+    middleware.append(DuplicateToolCallMiddleware())
 
     # Evidence recording middleware
     middleware.append(EvidenceRecordingMiddleware())

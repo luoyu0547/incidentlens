@@ -49,6 +49,7 @@ class IncidentAgentState(AgentState):
     report: dict[str, Any] | None
     last_error_code: NotRequired[str | None]
     last_checkpoint_id: NotRequired[str | None]
+    invalid_tool_call_count: NotRequired[int]
 
 
 class InvestigationContext(BaseModel):
