@@ -52,12 +52,28 @@ class AuditMiddleware(AgentMiddleware[IncidentAgentState, Any]):
     ) -> dict[str, Any] | None:
         """Record a model call audit entry before the model executes."""
         incident_id = state.get("incident_id", "unknown")
+        phase = state.get("phase", "unknown")
+
+        # Record conclusion-specific audit actions
+        conclusion_status = state.get("conclusion_status", "not_ready")
+        if conclusion_status == "attempting":
+            self._audit_store.record(
+                incident_id,
+                "structured_output_attempted",
+                {
+                    "round": state.get("current_round", 0),
+                    "model_call_count": state.get("model_call_count", 0),
+                    "conclusion_attempt_count": state.get("conclusion_attempt_count", 0),
+                },
+            )
+
         self._audit_store.record(
             incident_id,
             "model_call",
             {
                 "round": state.get("current_round", 0),
                 "model_call_count": state.get("model_call_count", 0),
+                "phase": phase,
             },
         )
         return {"model_call_count": 1}
