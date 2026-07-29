@@ -424,12 +424,13 @@ async def agent_harness(tmp_path: Path, toolkit, investigation_audit_store) -> A
     async with AgentCheckpointRuntime(db_path) as cp:
         # Build evidence recorder and tools
         evidence_recorder = EvidenceRecorder(investigation_audit_store)
-        tools = build_agent_tools(toolkit, evidence_recorder)
 
         # Build SkillRuntime with the skills directory
         skills_root = Path(__file__).resolve().parents[2] / "skills"
         skills = SkillRuntime(skills_root, investigation_audit_store)
         skills.validate()
+
+        tools = build_agent_tools(toolkit, evidence_recorder, skills)
 
         harness = AgentHarness(
             checkpointer=cp.saver,
@@ -462,12 +463,13 @@ async def recovery_harness(
     async with AgentCheckpointRuntime(db_path) as cp:
         # Build evidence recorder and tools backed by the CountingToolkit
         evidence_recorder = EvidenceRecorder(investigation_audit_store)
-        tools = build_agent_tools(counted, evidence_recorder)
 
         # Build SkillRuntime
         skills_root = Path(__file__).resolve().parents[2] / "skills"
         skills = SkillRuntime(skills_root, investigation_audit_store)
         skills.validate()
+
+        tools = build_agent_tools(counted, evidence_recorder, skills)
 
         # Build the scripted model
         scripted = InterruptibleScriptedChatModel(responses=[])

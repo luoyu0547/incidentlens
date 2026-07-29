@@ -153,6 +153,7 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
 def build_agent_tools(
     toolkit: ReadOnlyToolkit,
     evidence_recorder: EvidenceRecorder,
+    skill_runtime: Any | None = None,
 ) -> list[StructuredTool]:
     """Wrap ReadOnlyToolkit tools as LangChain StructuredTool instances.
 
@@ -160,6 +161,8 @@ def build_agent_tools(
       - Validates Pydantic args before any repository call
       - Records evidence via EvidenceRecorder (deduplicates by call key)
       - Returns (summary_text, AgentToolEnvelope.model_dump()) for LangChain
+
+    If skill_runtime is provided, a read_file tool is added for reading skills.
     """
     tools: list[StructuredTool] = []
 
@@ -216,5 +219,27 @@ def build_agent_tools(
             response_format="content_and_artifact",
         )
         tools.append(tool)
+
+    # Add read_file tool for skill reading (if skill_runtime provided)
+    if skill_runtime is not None:
+
+        class ReadFileArgs(BaseModel):
+            path: str
+
+        async def _read_file_coroutine(path: str = "", **kwargs: Any) -> tuple[str, dict[str, Any]]:
+            actual_path = path or kwargs.get("path", "")
+            result = await skill_runtime.read_file(actual_path)
+            if result.ok:
+                return result.content[:2000], {"ok": True, "content": result.content[:2000]}
+            return f"error: {result.error}", {"ok": False, "error": result.error}
+
+        read_file_tool = StructuredTool.from_function(
+            coroutine=_read_file_coroutine,
+            name="read_file",
+            description="Read a file from the skills directory. Use paths like /skills/downstream-timeout/SKILL.md",
+            args_schema=ReadFileArgs,
+            response_format="content_and_artifact",
+        )
+        tools.append(read_file_tool)
 
     return tools

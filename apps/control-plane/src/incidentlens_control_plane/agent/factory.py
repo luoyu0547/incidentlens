@@ -87,7 +87,7 @@ def build_investigation_engine(
         )
 
         evidence_recorder = EvidenceRecorder(audit_store)
-        tools = build_agent_tools(toolkit, evidence_recorder)
+        tools = build_agent_tools(toolkit, evidence_recorder, skill_runtime)
 
         graph = build_investigation_agent(
             model=model,
