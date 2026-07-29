@@ -73,6 +73,12 @@ class InvestigationStateResponse(BaseModel):
     fallback_used: bool = False
     last_error_code: str | None = None
     last_checkpoint_id: str | None = None
+    # Conclusion phase fields
+    conclusion_status: str = "not_ready"
+    conclusion_attempt_count: int = 0
+    eligible_cause_codes: list[str] = Field(default_factory=list)
+    eligible_evidence_ids: list[str] = Field(default_factory=list)
+    last_report_rejection_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +105,11 @@ def _build_state_response(state, *, include_mode: str = "") -> InvestigationStat
         fallback_used=getattr(state, "fallback_used", False),
         last_error_code=getattr(state, "last_error_code", None),
         last_checkpoint_id=getattr(state, "last_checkpoint_id", None),
+        conclusion_status=getattr(state, "conclusion_status", "not_ready"),
+        conclusion_attempt_count=getattr(state, "conclusion_attempt_count", 0),
+        eligible_cause_codes=getattr(state, "eligible_cause_codes", []),
+        eligible_evidence_ids=getattr(state, "eligible_evidence_ids", []),
+        last_report_rejection_reason=getattr(state, "last_report_rejection_reason", None),
     )
 
 
@@ -223,6 +234,34 @@ async def run_round(incident_id: str) -> InvestigationStateResponse:
             event_type="report_ready",
             data=state.report,
         ))
+
+    # Publish conclusion phase events
+    if _event_bus is not None:
+        if state.conclusion_status == "attempting":
+            _event_bus.publish(incident_id, SSEEvent(
+                event_type="conclusion_attempting",
+                data={
+                    "attempt": state.conclusion_attempt_count,
+                    "eligible_cause_codes": state.eligible_cause_codes,
+                },
+            ))
+        elif state.conclusion_status == "accepted":
+            _event_bus.publish(incident_id, SSEEvent(
+                event_type="conclusion_accepted",
+                data={
+                    "cause_code": state.report.get("root_cause") if state.report else None,
+                    "confidence": state.report.get("confidence") if state.report else None,
+                },
+            ))
+        elif state.conclusion_status == "rejected":
+            _event_bus.publish(incident_id, SSEEvent(
+                event_type="conclusion_rejected",
+                data={
+                    "reason": state.last_report_rejection_reason,
+                    "error_code": state.last_error_code,
+                    "attempt": state.conclusion_attempt_count,
+                },
+            ))
 
     # Clean up per-incident tracking when investigation is complete
     if state.status.value in ("report_ready", "needs_more_evidence"):
