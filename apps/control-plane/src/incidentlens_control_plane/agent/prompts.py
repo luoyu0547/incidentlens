@@ -130,6 +130,15 @@ def build_agent_context(state: IncidentAgentState) -> str:
     # --- Loaded skills ---
     if state.loaded_skill_names:
         lines.append(f"Loaded Skills: {', '.join(state.loaded_skill_names)}")
+    else:
+        lines.append(
+            "Available Skills (use read_file to load the full guide):\n"
+            "  - downstream-timeout: upstream latency/5xx from slow downstream spans\n"
+            "  - downstream-error: upstream failures from downstream error rate\n"
+            "  - database-pool-exhaustion: DB connection acquisition saturation\n"
+            "  - dependency-unavailable: unreachable service or network dependency\n"
+            "  - deployment-regression: failure correlated with recent deployment"
+        )
 
     # --- Budget ---
     remaining_model = max(0, 12 - state.model_call_count)
