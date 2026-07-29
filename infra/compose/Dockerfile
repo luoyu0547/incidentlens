@@ -15,6 +15,7 @@ COPY packages/contracts/ packages/contracts/
 COPY packages/telemetry/ packages/telemetry/
 COPY packages/scenarios/ packages/scenarios/
 COPY packages/evaluation/ packages/evaluation/
+COPY packages/demo/ packages/demo/
 COPY apps/shared-service/ apps/shared-service/
 COPY apps/gateway-service/ apps/gateway-service/
 COPY apps/order-service/ apps/order-service/
@@ -57,10 +58,11 @@ ENV CONTROL_PLANE_PORT=8003
 EXPOSE 8000 8001 8002 8003
 
 # Create data directory for SQLite
-RUN mkdir -p /data
+RUN mkdir -p /data && chmod 777 /data
 
 # Entry point selects which service to run
 CMD ["sh", "-c", "\
+    mkdir -p /data && \
     case $SERVICE in \
         gateway) uvicorn gateway_service.main:app --host 0.0.0.0 --port ${GATEWAY_PORT} ;; \
         order) uvicorn order_service.main:app --host 0.0.0.0 --port ${ORDER_PORT} ;; \
