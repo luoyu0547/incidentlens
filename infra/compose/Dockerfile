@@ -35,6 +35,10 @@ COPY --from=builder /app/packages /app/packages
 COPY --from=builder /app/apps /app/apps
 COPY --from=builder /app/pyproject.toml /app/pyproject.toml
 
+# Copy LLM agent config and skills
+COPY config/ config/
+COPY skills/ skills/
+
 # Set path to use venv
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app"

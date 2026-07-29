@@ -70,10 +70,18 @@ services:
       - SERVICE=control-plane
       - CONTROL_PLANE_PORT=8003
       - TELEMETRY_DB_URL=sqlite:///data/control_plane.db
+      - INCIDENTLENS_AGENT_MODE=${INCIDENTLENS_AGENT_MODE:-llm_agent}
+      - INCIDENTLENS_MODELS_CONFIG=/app/config/models.yaml
+      - INCIDENTLENS_LLM_ACTIVE_MODEL=${INCIDENTLENS_LLM_ACTIVE_MODEL:-deepseek}
+      - INCIDENTLENS_CHECKPOINT_DB=/data/agent_checkpoints.db
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - GLM_API_KEY=${GLM_API_KEY:-}
     ports:
       - "8003:8003"
     volumes:
       - control-plane-data:/data
+      - ../../config:/app/config:ro
+      - ../../skills:/app/skills:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/healthz')"]
       interval: 10s

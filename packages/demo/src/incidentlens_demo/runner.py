@@ -54,6 +54,12 @@ class DemoRunResult:
     report: dict[str, Any] | None
     failure_stage: str | None
     failure_message: str | None
+    mode: str = "llm_agent"
+    model_profile: str = ""
+    model_call_count: int = 0
+    tool_call_count: int = 0
+    loaded_skill_names: list[str] = field(default_factory=list)
+    fallback_used: bool = False
 
 
 class DemoRunner:
@@ -73,13 +79,22 @@ class DemoRunner:
         gateway_url: str,
         traffic_count: int = 3,
         compose: bool = False,
+        mode: str = "llm_agent",
     ) -> None:
         self._control_plane_url = control_plane_url.rstrip("/")
         self._gateway_url = gateway_url.rstrip("/")
         self._traffic_count = traffic_count
         self._compose = compose
+        self._mode = mode
         # Client is created fresh per run; tests can inject a mock via _client
         self._client: httpx.AsyncClient | Any | None = None
+
+    @property
+    def investigation_timeout_seconds(self) -> float:
+        """Timeout for investigation requests in seconds."""
+        if self._mode == "llm_agent":
+            return 1200
+        return 30
 
     # -----------------------------------------------------------------------
     # Public API

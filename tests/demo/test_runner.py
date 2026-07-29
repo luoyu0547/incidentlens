@@ -440,3 +440,23 @@ class TestDemoRunner:
         result = await runner.run("payment_delay")
         assert result.trace_ids is not None
         assert len(result.trace_ids) >= 1
+
+    def test_llm_runner_uses_twenty_minute_investigation_timeout(self) -> None:
+        from incidentlens_demo.runner import DemoRunner
+
+        runner = DemoRunner(
+            control_plane_url="http://control-plane",
+            gateway_url="http://gateway",
+            mode="llm_agent",
+        )
+        assert runner.investigation_timeout_seconds == 1200
+
+    def test_baseline_runner_uses_short_timeout(self) -> None:
+        from incidentlens_demo.runner import DemoRunner
+
+        runner = DemoRunner(
+            control_plane_url="http://control-plane",
+            gateway_url="http://gateway",
+            mode="deterministic_baseline",
+        )
+        assert runner.investigation_timeout_seconds == 30
