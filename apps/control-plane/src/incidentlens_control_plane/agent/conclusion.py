@@ -15,12 +15,12 @@ or construct a proposal — it only determines readiness and validates output.
 from __future__ import annotations
 
 from typing import Any
-from pydantic import BaseModel, Field, ValidationError
 
 from incidentlens_contracts.models import Evidence
+from pydantic import BaseModel, Field, ValidationError
+
 from incidentlens_control_plane.agent.skills import EvidencePolicy
 from incidentlens_control_plane.agent.types import RootCauseProposal
-
 
 # ---------------------------------------------------------------------------
 # Material evidence classification

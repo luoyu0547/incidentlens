@@ -21,12 +21,6 @@ from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
-from incidentlens_control_plane.agent.conclusion import (
-    build_conclusion_context,
-    classify_repair,
-    evaluate_conclusion_readiness,
-    parse_conclusion_output,
-)
 from incidentlens_control_plane.agent.middleware import (
     AuditMiddleware,
     BudgetEnforcementMiddleware,

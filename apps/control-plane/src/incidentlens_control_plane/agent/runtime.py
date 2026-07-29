@@ -601,7 +601,7 @@ class LLMInvestigationEngine:
 
         # Extract checkpoint_id from snapshot config
         checkpoint_id = None
-        if snapshot and snapshot.config:
+        if snapshot and hasattr(snapshot, "config") and snapshot.config:
             checkpoint_id = snapshot.config.get("configurable", {}).get("checkpoint_id")
 
         return InvestigationState(
