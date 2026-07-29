@@ -46,4 +46,9 @@ def project_investigation_state(raw: Mapping[str, Any]) -> InvestigationState:
         fallback_used=raw.get("fallback_used", False),
         last_error_code=raw.get("last_error_code"),
         last_checkpoint_id=raw.get("last_checkpoint_id"),
+        conclusion_status=raw.get("conclusion_status", "not_ready"),
+        conclusion_attempt_count=raw.get("conclusion_attempt_count", 0),
+        eligible_cause_codes=raw.get("eligible_cause_codes", []),
+        eligible_evidence_ids=raw.get("eligible_evidence_ids", []),
+        last_report_rejection_reason=raw.get("last_report_rejection_reason"),
     )

@@ -71,6 +71,10 @@ class LLMInvestigationEngine:
     Delegates reasoning to a compiled LangGraph agent graph and
     relies on LangGraph's checkpoint saver for state persistence.
     The runtime never calls ``CheckpointStore.save`` directly.
+
+    The engine implements a two-phase flow:
+      1. Investigation: gathers evidence using observability tools
+      2. Conclusion: emits a RootCauseProposal using only the proposal tool
     """
 
     mode = RuntimeMode.LLM_AGENT
@@ -83,12 +87,16 @@ class LLMInvestigationEngine:
         model_identity: ModelIdentity,
         case_repository: CaseRepository | None,
         total_timeout_seconds: float = 1200,
+        conclusion_agent: Any | None = None,
+        skill_runtime: Any | None = None,
     ) -> None:
         self._graph = graph
         self._audit_store = audit_store
         self._model_identity = model_identity
         self._case_repository = case_repository
         self._total_timeout_seconds = total_timeout_seconds
+        self._conclusion_agent = conclusion_agent
+        self._skill_runtime = skill_runtime
 
     @property
     def audit_store(self) -> InvestigationAuditStore:
@@ -176,7 +184,11 @@ class LLMInvestigationEngine:
         return saved
 
     async def run_round(self, incident_id: str) -> InvestigationState:
-        """Resume the graph for one bounded agent invocation."""
+        """Resume the graph for one bounded agent invocation.
+
+        After the investigation phase, checks conclusion readiness and
+        runs the conclusion phase if eligible.
+        """
         current = await self._project_state(incident_id)
         if current is None:
             raise ValueError(f"No investigation found for incident_id={incident_id}")
@@ -186,6 +198,14 @@ class LLMInvestigationEngine:
             InvestigationStatus.REPORT_READY,
             InvestigationStatus.NEEDS_MORE_EVIDENCE,
         ):
+            return current
+
+        # Check if conclusion is already accepted — don't restart
+        if current.conclusion_status == "accepted":
+            return current
+
+        # Check if conclusion failed terminally — don't restart
+        if current.conclusion_status == "rejected" and current.conclusion_attempt_count >= 2:
             return current
 
         self._audit_store.record(
@@ -198,6 +218,10 @@ class LLMInvestigationEngine:
             None,
             config={"configurable": {"thread_id": incident_id}},
         )
+
+        # Check conclusion readiness and run conclusion if eligible
+        if self._conclusion_agent is not None and self._skill_runtime is not None:
+            await self._maybe_run_conclusion(incident_id)
 
         return await self._project_state(incident_id)
 
@@ -219,6 +243,14 @@ class LLMInvestigationEngine:
         ):
             return saved
 
+        # Check if conclusion is already accepted — don't restart
+        if saved.conclusion_status == "accepted":
+            return saved
+
+        # Check if conclusion failed terminally — don't restart
+        if saved.conclusion_status == "rejected" and saved.conclusion_attempt_count >= 2:
+            return saved
+
         config = {"configurable": {"thread_id": incident_id}}
         snapshot = await self._graph.aget_state(config)
 
@@ -231,6 +263,10 @@ class LLMInvestigationEngine:
         except EmptyInputError as exc:
             raise CheckpointCorruptError(incident_id, str(exc)) from exc
 
+        # Check conclusion readiness and run conclusion if eligible
+        if self._conclusion_agent is not None and self._skill_runtime is not None:
+            await self._maybe_run_conclusion(incident_id)
+
         return await self._project_state(incident_id)
 
     async def load(self, incident_id: str) -> InvestigationState | None:
@@ -240,6 +276,271 @@ class LLMInvestigationEngine:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _maybe_run_conclusion(self, incident_id: str) -> None:
+        """Check conclusion readiness and run conclusion phase if eligible.
+
+        This method:
+        1. Evaluates conclusion readiness using the deterministic evaluator
+        2. If ready, runs the conclusion agent with only the proposal tool
+        3. Parses the result and applies the report gate
+        4. Records audit entries for every transition
+        """
+        from incidentlens_control_plane.agent.conclusion import (
+            build_conclusion_context,
+            classify_repair,
+            evaluate_conclusion_readiness,
+            parse_conclusion_output,
+        )
+
+        config = {"configurable": {"thread_id": incident_id}}
+        snapshot = await self._graph.aget_state(config)
+        values = snapshot.values if snapshot else None
+        if values is None:
+            return
+
+        def _get(key: str, default: Any = None) -> Any:
+            if isinstance(values, dict):
+                return values.get(key, default)
+            return getattr(values, key, default)
+
+        # Skip if already in conclusion phase
+        conclusion_status = _get("conclusion_status", "not_ready")
+        if conclusion_status in ("accepted", "attempting"):
+            return
+
+        # Skip if conclusion failed terminally
+        conclusion_attempt_count = _get("conclusion_attempt_count", 0)
+        if conclusion_status == "rejected" and conclusion_attempt_count >= 2:
+            return
+
+        # Evaluate readiness
+        loaded_skill_names = _get("loaded_skill_names", [])
+        evidence = _get("evidence", [])
+        alert = _get("alert", {})
+
+        readiness = evaluate_conclusion_readiness(
+            loaded_skill_names=loaded_skill_names,
+            policies_by_cause_code=self._skill_runtime.policies_by_cause_code,
+            evidence=evidence,
+            incident_id=incident_id,
+        )
+
+        if not readiness.ready:
+            return
+
+        # Record conclusion boundary
+        self._audit_store.record(
+            incident_id,
+            "conclusion_boundary_entered",
+            {
+                "eligible_cause_codes": readiness.eligible_cause_codes,
+                "eligible_evidence_count": len(readiness.eligible_evidence_ids),
+            },
+        )
+
+        # Update state to attempting
+        await self._graph.aupdate_state(config, {
+            "conclusion_status": "attempting",
+            "conclusion_attempt_count": conclusion_attempt_count + 1,
+            "eligible_cause_codes": readiness.eligible_cause_codes,
+            "eligible_evidence_ids": readiness.eligible_evidence_ids,
+        })
+
+        # Build conclusion context
+        conclusion_context = build_conclusion_context(
+            incident_id=incident_id,
+            alert=alert,
+            loaded_skill_names=loaded_skill_names,
+            eligible_cause_codes=readiness.eligible_cause_codes,
+            material_evidence=[
+                ev for ev in evidence
+                if ev.content.get("incident_id") == incident_id
+                and ev.content.get("outcome") != "invalid_arguments"
+                and ev.content.get("outcome") != "error"
+                and (ev.content.get("data") or ev.content.get("count"))
+            ],
+            eligible_evidence_ids=readiness.eligible_evidence_ids,
+        )
+
+        # Run the conclusion agent
+        from langchain_core.messages import HumanMessage
+
+        try:
+            result = await self._conclusion_agent.ainvoke(
+                {
+                    "messages": [HumanMessage(content=conclusion_context)],
+                    "incident_id": incident_id,
+                    "status": "concluding",
+                    "phase": "conclusion",
+                    "alert": alert,
+                    "current_round": _get("current_round", 0),
+                    "max_rounds": _get("max_rounds", 8),
+                    "hypotheses": _get("hypotheses", []),
+                    "evidence": evidence,
+                    "retrieved_cases": _get("retrieved_cases", []),
+                    "loaded_skill_names": loaded_skill_names,
+                    "model_profile": _get("model_profile", ""),
+                    "model_call_count": 0,
+                    "tool_call_count": 0,
+                    "fallback_used": False,
+                    "report": None,
+                },
+                config,
+            )
+        except TimeoutError:
+            await self._record_recoverable_failure(
+                incident_id,
+                code=ERROR_MODEL_TIMEOUT,
+                safe_details={"profile": self._model_identity.profile, "phase": "conclusion"},
+            )
+            return
+
+        # Extract the structured response
+        proposal = None
+        if isinstance(result, dict):
+            proposal = result.get("structured_response") or result.get("report")
+        elif hasattr(result, "structured_response"):
+            proposal = result.structured_response
+
+        if proposal is None:
+            # Try to extract from messages
+            messages = result.get("messages", []) if isinstance(result, dict) else []
+            for msg in reversed(messages):
+                if hasattr(msg, "tool_calls"):
+                    for tc in msg.tool_calls:
+                        if tc.get("name") == "root_cause_proposal":
+                            try:
+                                from incidentlens_control_plane.agent.types import RootCauseProposal
+                                proposal = RootCauseProposal.model_validate(tc.get("args", {}))
+                            except Exception:
+                                pass
+                            break
+                if proposal is not None:
+                    break
+
+        if proposal is None:
+            # No proposal — record invalid output
+            self._audit_store.record(
+                incident_id,
+                "structured_output_invalid",
+                {"attempt": conclusion_attempt_count + 1, "error": "no_proposal_tool_call"},
+            )
+            await self._graph.aupdate_state(config, {
+                "conclusion_status": "rejected",
+                "last_error_code": ERROR_MODEL_OUTPUT_INVALID,
+            })
+            return
+
+        # Parse and validate the proposal
+        parse_result = parse_conclusion_output(
+            proposal,
+            eligible_cause_codes=readiness.eligible_cause_codes,
+            eligible_evidence_ids=readiness.eligible_evidence_ids,
+        )
+
+        if not parse_result.success:
+            # Check if repairable
+            repair = classify_repair(
+                parse_result,
+                eligible_cause_codes=readiness.eligible_cause_codes,
+                eligible_evidence_ids=readiness.eligible_evidence_ids,
+            )
+
+            self._audit_store.record(
+                incident_id,
+                "structured_output_invalid",
+                {
+                    "attempt": conclusion_attempt_count + 1,
+                    "error_code": parse_result.error_code,
+                    "repairable": repair.repairable,
+                },
+            )
+
+            if repair.repairable and conclusion_attempt_count < 2:
+                # Allow one repair — update state and return
+                await self._graph.aupdate_state(config, {
+                    "conclusion_status": "attempting",
+                    "last_error_code": parse_result.error_code,
+                })
+                return
+            else:
+                # Terminal failure
+                await self._graph.aupdate_state(config, {
+                    "conclusion_status": "rejected",
+                    "last_error_code": ERROR_MODEL_OUTPUT_INVALID,
+                })
+                return
+
+        # Valid proposal — apply report gate
+        from incidentlens_control_plane.agent.middleware import can_generate_guarded_report
+
+        raw_proposal = parse_result.proposal
+        gate_decision = can_generate_guarded_report(
+            {"evidence": evidence, "incident_id": incident_id},
+            raw_proposal,
+            self._skill_runtime.policies_by_cause_code,
+        )
+
+        if not gate_decision.allowed:
+            self._audit_store.record(
+                incident_id,
+                "report_gate_rejected",
+                {
+                    "attempt": conclusion_attempt_count + 1,
+                    "reason": gate_decision.reason,
+                    "cause_code": raw_proposal.cause_code,
+                },
+            )
+
+            if conclusion_attempt_count < 2:
+                # Allow one repair
+                await self._graph.aupdate_state(config, {
+                    "conclusion_status": "attempting",
+                    "last_report_rejection_reason": gate_decision.reason,
+                })
+                return
+            else:
+                # Terminal rejection
+                await self._graph.aupdate_state(config, {
+                    "conclusion_status": "rejected",
+                    "last_error_code": ERROR_BUDGET_EXHAUSTED,
+                    "last_report_rejection_reason": gate_decision.reason,
+                })
+                return
+
+        # Proposal accepted
+        self._audit_store.record(
+            incident_id,
+            "report_gate_accepted",
+            {
+                "cause_code": raw_proposal.cause_code,
+                "evidence_ids": raw_proposal.evidence_ids,
+                "confidence": raw_proposal.confidence,
+            },
+        )
+
+        # Build the report
+        report = {
+            "root_service": raw_proposal.root_service,
+            "root_cause": raw_proposal.cause_code,
+            "evidence_ids": raw_proposal.evidence_ids,
+            "confidence": raw_proposal.confidence,
+            "next_action": raw_proposal.next_action,
+        }
+
+        # Determine final status
+        if raw_proposal.next_action == "finish":
+            final_status = InvestigationStatus.REPORT_READY
+        else:
+            final_status = InvestigationStatus.NEEDS_MORE_EVIDENCE
+
+        await self._graph.aupdate_state(config, {
+            "conclusion_status": "accepted",
+            "status": final_status.value,
+            "report": report,
+            "phase": "conclusion_complete",
+        })
 
     async def _load_projected_state(self, incident_id: str) -> InvestigationState | None:
         """Alias for _project_state; loads state without advancing the graph."""
@@ -321,6 +622,11 @@ class LLMInvestigationEngine:
             fallback_used=_get("fallback_used", False),
             last_error_code=_get("last_error_code"),
             last_checkpoint_id=checkpoint_id,
+            conclusion_status=_get("conclusion_status", "not_ready"),
+            conclusion_attempt_count=_get("conclusion_attempt_count", 0),
+            eligible_cause_codes=_get("eligible_cause_codes", []),
+            eligible_evidence_ids=_get("eligible_evidence_ids", []),
+            last_report_rejection_reason=_get("last_report_rejection_reason"),
         )
 
 

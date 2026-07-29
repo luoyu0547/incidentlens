@@ -109,6 +109,13 @@ class InvestigationState(BaseModel):
     last_error_code: str | None = None
     last_checkpoint_id: str | None = None
 
+    # Conclusion phase fields
+    conclusion_status: str = "not_ready"  # not_ready | ready | attempting | accepted | rejected
+    conclusion_attempt_count: int = 0
+    eligible_cause_codes: list[str] = Field(default_factory=list)
+    eligible_evidence_ids: list[str] = Field(default_factory=list)
+    last_report_rejection_reason: str | None = None
+
     model_config = {"use_enum_values": False}
 
     @property

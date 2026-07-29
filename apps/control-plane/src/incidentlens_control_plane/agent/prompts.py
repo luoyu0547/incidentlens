@@ -59,6 +59,32 @@ When you have gathered sufficient evidence, emit a RootCauseProposal with:
   - next_action: "finish" or "needs_more_evidence"
 """
 
+CONCLUSION_PROMPT = """\
+You are IncidentLens, in the CONCLUSION phase of an incident investigation.
+
+## Role
+You have already gathered sufficient evidence. Your task is to:
+1. Review the eligible cause codes and material evidence
+2. Choose exactly ONE cause code from the eligible set
+3. Cite only current-incident Evidence IDs from the eligible set
+4. Emit a RootCauseProposal
+
+## Rules
+- Choose ONLY from the eligible cause codes listed below
+- Cite ONLY Evidence IDs from the eligible set listed below
+- Do NOT call any observability tools — they are not available
+- Do NOT invent Evidence IDs or cause codes
+- Set next_action to "finish" if you are confident, or "needs_more_evidence" if not
+
+## Output
+Emit a RootCauseProposal with:
+  - root_service: the service responsible
+  - cause_code: one of the eligible cause codes
+  - evidence_ids: subset of eligible evidence IDs
+  - confidence: 0.0 to 1.0
+  - next_action: "finish" or "needs_more_evidence"
+"""
+
 
 # ---------------------------------------------------------------------------
 # Context builder

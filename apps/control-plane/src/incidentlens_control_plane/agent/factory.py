@@ -80,7 +80,10 @@ def build_investigation_engine(
         identity = model_registry.identity()
 
         # Import here to avoid circular imports at module level
-        from incidentlens_control_plane.agent.graph import build_investigation_agent
+        from incidentlens_control_plane.agent.graph import (
+            build_conclusion_agent,
+            build_investigation_agent,
+        )
         from incidentlens_control_plane.agent.tool_adapter import (
             EvidenceRecorder,
             build_agent_tools,
@@ -98,11 +101,20 @@ def build_investigation_engine(
             allow_fallback=False,
         )
 
+        # Build conclusion agent for the two-phase flow
+        conclusion_agent = build_conclusion_agent(
+            model=model,
+            skill_runtime=skill_runtime,
+            audit_store=audit_store,
+        )
+
         return LLMInvestigationEngine(
             graph=graph,
             audit_store=audit_store,
             model_identity=identity,
             case_repository=case_repository,
+            conclusion_agent=conclusion_agent,
+            skill_runtime=skill_runtime,
         )
 
     # DETERMINISTIC_BASELINE

@@ -50,6 +50,13 @@ class IncidentAgentState(AgentState):
     last_error_code: NotRequired[str | None]
     last_checkpoint_id: NotRequired[str | None]
 
+    # Conclusion phase fields
+    conclusion_status: NotRequired[str]  # not_ready | ready | attempting | accepted | rejected
+    conclusion_attempt_count: NotRequired[int]
+    eligible_cause_codes: NotRequired[list[str]]
+    eligible_evidence_ids: NotRequired[list[str]]
+    last_report_rejection_reason: NotRequired[str | None]
+
 
 class InvestigationContext(BaseModel):
     """Immutable context passed to agent nodes at invocation time."""
