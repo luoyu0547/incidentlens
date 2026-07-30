@@ -13,6 +13,7 @@ Context is built from bounded summaries (not raw logs, keys, or headers).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 from incidentlens_control_plane.agent.types import IncidentAgentState
@@ -38,11 +39,16 @@ You investigate only the current incident.
 
 ## Available Skills
 Use read_file to load the full skill guide when you identify a matching symptom:
-- downstream-timeout: Diagnose upstream latency and 5xx caused by slow downstream spans or timeout behavior. Use when traces or logs indicate a slow dependency.
-- downstream-error: Diagnose upstream failures caused by an elevated downstream application error rate. Use when dependency spans and logs contain correlated errors.
-- database-pool-exhaustion: Diagnose request failures caused by database connection acquisition saturation. Use when pool timeout logs or pool metrics are present.
-- dependency-unavailable: Diagnose an unreachable service or network dependency. Use when connection failures and broken dependency traces occur.
-- deployment-regression: Diagnose a failure correlated with a recent version or configuration deployment. Use only when current telemetry and a change record align.
+- downstream-timeout: Diagnose slow downstream spans or timeout behavior.
+  Use when traces or logs indicate a slow dependency.
+- downstream-error: Diagnose an elevated downstream application error rate.
+  Use when dependency spans and logs contain correlated errors.
+- database-pool-exhaustion: Diagnose database connection acquisition saturation.
+  Use when pool timeout logs or pool metrics are present.
+- dependency-unavailable: Diagnose an unreachable service or network dependency.
+  Use when connection failures and broken dependency traces occur.
+- deployment-regression: Diagnose a recent version or configuration deployment.
+  Use only when current telemetry and a change record align.
 
 ## Investigation Order
 1. Read the alert and understand the symptom
@@ -105,6 +111,24 @@ def build_agent_context(state: IncidentAgentState) -> str:
     Never serializes raw API keys, Authorization headers, full unbounded
     logs, or hidden reasoning.
     """
+    if isinstance(state, dict):
+        defaults = {
+            "incident_id": "",
+            "status": "scoping",
+            "phase": "agent_loop",
+            "alert": {},
+            "current_round": 0,
+            "max_rounds": 8,
+            "hypotheses": [],
+            "evidence": [],
+            "retrieved_cases": [],
+            "loaded_skill_names": [],
+            "model_call_count": 0,
+            "tool_call_count": 0,
+            "last_error_code": None,
+        }
+        state = SimpleNamespace(**(defaults | state))
+
     lines: list[str] = []
 
     # --- Incident ID ---

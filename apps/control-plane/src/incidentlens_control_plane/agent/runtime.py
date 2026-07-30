@@ -16,6 +16,7 @@ from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
 
 from incidentlens_contracts.models import InvestigationStatus
+from langchain_core.messages import HumanMessage
 from langgraph.errors import EmptyInputError
 from langgraph.types import Command
 
@@ -177,10 +178,15 @@ class LLMInvestigationEngine:
                 code=ERROR_MODEL_TIMEOUT,
                 safe_details={"profile": self._model_identity.profile},
             )
-            return await self._load_projected_state(incident_id)
+            saved = await self._load_projected_state(incident_id)
+            if saved is None:
+                raise CheckpointCorruptError(incident_id, "timeout state was not saved")
+            return saved
 
         # Project the saved state from the graph
         saved = await self._project_state(incident_id)
+        if saved is None:
+            raise CheckpointCorruptError(incident_id, "graph completed without a checkpoint")
         return saved
 
     async def run_round(self, incident_id: str) -> InvestigationState:
@@ -214,8 +220,23 @@ class LLMInvestigationEngine:
             {"from": current.phase, "to": "agent_loop"},
         )
 
+        # A completed agent turn has no pending graph work.  Resuming it with
+        # ``None`` merely reloads the completed checkpoint and never gives the
+        # model an opportunity to execute the next Skill-directed action.
+        # Supply a bounded continuation request instead; the model still
+        # chooses the registered read-only tool or structured proposal.
         await self._graph.ainvoke(
-            None,
+            {
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "Continue the current investigation. Follow the loaded "
+                            "Skill's next evidence-gathering step, or submit a "
+                            "RootCauseProposal if the current evidence is sufficient."
+                        )
+                    )
+                ]
+            },
             config={"configurable": {"thread_id": incident_id}},
         )
 
@@ -223,7 +244,10 @@ class LLMInvestigationEngine:
         if self._conclusion_agent is not None and self._skill_runtime is not None:
             await self._maybe_run_conclusion(incident_id)
 
-        return await self._project_state(incident_id)
+        saved = await self._project_state(incident_id)
+        if saved is None:
+            raise CheckpointCorruptError(incident_id, "round completed without a checkpoint")
+        return saved
 
     async def resume(self, incident_id: str) -> InvestigationState | None:
         """Load the latest graph state and continue only if non-terminal.
@@ -601,8 +625,9 @@ class LLMInvestigationEngine:
 
         # Extract checkpoint_id from snapshot config
         checkpoint_id = None
-        if snapshot and hasattr(snapshot, "config") and snapshot.config:
-            checkpoint_id = snapshot.config.get("configurable", {}).get("checkpoint_id")
+        snapshot_config = getattr(snapshot, "config", None)
+        if snapshot_config:
+            checkpoint_id = snapshot_config.get("configurable", {}).get("checkpoint_id")
 
         return InvestigationState(
             incident_id=_get("incident_id", incident_id),

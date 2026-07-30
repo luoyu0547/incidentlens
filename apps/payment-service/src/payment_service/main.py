@@ -113,6 +113,20 @@ async def charge(
     if params is not None:
         delay_ms = params.get("delay_ms", 200)
         await asyncio.sleep(delay_ms / 1000.0)
+        _telemetry.emit_span(
+            trace_id,
+            f"{span_id}-complete",
+            "POST /charge complete",
+            parent_id=span_id,
+            duration_ms=delay_ms,
+        )
+        _telemetry.emit_metric(trace_id, "payment_latency_ms", float(delay_ms))
+        _telemetry.emit_log(
+            trace_id,
+            "WARN",
+            f"Payment processing delay observed: {delay_ms}ms",
+            duration_ms=delay_ms,
+        )
 
     # payment_error_rate: return 500 at configured rate
     params = active.get("payment_error_rate")
