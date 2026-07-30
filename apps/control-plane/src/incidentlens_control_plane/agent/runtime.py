@@ -42,6 +42,7 @@ ERROR_BUDGET_EXHAUSTED = "budget_exhausted"
 ERROR_MODEL_OUTPUT_INVALID = "model_output_invalid"
 ERROR_SKILL_LOAD_FAILED = "skill_load_failed"
 ERROR_CHECKPOINT_CORRUPT = "checkpoint_corrupt"
+ERROR_CONCLUSION_TERMINAL_FAILURE = "conclusion_terminal_failure"
 
 # ---------------------------------------------------------------------------
 # Shared async protocol
@@ -346,6 +347,12 @@ class LLMInvestigationEngine:
             fallback_used=_get("fallback_used", False),
             last_error_code=_get("last_error_code"),
             last_checkpoint_id=checkpoint_id,
+            conclusion_phase=_get("conclusion_phase", False),
+            eligible_cause_codes=_get("eligible_cause_codes", []),
+            eligible_evidence_ids=_get("eligible_evidence_ids", []),
+            conclusion_status=_get("conclusion_status", "not_ready"),
+            conclusion_attempt_count=_get("conclusion_attempt_count", 0),
+            last_report_rejection_reason=_get("last_report_rejection_reason"),
         )
 
 
