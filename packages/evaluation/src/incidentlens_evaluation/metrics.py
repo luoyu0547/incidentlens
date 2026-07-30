@@ -22,7 +22,9 @@ class RunRecord(BaseModel):
 
     Attributes:
         root_service_expected: the true root cause service (from scenario definition)
-        root_service_actual: the service identified by the investigation
+        root_service_actual: the service identified by the investigation (None if no report)
+        root_cause_type_expected: the expected cause code (from scenario definition)
+        root_cause_type_actual: the cause code identified by the investigation (None if no report)
         tool_calls: total number of tool calls made during the investigation
         evidence_reference_correct: whether evidence correctly references the root cause
         first_effective_round: the round number where the first effective hypothesis appeared
@@ -32,10 +34,12 @@ class RunRecord(BaseModel):
     """
 
     root_service_expected: str
-    root_service_actual: str
+    root_service_actual: str | None
+    root_cause_type_expected: str
+    root_cause_type_actual: str | None
     tool_calls: int
     evidence_reference_correct: bool = False
-    first_effective_round: int = 0
+    first_effective_round: int | None = None
     duplicate_calls: int = 0
     misleading_calls: int = 0
     latency_ms: float = 0.0
@@ -48,6 +52,7 @@ class EvaluationResult(BaseModel):
     """
 
     root_service_accuracy: float = 0.0
+    root_cause_type_accuracy: float = 0.0
     evidence_reference_correctness: float = 0.0
     first_effective_hypothesis_round: float = 0.0
     average_tool_calls: float = 0.0
@@ -68,18 +73,36 @@ def compute_metrics(records: list[RunRecord]) -> EvaluationResult:
     n = len(records)
 
     # Root service accuracy: fraction where actual matches expected
-    correct_count = sum(
-        1 for r in records if r.root_service_actual == r.root_service_expected
-    )
-    root_service_accuracy = correct_count / n
+    # Only count records that have an actual value (i.e., produced a report)
+    records_with_report = [r for r in records if r.root_service_actual is not None]
+    if records_with_report:
+        service_correct = sum(
+            1 for r in records_with_report
+            if r.root_service_actual == r.root_service_expected
+        )
+        root_service_accuracy = service_correct / len(records_with_report)
+    else:
+        root_service_accuracy = 0.0
+
+    # Root cause type accuracy: fraction where actual matches expected
+    records_with_cause = [r for r in records if r.root_cause_type_actual is not None]
+    if records_with_cause:
+        cause_correct = sum(
+            1 for r in records_with_cause
+            if r.root_cause_type_actual == r.root_cause_type_expected
+        )
+        root_cause_type_accuracy = cause_correct / len(records_with_cause)
+    else:
+        root_cause_type_accuracy = 0.0
 
     # Evidence reference correctness: percentage of runs with correct refs
     correct_refs = sum(1 for r in records if r.evidence_reference_correct)
     evidence_reference_correctness = (correct_refs / n) * 100.0
 
-    # First effective hypothesis round: average across runs (0 means none found)
+    # First effective hypothesis round: average across runs (None means none found)
     effective_rounds = [
-        r.first_effective_round for r in records if r.first_effective_round > 0
+        r.first_effective_round for r in records
+        if r.first_effective_round is not None and r.first_effective_round > 0
     ]
     first_effective_hypothesis_round = (
         sum(effective_rounds) / len(effective_rounds) if effective_rounds else 0.0
@@ -102,6 +125,7 @@ def compute_metrics(records: list[RunRecord]) -> EvaluationResult:
 
     return EvaluationResult(
         root_service_accuracy=root_service_accuracy,
+        root_cause_type_accuracy=root_cause_type_accuracy,
         evidence_reference_correctness=evidence_reference_correctness,
         first_effective_hypothesis_round=first_effective_hypothesis_round,
         average_tool_calls=average_tool_calls,
