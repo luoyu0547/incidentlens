@@ -7,6 +7,7 @@ Composes the agent with:
   - EvidenceRecordingMiddleware for evidence extraction
   - BudgetEnforcementMiddleware for model/tool call limits
   - ReportGateMiddleware for evidence policy gating
+  - ConclusionBoundaryMiddleware for tool restriction during conclusion
 
 Uses only public LangChain/LangGraph APIs (create_agent, middleware).
 """

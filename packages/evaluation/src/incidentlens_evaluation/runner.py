@@ -12,6 +12,7 @@ run_evaluation(strategy, scenario) runs all 5 scenarios and returns aggregated m
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -190,11 +191,17 @@ def run_single(strategy: str, scenario_name: str) -> RunRecord:
             break
 
     # Count duplicate and misleading calls
+    # Duplicates are defined by same tool_name + normalized_args (not tool_call_id)
     seen_tools: set[str] = set()
     duplicate_calls = 0
     misleading_calls = 0
     for ev in state.evidence:
-        key = f"{ev.source_tool}:{ev.tool_call_id}"
+        # Normalize args by removing incident_id (which is always injected)
+        normalized_args = {
+            k: v for k, v in ev.content.items()
+            if k != "incident_id"
+        } if isinstance(ev.content, dict) else {}
+        key = f"{ev.source_tool}:{json.dumps(normalized_args, sort_keys=True, default=str)}"
         if key in seen_tools:
             duplicate_calls += 1
         seen_tools.add(key)

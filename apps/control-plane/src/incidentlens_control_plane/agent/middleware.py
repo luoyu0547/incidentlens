@@ -37,7 +37,13 @@ from incidentlens_control_plane.agent.types import IncidentAgentState, RootCause
 
 
 class InvestigationContextMiddleware(AgentMiddleware[IncidentAgentState, Any]):
-    """Attach the current bounded investigation state to every model call."""
+    """Attach the current bounded investigation state to every model call.
+
+    Also evaluates conclusion readiness after each model call via the
+    ``aafter_model`` hook.  When sufficient evidence is collected and a
+    valid RootCauseProposal is emitted, the middleware transitions the
+    state to the conclusion phase.
+    """
 
     name = "InvestigationContextMiddleware"
 
@@ -73,6 +79,61 @@ class InvestigationContextMiddleware(AgentMiddleware[IncidentAgentState, Any]):
             ),
         )
         return await handler(enriched_request)
+
+    async def aafter_model(
+        self,
+        state: IncidentAgentState,
+        runtime: Any,
+    ) -> dict[str, Any] | None:
+        """After each model call, evaluate conclusion readiness.
+
+        If the model emitted a RootCauseProposal and the evidence meets
+        the readiness criteria, set conclusion_phase and eligible IDs.
+        """
+        from incidentlens_control_plane.agent.conclusion import (
+            evaluate_conclusion_readiness,
+        )
+
+        # Only evaluate when material evidence and skills are loaded
+        if not _has_material_evidence(state):
+            return None
+        if not state.get("loaded_skill_names"):
+            return None
+
+        # Check if structured_response is a valid proposal
+        structured = state.get("structured_response")
+        if not isinstance(structured, RootCauseProposal):
+            return None
+
+        # Get skills reference from runtime
+        skill_runtime = getattr(runtime, "_skill_runtime", None)
+        if skill_runtime is None:
+            # Try to get from the report gate middleware
+            for mw in getattr(runtime, "_middleware", []):
+                if hasattr(mw, "_skill_runtime"):
+                    skill_runtime = mw._skill_runtime
+                    break
+        if skill_runtime is None:
+            return None
+
+        policies = skill_runtime.policies_by_cause_code
+
+        readiness = evaluate_conclusion_readiness(
+            incident_id=state.get("incident_id", ""),
+            loaded_skill_names=state.get("loaded_skill_names", []),
+            evidence=state.get("evidence", []),
+            policies=policies,
+        )
+
+        if readiness.ready:
+            return {
+                "conclusion_phase": True,
+                "eligible_cause_codes": readiness.eligible_cause_codes,
+                "eligible_evidence_ids": readiness.eligible_evidence_ids,
+                "conclusion_status": "ready",
+            }
+
+        return None
 
 
 def _has_material_evidence(state: IncidentAgentState) -> bool:
