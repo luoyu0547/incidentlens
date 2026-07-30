@@ -22,7 +22,6 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from incidentlens_scenarios.models import SCENARIOS
 
-
 # ---------------------------------------------------------------------------
 # ORM Base for scenario tables
 # ---------------------------------------------------------------------------

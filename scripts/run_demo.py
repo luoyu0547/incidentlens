@@ -6,7 +6,7 @@ Runs end-to-end demo scenarios via public APIs.
 Usage:
     python scripts/run_demo.py --scenario payment_delay
     python scripts/run_demo.py --all
-    python scripts/run_demo.py --all --control-plane-url http://localhost:8003 --gateway-url http://localhost:8000 --traffic-count 5
+    python scripts/run_demo.py --all --traffic-count 5
 
 Mutually exclusive:
     --scenario NAME   Run a single scenario
@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-from typing import Any
 
 from incidentlens_demo.runner import SCENARIO_NAMES, DemoRunner, DemoRunResult
 

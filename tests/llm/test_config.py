@@ -1,13 +1,12 @@
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
-
 from incidentlens_control_plane.llm.config import (
     RuntimeMode,
     load_models_config,
     resolve_model_profile,
 )
+from pydantic import ValidationError
 
 
 def write_config(tmp_path: Path, body: str) -> Path:
@@ -60,8 +59,21 @@ fallback_models: []
     "body",
     [
         "active_model: missing\nmodels: {}\nfallback_models: []\n",
-        "active_model: deepseek\nmodels:\n  deepseek:\n    adapter: openai_compatible\n    model: ''\n    base_url: not-a-url\n    api_key_env: DEEPSEEK_API_KEY\nfallback_models: []\n",
-        "active_model: deepseek\nmodels:\n  deepseek:\n    adapter: openai_compatible\n    model: deepseek-chat\n    base_url: https://api.deepseek.com\n    api_key_env: DEEPSEEK_API_KEY\n    unknown: true\nfallback_models: []\n",
+        "active_model: deepseek\n"
+        "models:\n  deepseek:\n"
+        "    adapter: openai_compatible\n"
+        "    model: ''\n"
+        "    base_url: not-a-url\n"
+        "    api_key_env: DEEPSEEK_API_KEY\n"
+        "fallback_models: []\n",
+        "active_model: deepseek\n"
+        "models:\n  deepseek:\n"
+        "    adapter: openai_compatible\n"
+        "    model: deepseek-chat\n"
+        "    base_url: https://api.deepseek.com\n"
+        "    api_key_env: DEEPSEEK_API_KEY\n"
+        "    unknown: true\n"
+        "fallback_models: []\n",
     ],
 )
 def test_invalid_model_config_fails(tmp_path: Path, body: str) -> None:

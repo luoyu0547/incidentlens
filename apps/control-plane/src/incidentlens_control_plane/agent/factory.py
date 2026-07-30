@@ -18,7 +18,7 @@ from incidentlens_control_plane.agent.state import (
     InvestigationAuditStore,
 )
 from incidentlens_control_plane.llm.config import RuntimeMode
-from incidentlens_control_plane.llm.registry import ModelIdentity, ModelRegistry
+from incidentlens_control_plane.llm.registry import ModelRegistry
 from incidentlens_control_plane.memory.repository import CaseRepository
 from incidentlens_control_plane.tools.query import ReadOnlyToolkit
 
@@ -98,7 +98,7 @@ def build_investigation_engine(
             allow_fallback=False,
         )
 
-        return LLMInvestigationEngine(
+        return LLMInvestigationEngine(  # type: ignore[return-value]
             graph=graph,
             audit_store=audit_store,
             model_identity=identity,

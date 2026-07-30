@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 
 import pytest
-
 from incidentlens_control_plane.llm.canary import run_model_canary
 from incidentlens_control_plane.llm.config import load_models_config
 from incidentlens_control_plane.llm.registry import ModelRegistry

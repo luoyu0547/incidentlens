@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import pytest
-
 from incidentlens_control_plane.agent.skills import SkillRuntime
 
 EXPECTED = {

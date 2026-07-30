@@ -14,10 +14,8 @@ These tests verify:
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import Engine
-
 from incidentlens_telemetry.database import create_engine
-
+from sqlalchemy import Engine
 
 # ---------------------------------------------------------------------------
 # Fixtures

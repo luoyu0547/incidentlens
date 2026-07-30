@@ -40,7 +40,7 @@ async def reset_demo(control_plane_url: str) -> None:
                 data = resp.json()
                 scenarios_cleared = data.get("scenarios_cleared", False)
                 tables_cleared = data.get("tables_cleared", {})
-                print(f"Demo reset complete.")
+                print("Demo reset complete.")
                 print(f"  Scenarios cleared: {scenarios_cleared}")
                 if tables_cleared:
                     for table, count in tables_cleared.items():

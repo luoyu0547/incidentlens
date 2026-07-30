@@ -3,7 +3,6 @@ from typing import Any
 
 import httpx
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage
 from langchain_core.runnables import RunnableConfig
 
 

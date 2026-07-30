@@ -7,12 +7,11 @@ TDD RED phase: these tests define the desired interface for:
 """
 
 import pytest
-from pydantic import ValidationError
-
 from incidentlens_control_plane.agent.tool_adapter import (
     EvidenceRecorder,
     build_agent_tools,
 )
+from pydantic import ValidationError
 
 
 def _tool_call(tool_name: str, args: dict, call_id: str = "call-1") -> dict:

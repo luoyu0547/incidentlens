@@ -9,7 +9,6 @@ Uses real SQLite (not mocked) to verify:
 from __future__ import annotations
 
 import pytest
-
 from incidentlens_control_plane.agent.checkpoint import CheckpointCorruptError
 
 

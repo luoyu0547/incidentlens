@@ -13,17 +13,14 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-import pytest
 from incidentlens_contracts.models import (
     Evidence,
     Hypothesis,
     HypothesisStatus,
     InvestigationStatus,
 )
-
 from incidentlens_control_plane.agent.reporting import can_generate_report, generate_report
 from incidentlens_control_plane.agent.state import InvestigationState
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -67,7 +64,8 @@ class TestAssessEvidencePaymentDelay:
     """Payment delay scenario: payment-service with latency evidence."""
 
     def test_payment_latency_logs_creates_payment_candidate(self) -> None:
-        """Log evidence with payment-service latency maps to payment-service / payment_latency_spike."""
+        """Log evidence with payment-service latency maps to payment-service
+        / payment_latency_spike."""
         from incidentlens_control_plane.agent.evidence_rules import assess_evidence
 
         evidence = _make_evidence(
@@ -118,7 +116,8 @@ class TestAssessEvidencePaymentErrorRate:
     """Payment error rate scenario: payment-service with error rate evidence."""
 
     def test_payment_error_log_creates_payment_candidate(self) -> None:
-        """Log evidence with payment-service error rate maps to payment-service / payment_service_degradation."""
+        """Log evidence with payment-service error rate maps to
+        payment-service / payment_service_degradation."""
         from incidentlens_control_plane.agent.evidence_rules import assess_evidence
 
         evidence = _make_evidence(
@@ -165,7 +164,8 @@ class TestAssessEvidenceDBPoolExhaustion:
     """DB pool exhaustion scenario: order-service with connection pool evidence."""
 
     def test_db_pool_exhaustion_logs_creates_order_candidate(self) -> None:
-        """Log evidence with connection pool exhaustion maps to order-service / database_connection_leak."""
+        """Log evidence with connection pool exhaustion maps to
+        order-service / database_connection_leak."""
         from incidentlens_control_plane.agent.evidence_rules import assess_evidence
 
         evidence = _make_evidence(
@@ -273,7 +273,8 @@ class TestAssessEvidenceDeploymentRegression:
         assert assessments[0].root_cause == "bad_deployment"
 
     def test_deployment_with_errors_creates_bad_deployment(self) -> None:
-        """Deployment evidence combined with error logs produces bad_deployment for payment-service."""
+        """Deployment evidence combined with error logs produces
+        bad_deployment for payment-service."""
         from incidentlens_control_plane.agent.evidence_rules import assess_evidence
 
         # Deployment evidence with a non-buggy version (just a recent deploy)
@@ -391,7 +392,8 @@ class TestReportGuardEvidenceOwnership:
     """Report guard requires evidence_ids to be owned by the current incident."""
 
     def test_report_rejects_evidence_not_owned_by_incident(self) -> None:
-        """Report cannot be generated if supporting evidence is not in the incident's evidence list."""
+        """Report cannot be generated if supporting evidence is not in the
+        incident's evidence list."""
         hyp = Hypothesis(
             id=str(uuid4()),
             description="Payment service is slow",
@@ -757,7 +759,10 @@ class TestContradictsAssessments:
         assessments = assess_evidence(evidence)
         contradicts = [a for a in assessments if a.contradicts]
         assert len(contradicts) > 0
-        degradation_contradicts = [a for a in contradicts if a.root_cause == "payment_service_degradation"]
+        degradation_contradicts = [
+            a for a in contradicts
+            if a.root_cause == "payment_service_degradation"
+        ]
         assert len(degradation_contradicts) > 0
         assert degradation_contradicts[0].supports is False
 

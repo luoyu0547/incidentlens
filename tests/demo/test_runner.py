@@ -19,10 +19,9 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from incidentlens_scenarios.models import SCENARIOS
 
 import pytest
-
+from incidentlens_scenarios.models import SCENARIOS
 
 # ---------------------------------------------------------------------------
 # Helpers: mock HTTP responses for each API stage
@@ -74,7 +73,13 @@ def _make_round_response(
             "root_service": root_service,
             "root_cause": "payment_service_degradation",
             "evidence_ids": eids,
-            "findings": [{"evidence_id": eids[0], "source_tool": "search_logs", "content": {}}] if eids else [],
+            "findings": [
+                {
+                    "evidence_id": eids[0],
+                    "source_tool": "search_logs",
+                    "content": {},
+                }
+            ] if eids else [],
             "rounds_completed": current_round,
             "uncertainty": 0.1,
         }
@@ -189,7 +194,9 @@ class TestDemoRunner:
     """Tests for the DemoRunner orchestration logic."""
 
     @pytest.mark.asyncio
-    async def test_runner_uses_public_api_and_returns_report(self, mock_client: MockAsyncClient) -> None:
+    async def test_runner_uses_public_api_and_returns_report(
+        self, mock_client: MockAsyncClient
+    ) -> None:
         """Core TDD test: DemoRunner uses public APIs and returns a passing DemoRunResult."""
         from incidentlens_demo.runner import DemoRunner
 
@@ -219,7 +226,9 @@ class TestDemoRunner:
             (m, u) for m, u, _ in mock_client._call_log
             if m == "POST" and u.endswith("/api/scenarios/reset")
         ]
-        assert len(reset_calls) >= 2, f"Expected >=2 reset calls, got {len(reset_calls)}"
+        assert len(reset_calls) >= 2, (
+            f"Expected >=2 reset calls, got {len(reset_calls)}"
+        )
 
     @pytest.mark.asyncio
     async def test_runner_enables_scenario(self, mock_client: MockAsyncClient) -> None:
@@ -240,14 +249,16 @@ class TestDemoRunner:
         assert "payment_delay" in enable_calls[0][1]
 
     @pytest.mark.asyncio
-    async def test_runner_starts_investigation_with_trace_ids(self, mock_client: MockAsyncClient) -> None:
+    async def test_runner_starts_investigation_with_trace_ids(
+        self, mock_client: MockAsyncClient
+    ) -> None:
         """Runner must start investigation with trace_ids from traffic."""
         from incidentlens_demo.runner import DemoRunner
 
         runner = DemoRunner("http://control", "http://gateway", traffic_count=1)
         runner._client = mock_client
 
-        result = await runner.run("payment_delay")
+        await runner.run("payment_delay")
 
         start_calls = [
             body for m, u, body in mock_client._call_log
@@ -285,7 +296,8 @@ class TestDemoRunner:
 
         result = await runner.run("payment_delay")
         assert result.status == "failed"
-        assert "root_service" in (result.failure_message or "").lower() or "mismatch" in (result.failure_message or "").lower()
+        msg = result.failure_message or ""
+        assert "root_service" in msg.lower() or "mismatch" in msg.lower()
 
     @pytest.mark.asyncio
     async def test_runner_returns_failure_on_empty_evidence_ids(self) -> None:
@@ -346,7 +358,9 @@ class TestDemoRunner:
         assert result.status == "failed"
 
     @pytest.mark.asyncio
-    async def test_runner_never_exposes_root_cause_label(self, mock_client: MockAsyncClient) -> None:
+    async def test_runner_never_exposes_root_cause_label(
+        self, mock_client: MockAsyncClient
+    ) -> None:
         """DemoRunResult must never contain root_cause_label."""
         from incidentlens_demo.runner import DemoRunner
 
@@ -361,7 +375,7 @@ class TestDemoRunner:
     @pytest.mark.asyncio
     async def test_run_all_returns_list(self) -> None:
         """run_all() should return a list of DemoRunResult for each scenario."""
-        from incidentlens_demo.runner import DemoRunner, SCENARIO_NAMES
+        from incidentlens_demo.runner import SCENARIO_NAMES, DemoRunner
 
         # Build a mock client with enough responses for all scenarios
         n = len(SCENARIO_NAMES)
@@ -405,9 +419,14 @@ class TestDemoRunner:
 
         client = MockAsyncClient(responses={
             "POST /api/scenarios/reset": [_make_reset_response(), _make_reset_response()],
-            "POST /api/scenarios/payment_error_rate/enable": [_make_enable_response("payment_error_rate")],
+            "POST /api/scenarios/payment_error_rate/enable": [
+                _make_enable_response("payment_error_rate")
+            ],
             "GET /api/scenarios/runtime/payment-service": [
-                _make_runtime_response("payment-service", {"payment_error_rate": {"error_rate": 1.0}})
+                _make_runtime_response(
+                    "payment-service",
+                    {"payment_error_rate": {"error_rate": 1.0}},
+                )
             ],
             "POST /orders": [_make_order_response("trace-1")],
             "GET /healthz": [{"status": "ok"}],

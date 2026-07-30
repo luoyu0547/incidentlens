@@ -13,10 +13,9 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel
-
 from incidentlens_scenarios.models import SCENARIOS
 from incidentlens_scenarios.store import ScenarioStore
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/scenarios", tags=["scenarios"])
 

@@ -1,7 +1,7 @@
 from incidentlens_control_plane.llm.canary import CanaryResult, run_model_canary
 from incidentlens_control_plane.llm.config import (
-    ModelsConfig,
     ModelProfile,
+    ModelsConfig,
     ResolvedModelProfile,
     RuntimeMode,
     load_models_config,

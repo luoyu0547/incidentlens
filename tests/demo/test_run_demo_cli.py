@@ -12,15 +12,11 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import sys
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from incidentlens_demo.runner import DemoRunResult
-
 
 # ---------------------------------------------------------------------------
 # Import the run_demo script as a module
@@ -76,7 +72,13 @@ def _failing_result(scenario: str = "payment_delay") -> DemoRunResult:
 class FakePassingRunner:
     """A fake DemoRunner that always returns passing results."""
 
-    def __init__(self, control_plane_url: str, gateway_url: str, traffic_count: int = 3, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        control_plane_url: str,
+        gateway_url: str,
+        traffic_count: int = 3,
+        **kwargs: Any,
+    ) -> None:
         self.control_plane_url = control_plane_url
         self.gateway_url = gateway_url
         self.traffic_count = traffic_count
@@ -92,7 +94,13 @@ class FakePassingRunner:
 class FakeFailingRunner:
     """A fake DemoRunner that returns a failing result for one scenario."""
 
-    def __init__(self, control_plane_url: str, gateway_url: str, traffic_count: int = 3, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        control_plane_url: str,
+        gateway_url: str,
+        traffic_count: int = 3,
+        **kwargs: Any,
+    ) -> None:
         self.control_plane_url = control_plane_url
         self.gateway_url = gateway_url
         self.traffic_count = traffic_count
@@ -119,7 +127,11 @@ class FakeFailingRunner:
 class TestRunDemoCLI:
     """Tests for the run_demo.py CLI script."""
 
-    def test_cli_all_prints_each_scenario(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_cli_all_prints_each_scenario(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
         """--all should print each scenario name with status."""
         run_demo = _load_run_demo()
         monkeypatch.setattr(run_demo, "DemoRunner", FakePassingRunner)
@@ -127,7 +139,11 @@ class TestRunDemoCLI:
         output = capsys.readouterr().out
         assert "deployment_regression: passed" in output
 
-    def test_cli_scenario_prints_result(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_cli_scenario_prints_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
         """--scenario NAME should print the scenario result."""
         run_demo = _load_run_demo()
         monkeypatch.setattr(run_demo, "DemoRunner", FakePassingRunner)
@@ -135,14 +151,22 @@ class TestRunDemoCLI:
         output = capsys.readouterr().out
         assert "payment_delay: passed" in output
 
-    def test_cli_nonzero_exit_on_failure(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_cli_nonzero_exit_on_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
         """CLI should return nonzero exit code when any scenario fails."""
         run_demo = _load_run_demo()
         monkeypatch.setattr(run_demo, "DemoRunner", FakeFailingRunner)
         result = run_demo.main(["--scenario", "payment_delay"])
         assert result != 0
 
-    def test_cli_all_nonzero_on_any_failure(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_cli_all_nonzero_on_any_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
         """--all should return nonzero when any scenario fails."""
         run_demo = _load_run_demo()
         monkeypatch.setattr(run_demo, "DemoRunner", FakeFailingRunner)
@@ -166,7 +190,11 @@ class TestRunDemoCLI:
             run_demo.main([])
         assert exc_info.value.code == 2
 
-    def test_cli_prints_incident_id_and_root_service(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_cli_prints_incident_id_and_root_service(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
         """CLI output should include incident_id and root_service."""
         run_demo = _load_run_demo()
         monkeypatch.setattr(run_demo, "DemoRunner", FakePassingRunner)
@@ -175,7 +203,11 @@ class TestRunDemoCLI:
         assert "inc-1" in output
         assert "payment-service" in output
 
-    def test_cli_prints_evidence_ids(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_cli_prints_evidence_ids(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
         """CLI output should include evidence IDs."""
         run_demo = _load_run_demo()
         monkeypatch.setattr(run_demo, "DemoRunner", FakePassingRunner)
@@ -183,7 +215,11 @@ class TestRunDemoCLI:
         output = capsys.readouterr().out
         assert "ev-1" in output
 
-    def test_cli_never_exposes_root_cause_label(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_cli_never_exposes_root_cause_label(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
         """CLI output must never contain root_cause_label."""
         run_demo = _load_run_demo()
         monkeypatch.setattr(run_demo, "DemoRunner", FakePassingRunner)
@@ -191,7 +227,11 @@ class TestRunDemoCLI:
         output = capsys.readouterr().out
         assert "root_cause_label" not in output
 
-    def test_cli_accepts_url_and_traffic_count_options(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_cli_accepts_url_and_traffic_count_options(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
         """CLI should accept --control-plane-url, --gateway-url, --traffic-count."""
         run_demo = _load_run_demo()
         monkeypatch.setattr(run_demo, "DemoRunner", FakePassingRunner)

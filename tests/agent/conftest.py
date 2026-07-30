@@ -9,17 +9,12 @@ and checkpoint corruption scenarios.
 
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, field
+import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.tools import BaseTool
-from langgraph.types import Command, interrupt
-
 from incidentlens_control_plane.agent.checkpoint import AgentCheckpointRuntime
 from incidentlens_control_plane.agent.graph import build_investigation_agent
 from incidentlens_control_plane.agent.middleware import can_generate_guarded_report
@@ -34,16 +29,17 @@ from incidentlens_control_plane.agent.types import (
 )
 from incidentlens_control_plane.llm.registry import ModelIdentity
 from incidentlens_control_plane.tools.query import ReadOnlyToolkit
-import sys
-from pathlib import Path
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.tools import BaseTool
+from langgraph.types import interrupt
 
 # Add project root to sys.path so that tests.support is importable
 _project_root = str(Path(__file__).resolve().parents[2])
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from tests.support.fake_chat_model import ScriptedChatModel
-
+from tests.support.fake_chat_model import ScriptedChatModel  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # InterruptibleScriptedChatModel
@@ -57,8 +53,10 @@ class InterruptibleScriptedChatModel(ScriptedChatModel):
       - 1st call: emits a ``search_logs`` tool call.
       - 2nd call: one of three things depending on flags:
         * ``interrupt_before_second_model_call`` is True  -> calls ``interrupt()``
-        * ``timeout_before_second_model_call`` is True    -> raises ``TimeoutError``
-        * otherwise                                       -> emits a valid ``RootCauseProposal`` tool call
+        * ``timeout_before_second_model_call`` is True
+          -> raises ``TimeoutError``
+        * otherwise
+          -> emits a valid ``RootCauseProposal`` tool call
       - 3rd+ call: emits a valid ``RootCauseProposal`` tool call.
     """
 
@@ -488,7 +486,11 @@ async def recovery_harness(
         engine = LLMInvestigationEngine(
             graph=graph,
             audit_store=investigation_audit_store,
-            model_identity=ModelIdentity(profile="test-model", model="test", endpoint_host="localhost"),
+            model_identity=ModelIdentity(
+                profile="test-model",
+                model="test",
+                endpoint_host="localhost",
+            ),
             case_repository=None,
             total_timeout_seconds=5.0,
         )
