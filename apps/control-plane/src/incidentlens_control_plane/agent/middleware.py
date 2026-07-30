@@ -49,6 +49,17 @@ class InvestigationContextMiddleware(AgentMiddleware[IncidentAgentState, Any]):
         base_prompt = request.system_message.text if request.system_message else ""
         state = cast(IncidentAgentState, request.state)
         context = build_agent_context(state)
+
+        # In conclusion phase, use conclusion-specific context
+        if state.get("conclusion_phase"):
+            conclusion_ctx = _build_conclusion_context(state)
+            enriched_request = request.override(
+                system_message=SystemMessage(
+                    content=f"{base_prompt}\n\n## Conclusion Phase\n{conclusion_ctx}"
+                ),
+            )
+            return await handler(enriched_request)
+
         if _has_material_evidence(state) and state.get("loaded_skill_names"):
             context += (
                 "\n\nDecision checkpoint: you have current evidence from multiple "
@@ -56,20 +67,10 @@ class InvestigationContextMiddleware(AgentMiddleware[IncidentAgentState, Any]):
                 "a cause, stop querying and call RootCauseProposal now with only the "
                 "current Evidence IDs that support your conclusion."
             )
-            enriched_request = request.override(
-                system_message=SystemMessage(
-                    content=f"{base_prompt}\n\n## Current Investigation State\n{context}"
-                ),
-                tool_choice={
-                    "type": "function",
-                    "function": {"name": "RootCauseProposal"},
-                },
-            )
-            return await handler(enriched_request)
         enriched_request = request.override(
             system_message=SystemMessage(
                 content=f"{base_prompt}\n\n## Current Investigation State\n{context}"
-            )
+            ),
         )
         return await handler(enriched_request)
 
@@ -420,6 +421,103 @@ class BudgetEnforcementMiddleware(AgentMiddleware[IncidentAgentState, Any]):
             )
 
         return await handler(request)
+
+
+# ---------------------------------------------------------------------------
+# Conclusion boundary middleware
+# ---------------------------------------------------------------------------
+
+CONCLUSION_TOOL = "RootCauseProposal"
+OBSERVABILITY_TOOLS = frozenset({
+    "search_logs",
+    "get_slow_traces",
+    "get_trace",
+    "query_metrics",
+    "get_service_dependencies",
+    "list_recent_deployments",
+    "get_runbook",
+})
+
+
+class ConclusionBoundaryMiddleware(AgentMiddleware[IncidentAgentState, Any]):
+    """Restrict available tools during the conclusion phase.
+
+    During the conclusion phase, only the RootCauseProposal tool is allowed.
+    Any attempt to call an observability tool is rejected with an error message,
+    preventing the model from mixing investigation and conclusion phases.
+    """
+
+    name = "ConclusionBoundaryMiddleware"
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Any,
+    ) -> ToolMessage | Command[Any]:
+        state = request.state
+        if not state.get("conclusion_phase"):
+            return await handler(request)
+
+        tool_name = request.tool_call.get("name", "")
+        if tool_name == CONCLUSION_TOOL:
+            return await handler(request)
+
+        # Reject non-proposal tools during conclusion
+        return ToolMessage(
+            content=(
+                f"Tool '{tool_name}' is not available during the conclusion phase. "
+                "Only RootCauseProposal is allowed. Please emit a valid proposal."
+            ),
+            tool_call_id=request.tool_call.get("id", ""),
+            status="error",
+        )
+
+
+def _build_conclusion_context(state: IncidentAgentState) -> str:
+    """Build a focused context string for the conclusion phase.
+
+    Includes only the incident summary, eligible cause codes, eligible
+    evidence IDs, and loaded skill names.  Does NOT include raw logs,
+    API keys, or hidden reasoning.
+    """
+    lines: list[str] = []
+    lines.append(f"Incident ID: {state.get('incident_id', '')}")
+    lines.append(f"Status: {state.get('status', '')}")
+
+    eligible_codes = state.get("eligible_cause_codes", [])
+    eligible_ids = state.get("eligible_evidence_ids", [])
+    lines.append(f"Eligible cause codes: {', '.join(eligible_codes)}")
+    lines.append(f"Eligible evidence IDs: {', '.join(eligible_ids)}")
+
+    loaded = state.get("loaded_skill_names", [])
+    if loaded:
+        lines.append(f"Loaded Skills: {', '.join(loaded)}")
+
+    # Brief evidence summary (only eligible evidence)
+    evidence = state.get("evidence", [])
+    ev_by_id: dict[str, Any] = {}
+    for e in evidence:
+        eid = e.id if hasattr(e, "id") else ""
+        ev_by_id[eid] = e
+    lines.append("Eligible evidence:")
+    for ev_id in eligible_ids:
+        ev = ev_by_id.get(ev_id)
+        if ev is None:
+            continue
+        source = (
+            ev.source_tool
+            if hasattr(ev, "source_tool")
+            else ev.get("source_tool", "")
+        )
+        lines.append(f"  - {ev_id}: {source}")
+
+    lines.append("")
+    lines.append(
+        "You MUST emit a RootCauseProposal with root_service, cause_code, "
+        "evidence_ids (from eligible evidence IDs only), confidence, and "
+        "next_action. Do NOT call any other tool."
+    )
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

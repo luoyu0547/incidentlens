@@ -24,6 +24,7 @@ from langchain_core.tools import BaseTool
 from incidentlens_control_plane.agent.middleware import (
     AuditMiddleware,
     BudgetEnforcementMiddleware,
+    ConclusionBoundaryMiddleware,
     DuplicateToolCallMiddleware,
     EvidenceRecordingMiddleware,
     IncidentToolContextMiddleware,
@@ -82,22 +83,25 @@ def build_investigation_agent(
     middleware.extend([fs_middleware, skills_middleware, skill_audit])
 
     # Audit middleware
-    middleware.append(InvestigationContextMiddleware())
-    middleware.append(AuditMiddleware(audit_store))
-    middleware.append(IncidentToolContextMiddleware())
-    middleware.append(DuplicateToolCallMiddleware())
+    middleware.append(InvestigationContextMiddleware())  # type: ignore[arg-type]
+    middleware.append(AuditMiddleware(audit_store))  # type: ignore[arg-type]
+    middleware.append(IncidentToolContextMiddleware())  # type: ignore[arg-type]
+    middleware.append(DuplicateToolCallMiddleware())  # type: ignore[arg-type]
 
     # Evidence recording middleware
-    middleware.append(EvidenceRecordingMiddleware())
+    middleware.append(EvidenceRecordingMiddleware())  # type: ignore[arg-type]
+
+    # Conclusion boundary middleware (restricts tools during conclusion phase)
+    middleware.append(ConclusionBoundaryMiddleware())  # type: ignore[arg-type]
 
     # Budget enforcement middleware
-    middleware.append(BudgetEnforcementMiddleware(model_limit=12, tool_limit=12))
+    middleware.append(BudgetEnforcementMiddleware(model_limit=12, tool_limit=12))  # type: ignore[arg-type]
 
     # Report gate middleware
-    middleware.append(ReportGateMiddleware(skill_runtime))
+    middleware.append(ReportGateMiddleware(skill_runtime))  # type: ignore[arg-type]
 
     # Build the agent
-    agent = create_agent(
+    agent = create_agent(  # type: ignore[misc]
         model=model,
         tools=list(tools),
         system_prompt=SYSTEM_PROMPT,
