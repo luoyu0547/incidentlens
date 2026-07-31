@@ -478,6 +478,50 @@ class CaseService:
 
             return _row_to_snapshot(row)
 
+    def get_by_incident(self, incident_id: str) -> dict[str, Any] | None:
+        """Return the case snapshot (as a dict) linked to *incident_id*, or None.
+
+        Used by the export service to include the associated case in the
+        export payload.
+        """
+        with self.repo.transaction() as session:
+            row = self.repo.get_by_incident(session, incident_id)
+            if row is None:
+                return None
+            return _row_to_snapshot(row).model_dump(mode="json")
+
+    def list_usage(self, incident_id: str) -> list:
+        """Return all usage events for *incident_id*.
+
+        Used by the export service to include usage events in the export
+        payload. Returns a list of ``CaseUsageEvent`` domain objects.
+        """
+        from incidentlens_control_plane.memory.domain import (
+            CaseUsageEvent,
+            UsageEventType,
+        )
+        from incidentlens_control_plane.memory.models import CaseUsageEventRow
+
+        with self.repo.transaction() as session:
+            rows = (
+                session.query(CaseUsageEventRow)
+                .filter(CaseUsageEventRow.investigation_id == incident_id)
+                .order_by(CaseUsageEventRow.id)
+                .all()
+            )
+        return [
+            CaseUsageEvent(
+                id=row.id,
+                case_id=row.case_id,
+                incident_id=row.investigation_id or "",
+                hypothesis_id=row.hypothesis_id,
+                event_type=UsageEventType(row.event_type),
+                idempotency_key=row.idempotency_key,
+                details=json.loads(row.details_json) if row.details_json else {},
+            )
+            for row in rows
+        ]
+
     def add_feedback(self, command: FeedbackCommand) -> FeedbackRecord:
         """Record feedback on a case search result.
 

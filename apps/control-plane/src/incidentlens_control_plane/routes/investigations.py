@@ -8,9 +8,10 @@ Provides:
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
 from incidentlens_control_plane.events import EventBus, SSEEvent
@@ -20,6 +21,8 @@ router = APIRouter(prefix="/api/investigations", tags=["investigations"])
 # Engine and event bus are set by main.py during app startup
 _engine: Any = None
 _event_bus: EventBus | None = None
+_case_service: Any = None
+_export_service: Any = None
 
 # Track which tool_call audit entries have already been published as SSE events
 # to avoid duplicates when run_round is called multiple times.
@@ -37,6 +40,18 @@ def set_event_bus(bus: EventBus) -> None:
     """Set the event bus for publishing SSE events."""
     global _event_bus
     _event_bus = bus
+
+
+def set_case_service(service: Any) -> None:
+    """Set the case service for the export endpoint."""
+    global _case_service
+    _case_service = service
+
+
+def set_export_service(service: Any) -> None:
+    """Set the investigation export service for the export endpoint."""
+    global _export_service
+    _export_service = service
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +88,8 @@ class InvestigationStateResponse(BaseModel):
     fallback_used: bool = False
     last_error_code: str | None = None
     last_checkpoint_id: str | None = None
+    case_id: int | None = None
+    case_status: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +116,8 @@ def _build_state_response(state, *, include_mode: str = "") -> InvestigationStat
         fallback_used=getattr(state, "fallback_used", False),
         last_error_code=getattr(state, "last_error_code", None),
         last_checkpoint_id=getattr(state, "last_checkpoint_id", None),
+        case_id=getattr(state, "case_id", None),
+        case_status=getattr(state, "case_status", None),
     )
 
 
@@ -248,3 +267,43 @@ async def resume_investigation(incident_id: str) -> InvestigationStateResponse:
         )
 
     return _build_state_response(state, include_mode=str(getattr(_engine, "mode", "")))
+
+
+@router.get("/{incident_id}/export")
+async def export_investigation(incident_id: str) -> Response:
+    """Export a versioned, redacted investigation payload for download.
+
+    Returns a JSON response with Content-Disposition attachment header.
+    The payload is sanitized to remove sensitive data (API keys, tokens,
+    Authorization headers, etc.) and gated by a maximum size limit.
+    """
+    if _export_service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Investigation export service not configured",
+        )
+
+    from incidentlens_control_plane.services.investigation_export import (
+        InvestigationExportNotFound,
+        InvestigationExportTooLarge,
+    )
+
+    try:
+        payload = await _export_service.build_export(incident_id)
+    except InvestigationExportNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except InvestigationExportTooLarge as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=str(exc),
+        ) from exc
+
+    filename = f"incidentlens-{incident_id}.json"
+    return Response(
+        content=json.dumps(payload),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

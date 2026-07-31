@@ -31,7 +31,7 @@ from incidentlens_control_plane.agent.state import (
     InvestigationAuditRow,
     InvestigationCheckpointRow,
 )
-from incidentlens_control_plane.memory.models import CaseFTSRow, CaseRow
+from incidentlens_control_plane.memory.models import CaseRow
 from incidentlens_control_plane.tools.base import ToolAuditRow
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ class DemoResetService:
             InvestigationAuditRow.__tablename__,       # investigation_audits
             ToolAuditRow.__tablename__,              # tool_audits
             CaseRow.__tablename__,                   # case_memory
-            CaseFTSRow.__tablename__,                # case_fts_index
+            "case_fts",                              # case_fts (FTS5 virtual table)
         ]
 
         deleted_counts: dict[str, int] = {}
