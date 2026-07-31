@@ -155,6 +155,7 @@ Web 只读取已完成的实际结果。没有运行结果时显示空状态，�
 
 - `id`；
 - 唯一 `incident_id`；
+- `source_reference`；
 - `status`；
 - `revision`；
 - `symptom`；
@@ -224,6 +225,7 @@ Web 只读取已完成的实际结果。没有运行结果时显示空状态，�
 - `semantic_score`；
 - `filter_score`；
 - `similarity_reason`；
+- `details`；
 - `idempotency_key`；
 - `created_at`。
 
@@ -277,6 +279,7 @@ draft ────────────────修改──> draft
 
 - `incident_id` 唯一，重复终态执行返回同一案例；
 - 客户端不能直接指定状态；
+- 新确认案例必须包含根因类别、根因描述、至少一条关键证据，以及解决方案或处置建议；
 - 修改已确认案例时立即移出 FTS5 和语义召回集合；
 - 重新确认后才恢复检索；
 - 非法跳转返回冲突，不静默纠正；
@@ -384,6 +387,7 @@ GET /api/cases/{case_id}/history
 ### 11.2 案例写入
 
 ```text
+POST  /api/cases
 PATCH /api/cases/{case_id}
 POST  /api/cases/{case_id}/confirm
 POST  /api/cases/{case_id}/reject
@@ -391,8 +395,9 @@ POST  /api/cases/{case_id}/deprecate
 POST  /api/cases/{case_id}/feedback
 ```
 
-修改、确认、驳回和废弃请求携带 `expected_version`、本地操作者标识和可选原因。操作者标识
-用于 Demo 审计，不构成身份认证。
+`POST /api/cases` 只允许创建 `draft`，忽略或拒绝客户端提交的其他目标状态。修改、确认、
+驳回和废弃请求携带 `expected_version`、本地操作者标识和可选原因。操作者标识用于 Demo
+审计，不构成身份认证。
 
 ### 11.3 调查与评测
 
@@ -490,6 +495,15 @@ Phase 5 引入显式 schema version 和事务迁移，禁止通过删除旧表�
 - API 不接受任意状态写入；
 - 工具安全边界继续保持只读；
 - Phase 5 不新增任何生产变更能力。
+
+Demo 重置区分两种显式范围：
+
+- `full`：清理场景、遥测、调查、案例治理和评测数据，用于从全新环境开始；
+- `incident`：清理场景、遥测、调查检查点和调查审计，但保留案例、案例反馈、案例使用
+  历史和评测结果，用于验证组织记忆能跨事故复用。
+
+现有默认行为保持 `full`。需要运行“确认案例后再次调查”的 DemoRunner 或 Compose
+验收时必须显式选择 `incident`，不得依靠测试进程内对象绕过公共重置 API。
 
 ## 16. 测试策略
 
