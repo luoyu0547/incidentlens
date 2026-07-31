@@ -63,6 +63,10 @@ class InvestigationContextMiddleware(AgentMiddleware[IncidentAgentState, Any]):
             # Already in conclusion phase — no state update needed
             return None
 
+        # If conclusion attempts exhausted, don't re-activate
+        if state.get("conclusion_attempt_count", 0) >= 2:
+            return None
+
         if not _has_material_evidence(state):
             return None
         if not state.get("loaded_skill_names"):
@@ -655,8 +659,34 @@ class ReportGateMiddleware(AgentMiddleware[IncidentAgentState, Any]):
         state: IncidentAgentState,
         runtime: Runtime[Any],
     ) -> dict[str, Any] | None:
-        """Persist an accepted structured proposal as the public report."""
+        """Persist an accepted structured proposal as the public report.
+
+        Also tracks rejected proposals by checking if structured_response
+        was cleared by awrap_model_call (rejection case).
+        """
         proposal = state.get("structured_response")
+
+        # Detect rejected proposal: if we're in conclusion_phase but
+        # structured_response is None, a rejection happened in awrap_model_call
+        if state.get("conclusion_phase") and proposal is None:
+            attempt = state.get("conclusion_attempt_count", 0) + 1
+            if attempt >= 2:
+                self._audit_store.record(
+                    state.get("incident_id", ""),
+                    "conclusion_terminal_failure",
+                    {"attempt": attempt},
+                )
+                return {
+                    "conclusion_attempt_count": attempt,
+                    "conclusion_status": "rejected",
+                    "last_error_code": "conclusion_terminal_failure",
+                    "status": "needs_more_evidence",
+                }
+            return {
+                "conclusion_attempt_count": attempt,
+                "conclusion_status": "attempting",
+            }
+
         if not isinstance(proposal, RootCauseProposal):
             return None
 
