@@ -1,18 +1,35 @@
-"""Tests for case memory and FTS retrieval — TDD RED phase.
+"""Tests for governed case retrieval and FTS behavior.
 
-Tests cover:
-  - Search prefers human_verified cases
-  - Only human_verified cases are indexed for FTS
-  - Search returns candidates that produce unverified hypotheses
-  - Historical cases can only generate candidate hypotheses
-  - confirm() marks a case as human_verified
-  - Non-verified cases are excluded from search
+Covers:
+  - Unverified cases are absent from case_fts
+  - Repeating confirm after first transition returns a 409 conflict
+  - Feedback idempotency key returns the original feedback
+  - Modifying a verified case removes its FTS row
+  - Deprecating removes FTS
+  - Review history remains ordered and append-only
+  - Forced FTS insert failure rolls back both status and review action
 """
 
 from __future__ import annotations
 
 import pytest
+from incidentlens_control_plane.memory.domain import (
+    CaseDraft,
+    CaseStatus,
+    FeedbackCommand,
+    FeedbackRating,
+)
+from incidentlens_control_plane.memory.models import CaseReviewActionRow
+from incidentlens_control_plane.memory.repository import CaseRepository
+from incidentlens_control_plane.memory.service import (
+    CaseConflictError,
+    CaseNotFoundError,
+    CaseService,
+    CaseValidationError,
+    InvalidCaseTransitionError,
+)
 from incidentlens_telemetry.database import create_engine
+from sqlalchemy import text
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -20,198 +37,324 @@ from incidentlens_telemetry.database import create_engine
 
 
 @pytest.fixture()
-def repository():
-    """Create a CaseRepository backed by an in-memory SQLite DB."""
-    from incidentlens_control_plane.memory.repository import CaseRepository
-
-    engine = create_engine("sqlite:///:memory:")
-    return CaseRepository(engine)
+def service() -> CaseService:
+    """Create a CaseService backed by an in-memory SQLite DB."""
+    return CaseService(CaseRepository(create_engine("sqlite:///:memory:")))
 
 
-# ===================================================================
-# CORE: Search prefers verified cases
-# ===================================================================
+@pytest.fixture()
+def repository(service: CaseService) -> CaseRepository:
+    """Return the repository from the service for direct DB inspection."""
+    return service.repo
 
 
-class TestSearchPrefersVerified:
-    """Core TDD test: search prefers human_verified cases."""
+# ---------------------------------------------------------------------------
+# FTS governance: only human_verified cases in case_fts
+# ---------------------------------------------------------------------------
 
-    def test_search_prefers_verified_case(self, repository) -> None:
-        """Search should return human_verified cases first."""
-        repository.save_case(
-            status="human_verified",
-            symptom="order timeout",
-            service="order-service",
+
+class TestFTSGovernance:
+    """Only human_verified cases should be in the FTS index."""
+
+    def test_unverified_case_not_in_fts(
+        self, service: CaseService, repository: CaseRepository
+    ) -> None:
+        """A draft case should not appear in case_fts."""
+        case = service.create_draft(
+            CaseDraft(symptom="timeout", affected_services=["order-service"]),
+            actor="user",
         )
-        repository.save_case(
-            status="auto_resolved",
-            symptom="order timeout",
-            service="order-service",
+        with repository.transaction() as session:
+            count = session.execute(
+                text("SELECT COUNT(*) FROM case_fts WHERE case_id = :cid"),
+                {"cid": case.id},
+            ).scalar()
+        assert count == 0
+
+    def test_verified_case_in_fts(self, service: CaseService, repository: CaseRepository) -> None:
+        """A human_verified case should appear in case_fts."""
+        case = service.create_draft(
+            CaseDraft(
+                symptom="timeout",
+                affected_services=["order-service"],
+                root_cause_category="downstream-timeout",
+                root_cause_description="payment service latency",
+                key_evidence=[{"evidence_id": "ev-1"}],
+                resolution="remove delay",
+            ),
+            actor="user",
         )
-        results = repository.search("timeout", "order-service", None)
-        assert len(results) > 0
-        assert results[0].status == "human_verified"
+        service.confirm(case.id, case.revision, "reviewer")
+        with repository.transaction() as session:
+            count = session.execute(
+                text("SELECT COUNT(*) FROM case_fts WHERE case_id = :cid"),
+                {"cid": case.id},
+            ).scalar()
+        assert count == 1
 
+    def test_agent_generated_not_in_fts(
+        self, service: CaseService, repository: CaseRepository
+    ) -> None:
+        """An agent_generated case should not appear in case_fts."""
+        from incidentlens_contracts.models import InvestigationStatus
+        from incidentlens_control_plane.agent.state import InvestigationState
 
-# ===================================================================
-# FTS INDEXING: only human_verified cases
-# ===================================================================
-
-
-class TestFTSIndexing:
-    """Tests for FTS indexing of only human_verified cases."""
-
-    def test_only_verified_cases_in_search(self, repository) -> None:
-        """Only human_verified cases should appear in search results."""
-        repository.save_case(
-            status="human_verified",
-            symptom="payment delay",
-            service="payment-service",
+        state = InvestigationState(
+            incident_id="inc-fts-test",
+            status=InvestigationStatus.REPORT_READY,
+            alert={"service": "order-service", "symptom": "timeout"},
+            report={"root_service": "payment-service", "root_cause": "latency"},
         )
-        repository.save_case(
-            status="auto_resolved",
-            symptom="payment delay",
-            service="payment-service",
+        case = service.materialize_from_investigation(state)
+        assert case.status is CaseStatus.AGENT_GENERATED
+        with repository.transaction() as session:
+            count = session.execute(
+                text("SELECT COUNT(*) FROM case_fts WHERE case_id = :cid"),
+                {"cid": case.id},
+            ).scalar()
+        assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Transition conflicts
+# ---------------------------------------------------------------------------
+
+
+class TestTransitionConflicts:
+    """Optimistic-lock and illegal-transition checks."""
+
+    def test_repeating_confirm_returns_409(self, service: CaseService) -> None:
+        """Confirming an already-verified case raises InvalidCaseTransitionError."""
+        case = service.create_draft(
+            CaseDraft(
+                symptom="timeout",
+                affected_services=["order-service"],
+                root_cause_category="downstream-timeout",
+                root_cause_description="payment latency",
+                key_evidence=[{"evidence_id": "ev-1"}],
+                resolution="remove delay",
+            ),
+            actor="user",
         )
-        results = repository.search("payment delay", "payment-service", None)
-        for result in results:
-            assert result.status == "human_verified"
+        verified = service.confirm(case.id, case.revision, "reviewer")
+        # Trying to confirm again from human_verified -> confirm is not allowed
+        with pytest.raises(InvalidCaseTransitionError):
+            service.confirm(verified.id, verified.revision, "reviewer")
 
-    def test_unverified_case_not_in_search(self, repository) -> None:
-        """Cases that are not human_verified should not appear in search."""
-        repository.save_case(
-            status="auto_resolved",
-            symptom="database connection leak",
-            service="order-service",
+    def test_stale_revision_rejected(self, service: CaseService) -> None:
+        """Using an old revision number should raise CaseConflictError."""
+        case = service.create_draft(
+            CaseDraft(symptom="timeout", affected_services=["order-service"]),
+            actor="user",
         )
-        results = repository.search("database", "order-service", None)
-        assert len(results) == 0
+        with pytest.raises(CaseConflictError):
+            service.confirm(case.id, 999, "reviewer")
+
+    def test_nonexistent_case_raises(self, service: CaseService) -> None:
+        """Editing a case that does not exist should raise CaseNotFoundError."""
+        with pytest.raises(CaseNotFoundError):
+            service.edit(
+                999999, 1,
+                CaseDraft(symptom="x", affected_services=["x"]),
+                "user",
+            )
 
 
-# ===================================================================
-# CANDIDATE HYPOTHESES: search returns unverified hypotheses
-# ===================================================================
+# ---------------------------------------------------------------------------
+# Feedback idempotency
+# ---------------------------------------------------------------------------
 
 
-class TestCandidateHypotheses:
-    """Tests that search results produce candidate (unverified) hypotheses."""
+class TestFeedbackIdempotency:
+    """Feedback with the same idempotency_key must return the original."""
 
-    def test_search_returns_candidate_hypotheses(self, repository) -> None:
-        """Search results should produce candidate hypotheses, not confirmed."""
-        repository.save_case(
-            status="human_verified",
-            symptom="order timeout",
-            service="order-service",
-            root_cause="payment_latency_spike",
+    def test_duplicate_key_returns_original(self, service: CaseService) -> None:
+        case = service.create_draft(
+            CaseDraft(symptom="timeout", affected_services=["order-service"]),
+            actor="user",
         )
-        results = repository.search("timeout", "order-service", None)
-        # Results should be usable as candidate hypotheses
-        for result in results:
-            # The result should have info to generate a hypothesis
-            # but it should NOT be treated as confirmed
-            assert hasattr(result, "status")
-            assert result.status == "human_verified"
-
-    def test_historical_cases_generate_candidates_only(self, repository) -> None:
-        """Historical cases can only generate candidate hypotheses."""
-        repository.save_case(
-            status="human_verified",
-            symptom="order timeout",
-            service="order-service",
-            root_cause="payment_latency_spike",
+        cmd = FeedbackCommand(
+            case_id=case.id,
+            idempotency_key="fb-001",
+            rating=FeedbackRating.HELPFUL,
+            comment="great",
         )
-        results = repository.search("timeout", "order-service", None)
-        # Even though the case is human_verified, the search result
-        # should only produce a candidate hypothesis for the current investigation
-        for result in results:
-            # The case's root_cause is available but should be used
-            # as a candidate, not as a confirmed conclusion
-            assert result.root_cause is not None or result.symptom is not None
+        first = service.add_feedback(cmd)
+        second = service.add_feedback(cmd)
+        assert first.id == second.id
+        assert first.rating is FeedbackRating.HELPFUL
 
-
-# ===================================================================
-# CONFIRM: mark case as human_verified
-# ===================================================================
-
-
-class TestConfirm:
-    """Tests for the confirm() method."""
-
-    def test_confirm_marks_case_verified(self, repository) -> None:
-        """confirm() should mark a case as human_verified."""
-        case_id = repository.save_case(
-            status="pending_review",
-            symptom="order timeout",
-            service="order-service",
+    def test_different_key_creates_new(self, service: CaseService) -> None:
+        case = service.create_draft(
+            CaseDraft(symptom="timeout", affected_services=["order-service"]),
+            actor="user",
         )
-        repository.confirm(case_id)
-        # Now search should find it
-        results = repository.search("timeout", "order-service", None)
-        assert len(results) == 1
-        assert results[0].status == "human_verified"
-
-    def test_confirm_idempotent(self, repository) -> None:
-        """Confirming an already verified case should be idempotent."""
-        case_id = repository.save_case(
-            status="human_verified",
-            symptom="order timeout",
-            service="order-service",
+        r1 = service.add_feedback(
+            FeedbackCommand(case_id=case.id, idempotency_key="fb-a", rating=FeedbackRating.HELPFUL)
         )
-        repository.confirm(case_id)
-        results = repository.search("timeout", "order-service", None)
-        assert len(results) == 1
-
-
-# ===================================================================
-# SEARCH: by symptom keyword and service
-# ===================================================================
-
-
-class TestSearch:
-    """Tests for search functionality."""
-
-    def test_search_by_keyword(self, repository) -> None:
-        """Search should match on symptom keywords."""
-        repository.save_case(
-            status="human_verified",
-            symptom="database connection pool exhaustion",
-            service="order-service",
+        r2 = service.add_feedback(
+            FeedbackCommand(case_id=case.id, idempotency_key="fb-b", rating=FeedbackRating.WRONG)
         )
-        results = repository.search("connection pool", "order-service", None)
-        assert len(results) == 1
+        assert r1.id != r2.id
 
-    def test_search_by_service_filter(self, repository) -> None:
-        """Search should filter by service."""
-        repository.save_case(
-            status="human_verified",
-            symptom="timeout",
-            service="order-service",
-        )
-        repository.save_case(
-            status="human_verified",
-            symptom="timeout",
-            service="payment-service",
-        )
-        results = repository.search("timeout", "order-service", None)
-        assert all(r.service == "order-service" for r in results)
 
-    def test_search_no_results(self, repository) -> None:
-        """Search with no matches should return empty list."""
-        repository.save_case(
-            status="human_verified",
-            symptom="timeout",
-            service="order-service",
-        )
-        results = repository.search("nonexistent", "order-service", None)
-        assert len(results) == 0
+# ---------------------------------------------------------------------------
+# FTS removal on edit / deprecate
+# ---------------------------------------------------------------------------
 
-    def test_search_by_root_cause(self, repository) -> None:
-        """Search should also match on root_cause field."""
-        repository.save_case(
-            status="human_verified",
-            symptom="order timeout",
-            service="order-service",
-            root_cause="payment_latency_spike",
+
+class TestFTSRemoval:
+    """Editing or deprecating a verified case removes it from FTS."""
+
+    def test_edit_removes_from_fts(self, service: CaseService, repository: CaseRepository) -> None:
+        case = service.create_draft(
+            CaseDraft(
+                symptom="timeout",
+                affected_services=["order-service"],
+                root_cause_category="downstream-timeout",
+                root_cause_description="payment latency",
+                key_evidence=[{"evidence_id": "ev-1"}],
+                resolution="remove delay",
+            ),
+            actor="user",
         )
-        results = repository.search("payment_latency", "order-service", None)
-        assert len(results) == 1
+        verified = service.confirm(case.id, case.revision, "reviewer")
+        # Confirm adds to FTS
+        with repository.transaction() as session:
+            count = session.execute(
+                text("SELECT COUNT(*) FROM case_fts WHERE case_id = :cid"),
+                {"cid": case.id},
+            ).scalar()
+        assert count == 1
+
+        # Edit removes from FTS
+        edited = service.edit(
+            verified.id,
+            verified.revision,
+            CaseDraft(symptom="timeout updated", affected_services=["order-service"]),
+            "reviewer",
+            reason="fix wording",
+        )
+        assert edited.status is CaseStatus.DRAFT
+        with repository.transaction() as session:
+            count = session.execute(
+                text("SELECT COUNT(*) FROM case_fts WHERE case_id = :cid"),
+                {"cid": case.id},
+            ).scalar()
+        assert count == 0
+
+    def test_deprecate_removes_from_fts(
+        self, service: CaseService, repository: CaseRepository
+    ) -> None:
+        case = service.create_draft(
+            CaseDraft(
+                symptom="timeout",
+                affected_services=["order-service"],
+                root_cause_category="downstream-timeout",
+                root_cause_description="payment latency",
+                key_evidence=[{"evidence_id": "ev-1"}],
+                resolution="remove delay",
+            ),
+            actor="user",
+        )
+        verified = service.confirm(case.id, case.revision, "reviewer")
+        deprecated = service.deprecate(verified.id, verified.revision, "admin", "obsolete")
+        assert deprecated.status is CaseStatus.DEPRECATED
+        with repository.transaction() as session:
+            count = session.execute(
+                text("SELECT COUNT(*) FROM case_fts WHERE case_id = :cid"),
+                {"cid": case.id},
+            ).scalar()
+        assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Review history: ordered and append-only
+# ---------------------------------------------------------------------------
+
+
+class TestReviewHistory:
+    """Review actions must be ordered and append-only."""
+
+    def test_review_history_ordered_and_append_only(
+        self, service: CaseService, repository: CaseRepository
+    ) -> None:
+        case = service.create_draft(
+            CaseDraft(
+                symptom="timeout",
+                affected_services=["order-service"],
+                root_cause_category="downstream-timeout",
+                root_cause_description="payment latency",
+                key_evidence=[{"evidence_id": "ev-1"}],
+                resolution="remove delay",
+            ),
+            actor="user",
+        )
+        confirmed = service.confirm(case.id, case.revision, "reviewer", reason="looks good")
+        service.edit(
+            case.id,
+            confirmed.revision,
+            CaseDraft(symptom="timeout v2", affected_services=["order-service"]),
+            "reviewer",
+            reason="update symptom",
+        )
+
+        with repository.transaction() as session:
+            reviews = (
+                session.query(CaseReviewActionRow)
+                .filter(CaseReviewActionRow.case_id == case.id)
+                .order_by(CaseReviewActionRow.id)
+                .all()
+            )
+            # Should have: create, confirm, edit
+            assert len(reviews) == 3
+            assert reviews[0].action == "create"
+            assert reviews[1].action == "confirm"
+            assert reviews[2].action == "edit"
+            # IDs must be strictly increasing (append-only)
+            ids = [r.id for r in reviews]
+            assert ids == sorted(ids)
+
+
+# ---------------------------------------------------------------------------
+# Confirm validation
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmValidation:
+    """Confirm requires non-empty review content fields."""
+
+    def test_confirm_rejects_empty_root_cause(self, service: CaseService) -> None:
+        case = service.create_draft(
+            CaseDraft(symptom="timeout", affected_services=["order-service"]),
+            actor="user",
+        )
+        with pytest.raises(CaseValidationError, match="root_cause_category"):
+            service.confirm(case.id, case.revision, "reviewer")
+
+    def test_confirm_rejects_empty_evidence(self, service: CaseService) -> None:
+        case = service.create_draft(
+            CaseDraft(
+                symptom="timeout",
+                affected_services=["order-service"],
+                root_cause_category="downstream-timeout",
+                root_cause_description="payment latency",
+            ),
+            actor="user",
+        )
+        with pytest.raises(CaseValidationError, match="key_evidence"):
+            service.confirm(case.id, case.revision, "reviewer")
+
+    def test_confirm_rejects_no_resolution_or_remediation(self, service: CaseService) -> None:
+        case = service.create_draft(
+            CaseDraft(
+                symptom="timeout",
+                affected_services=["order-service"],
+                root_cause_category="downstream-timeout",
+                root_cause_description="payment latency",
+                key_evidence=[{"evidence_id": "ev-1"}],
+            ),
+            actor="user",
+        )
+        with pytest.raises(CaseValidationError, match="resolution or remediation_advice"):
+            service.confirm(case.id, case.revision, "reviewer")

@@ -168,3 +168,16 @@ class ReviewCommand(BaseModel):
     action: ReviewAction
     actor: str = Field(min_length=1, max_length=255)
     reason: str = Field(default="", max_length=4000)
+
+
+class FeedbackRecord(BaseModel):
+    """Read model returned after recording feedback."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    case_id: int
+    idempotency_key: str
+    rating: FeedbackRating
+    comment: str = ""
+    created_at: datetime

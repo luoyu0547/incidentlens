@@ -232,9 +232,7 @@ def _create_fts5(conn: Any) -> None:
             "symptom, "
             "affected_services, "
             "root_cause_category, "
-            "root_cause_description, "
-            "content='', "
-            "contentless_delete=1"
+            "root_cause_description"
             ")"
         )
     )
