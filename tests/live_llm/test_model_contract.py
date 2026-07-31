@@ -46,4 +46,6 @@ async def test_conclusion_canary_validates_provider_schema_call() -> None:
     assert result.normal_tool_call_passed is True
     assert result.proposal_tool_call_passed is True
     assert result.fallback_used is False
-    assert result.identity.api_key is None  # must not leak API key
+    # ModelIdentity must not contain API key (only profile, model, endpoint_host)
+    identity_dict = result.identity.__dict__
+    assert "api_key" not in identity_dict
