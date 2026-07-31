@@ -89,28 +89,31 @@ class CaseSnapshot(BaseModel):
 
 
 class CaseSearchQuery(BaseModel):
-    """Parameters for FTS5 search."""
+    """Parameters for hybrid case search."""
 
     model_config = ConfigDict(extra="forbid")
 
-    keyword: str = Field(min_length=1, max_length=500)
+    text: str = Field(min_length=1, max_length=500)
     service: str | None = None
     root_cause_category: str | None = None
+    environment: str | None = None
+    service_version: str | None = None
     limit: int = Field(default=20, ge=1, le=100)
 
 
 class CaseSearchHit(BaseModel):
-    """A single search result from FTS5."""
+    """A single search result from hybrid retrieval."""
 
     model_config = ConfigDict(extra="forbid")
 
     case_id: int
-    revision: int
-    status: CaseStatus
-    symptom: str
-    affected_services: list[str]
-    root_cause_category: str = ""
-    rank: float = 0.0
+    case_snapshot: CaseSnapshot
+    lexical_score: float = 0.0
+    semantic_score: float = 0.0
+    filter_score: float = 0.0
+    total_score: float = 0.0
+    retrieval_mode: str = "keyword_only"
+    similarity_reason: str = ""
 
 
 # ---------------------------------------------------------------------------
