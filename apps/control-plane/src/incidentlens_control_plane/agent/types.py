@@ -60,6 +60,10 @@ class IncidentAgentState(AgentState):
     conclusion_attempt_count: NotRequired[int]
     last_report_rejection_reason: NotRequired[str | None]
 
+    # Memory integration fields
+    case_id: NotRequired[int | None]
+    case_status: NotRequired[str | None]
+
 
 class InvestigationContext(BaseModel):
     """Immutable context passed to agent nodes at invocation time."""

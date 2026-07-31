@@ -52,4 +52,6 @@ def project_investigation_state(raw: Mapping[str, Any]) -> InvestigationState:
         conclusion_status=raw.get("conclusion_status", "not_ready"),
         conclusion_attempt_count=raw.get("conclusion_attempt_count", 0),
         last_report_rejection_reason=raw.get("last_report_rejection_reason"),
+        case_id=raw.get("case_id"),
+        case_status=raw.get("case_status"),
     )

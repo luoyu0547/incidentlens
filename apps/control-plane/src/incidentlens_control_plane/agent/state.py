@@ -117,6 +117,10 @@ class InvestigationState(BaseModel):
     conclusion_attempt_count: int = 0
     last_report_rejection_reason: str | None = None
 
+    # Memory integration fields
+    case_id: int | None = None
+    case_status: str | None = None
+
     model_config = {"use_enum_values": False}
 
     @property

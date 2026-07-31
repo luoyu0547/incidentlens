@@ -6,7 +6,7 @@ for the governed case memory schema (Phase 5).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
@@ -184,3 +184,24 @@ class FeedbackRecord(BaseModel):
     rating: FeedbackRating
     comment: str = ""
     created_at: datetime
+
+
+class CaseUsageEvent(BaseModel):
+    """Read model for a case usage event."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    case_id: int
+    incident_id: str
+    hypothesis_id: str
+    event_type: UsageEventType
+    idempotency_key: str
+    rank: int = 0
+    retrieval_mode: str = "keyword_only"
+    lexical_score: float = 0.0
+    semantic_score: float = 0.0
+    filter_score: float = 0.0
+    similarity_reason: str = ""
+    details: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))

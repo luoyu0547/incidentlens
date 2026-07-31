@@ -8,6 +8,7 @@ Public interface:
   - add_review(session, row) -> None
   - add_feedback(session, row) -> None
   - add_usage_event(session, row) -> None
+  - search(query, service, limit) -> list[CaseRow]
   - replace_fts(session, case) -> None
   - remove_fts(session, case_id) -> None
 
@@ -17,6 +18,7 @@ Only ``human_verified`` cases are present in the FTS5 index.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Iterator
 
 from sqlalchemy import Engine, text
@@ -29,6 +31,16 @@ from incidentlens_control_plane.memory.models import (
     CaseRow,
     CaseUsageEventRow,
 )
+
+
+@dataclass
+class CaseSearchResult:
+    """Simple search result wrapping a case row."""
+
+    case_id: int
+    symptom: str
+    root_cause_category: str
+    affected_services: list[str]
 
 
 class CaseRepository:
@@ -96,6 +108,47 @@ class CaseRepository:
     def add_usage_event(self, session: Session, row: CaseUsageEventRow) -> None:
         """Insert a usage event (unique on ``idempotency_key``)."""
         session.add(row)
+
+    # ------------------------------------------------------------------
+    # Simple search (fallback when coordinator is not available)
+    # ------------------------------------------------------------------
+
+    def search(
+        self, query: str, service: str | None = None, limit: int | None = None
+    ) -> list[CaseSearchResult]:
+        """Simple keyword search for human_verified cases.
+
+        This is a lightweight fallback when the full HybridCaseRetriever
+        and InvestigationMemoryCoordinator are not available.
+        """
+        import json
+
+        with self.transaction() as session:
+            stmt = session.query(CaseRow).filter(
+                CaseRow.status == "human_verified"
+            )
+            if service:
+                stmt = stmt.filter(
+                    CaseRow.affected_services_json.contains(f'"{service}"')
+                )
+            if query:
+                stmt = stmt.filter(
+                    (CaseRow.symptom.ilike(f"%{query}%"))
+                    | (CaseRow.root_cause_category.ilike(f"%{query}%"))
+                    | (CaseRow.root_cause_description.ilike(f"%{query}%"))
+                )
+            if limit:
+                stmt = stmt.limit(limit)
+            rows = list(stmt.all())
+            return [
+                CaseSearchResult(
+                    case_id=row.id,
+                    symptom=row.symptom,
+                    root_cause_category=row.root_cause_category,
+                    affected_services=json.loads(row.affected_services_json or "[]"),
+                )
+                for row in rows
+            ]
 
     # ------------------------------------------------------------------
     # FTS5 management

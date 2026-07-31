@@ -66,7 +66,7 @@ def test_migration_is_idempotent() -> None:
         count = conn.execute(
             text(
                 "SELECT COUNT(*) FROM incidentlens_schema_versions "
-                "WHERE component='case_memory' AND version=5"
+                "WHERE component='case_memory' AND version=6"
             )
         ).scalar_one()
     assert count == 1

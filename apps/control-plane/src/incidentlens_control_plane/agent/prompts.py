@@ -37,6 +37,10 @@ You investigate only the current incident.
 - When evidence is insufficient or contradictory, say so and stop safely.
 - Do not request writes, Shell, rollback, restart, or configuration mutation.
 
+## Historical Cases
+Each prior is labeled with case=<id> and candidate_hypothesis=<id>.
+Use current-incident tools and Evidence before accepting or rejecting them.
+
 ## Available Skills
 Use read_file to load the full skill guide when you identify a matching symptom:
 - downstream-timeout: Diagnose slow downstream spans or timeout behavior.
@@ -147,9 +151,15 @@ def build_agent_context(state_input: IncidentAgentState | dict[str, Any]) -> str
     if state.retrieved_cases:
         lines.append("Historical cases (priors):")
         for case in state.retrieved_cases[:5]:
+            case_id = case.get("case_id", "?")
+            hyp_id = case.get("hypothesis_id", "")
+            cause = case.get("root_cause_category", case.get("root_cause", "?"))
+            reason = case.get("similarity_reason", "")
+            hyp_label = f" candidate_hypothesis={hyp_id}" if hyp_id else ""
+            reason_label = f"; similarity={reason}" if reason else ""
             lines.append(
-                f"  - {case.get('id', case.get('case_id', '?'))}: "
-                f"{case.get('root_cause', '?')}"
+                f"  - case={case_id}{hyp_label} cause={cause}{reason_label}; "
+                f"this is an unverified prior"
             )
 
     # --- Loaded skills ---

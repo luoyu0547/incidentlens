@@ -15,7 +15,7 @@ from sqlalchemy import Engine, text
 logger = logging.getLogger(__name__)
 
 CASE_SCHEMA_COMPONENT = "case_memory"
-CASE_SCHEMA_VERSION = 5
+CASE_SCHEMA_VERSION = 6
 
 # Mapping of legacy status values to the new governed status.
 # "pending_review" maps to "draft"; "human_verified" is preserved;
@@ -197,9 +197,11 @@ def _create_governance_tables(conn: Any) -> None:
             "CREATE TABLE IF NOT EXISTS case_usage_events ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
             "case_id INTEGER NOT NULL, "
+            "hypothesis_id VARCHAR(255) NOT NULL DEFAULT '', "
             "event_type VARCHAR(64) NOT NULL, "
             "idempotency_key VARCHAR(255) NOT NULL, "
             "investigation_id VARCHAR(255), "
+            "details_json TEXT NOT NULL DEFAULT '{}', "
             "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
             "FOREIGN KEY (case_id) REFERENCES case_memory(id), "
             "UNIQUE(idempotency_key)"
@@ -358,6 +360,23 @@ def _rebuild_verified_fts(conn: Any) -> None:
         )
 
 
+def _extend_usage_events(conn: Any) -> None:
+    """Add new columns to case_usage_events if they are missing."""
+    existing_cols = {
+        row[1]
+        for row in conn.execute(text("PRAGMA table_info(case_usage_events)")).fetchall()
+    }
+    new_columns: list[tuple[str, str]] = [
+        ("hypothesis_id", "VARCHAR(255) NOT NULL DEFAULT ''"),
+        ("details_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ]
+    for col_name, col_type in new_columns:
+        if col_name not in existing_cols:
+            conn.execute(
+                text(f"ALTER TABLE case_usage_events ADD COLUMN {col_name} {col_type}")
+            )
+
+
 def migrate_case_schema(engine: Engine) -> None:
     """Run the non-destructive case memory schema migration.
 
@@ -371,14 +390,15 @@ def migrate_case_schema(engine: Engine) -> None:
 
         _create_or_extend_case_memory(conn)
         _create_governance_tables(conn)
+        _extend_usage_events(conn)
         _create_fts5(conn)
         _migrate_legacy_values(conn)
         _rebuild_verified_fts(conn)
 
         conn.execute(
             text(
-                "INSERT INTO incidentlens_schema_versions(component, version) "
-                "VALUES (:component, :version)"
+                "INSERT INTO incidentlens_schema_versions(component, version, applied_at) "
+                "VALUES (:component, :version, CURRENT_TIMESTAMP)"
             ),
             {"component": CASE_SCHEMA_COMPONENT, "version": CASE_SCHEMA_VERSION},
         )

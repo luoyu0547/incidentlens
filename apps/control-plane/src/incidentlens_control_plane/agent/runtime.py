@@ -28,6 +28,7 @@ from incidentlens_control_plane.agent.state import (
 )
 from incidentlens_control_plane.llm.config import RuntimeMode
 from incidentlens_control_plane.llm.registry import ModelIdentity
+from incidentlens_control_plane.memory.integration import InvestigationMemoryCoordinator
 from incidentlens_control_plane.memory.repository import CaseRepository
 
 logger = logging.getLogger(__name__)
@@ -84,12 +85,14 @@ class LLMInvestigationEngine:
         audit_store: InvestigationAuditStore,
         model_identity: ModelIdentity,
         case_repository: CaseRepository | None,
+        memory: InvestigationMemoryCoordinator | None = None,
         total_timeout_seconds: float = 1200,
     ) -> None:
         self._graph = graph
         self._audit_store = audit_store
         self._model_identity = model_identity
         self._case_repository = case_repository
+        self._memory = memory
         self._total_timeout_seconds = total_timeout_seconds
 
     @property
@@ -103,12 +106,22 @@ class LLMInvestigationEngine:
     async def start(self, alert: dict[str, Any]) -> InvestigationState:
         """Start a new LLM-backed investigation.
 
-        Generates the incident ID, validates the alert, queries
-        ``case_repository`` when present, filters to ``human_verified``
-        cases, builds the initial state, and invokes the graph.
+        Generates the incident ID, validates the alert, uses the memory
+        coordinator to query historical cases and create candidate
+        hypotheses, builds the initial state, and invokes the graph.
         """
         # Use incident_id from alert if provided, otherwise generate one
         incident_id = alert.get("incident_id") or str(uuid4())
+
+        # Use coordinator for memory preparation when available
+        retrieved_cases: list[dict[str, Any]] = []
+        hypotheses_from_cases: list[dict[str, Any]] = []
+        if self._memory is not None:
+            prepared = self._memory.prepare(incident_id, alert)
+            retrieved_cases = prepared.retrieved_cases
+            hypotheses_from_cases = [
+                h.model_dump(mode="json") for h in prepared.hypotheses
+            ]
 
         # Build initial state
         state_dict: dict[str, Any] = {
@@ -118,9 +131,9 @@ class LLMInvestigationEngine:
             "alert": alert,
             "current_round": 0,
             "max_rounds": 8,
-            "hypotheses": [],
+            "hypotheses": hypotheses_from_cases,
             "evidence": [],
-            "retrieved_cases": [],
+            "retrieved_cases": retrieved_cases,
             "loaded_skill_names": [],
             "model_profile": self._model_identity.profile,
             "model_call_count": 0,
@@ -128,31 +141,6 @@ class LLMInvestigationEngine:
             "fallback_used": False,
             "report": None,
         }
-
-        # Query historical cases when available
-        if self._case_repository is not None:
-            service = alert.get("service", "")
-            symptom = alert.get("symptom", "")
-            query_parts = []
-            if symptom:
-                query_parts.append(symptom)
-            for key in ("error_rate", "latency", "error"):
-                if key in alert:
-                    query_parts.append(str(alert[key]))
-            query = " ".join(query_parts) if query_parts else service
-            if query:
-                cases = self._case_repository.search(query, service, None)
-                # Filter to human_verified cases only
-                state_dict["retrieved_cases"] = [
-                    {
-                        "case_id": c.id,
-                        "symptom": c.symptom,
-                        "root_cause": c.root_cause,
-                        "service": c.service,
-                    }
-                    for c in cases
-                    if c.status == "human_verified"
-                ]
 
         self._audit_store.record(
             incident_id,
@@ -180,6 +168,11 @@ class LLMInvestigationEngine:
         saved = await self._project_state(incident_id)
         if saved is None:
             raise CheckpointCorruptError(incident_id, "graph completed without a checkpoint")
+
+        # Finalize terminal states through the memory coordinator
+        if self._memory is not None:
+            saved = self._memory.finalize(saved)
+
         return saved
 
     async def run_round(self, incident_id: str) -> InvestigationState:
@@ -224,6 +217,11 @@ class LLMInvestigationEngine:
         saved = await self._project_state(incident_id)
         if saved is None:
             raise CheckpointCorruptError(incident_id, "round completed without a checkpoint")
+
+        # Finalize terminal states through the memory coordinator
+        if self._memory is not None:
+            saved = self._memory.finalize(saved)
+
         return saved
 
     async def resume(self, incident_id: str) -> InvestigationState | None:
@@ -237,11 +235,13 @@ class LLMInvestigationEngine:
         if saved is None:
             return None
 
-        # If terminal, return as-is without restarting
+        # If terminal, finalize and return as-is without restarting
         if saved.status in (
             InvestigationStatus.REPORT_READY,
             InvestigationStatus.NEEDS_MORE_EVIDENCE,
         ):
+            if self._memory is not None:
+                saved = self._memory.finalize(saved)
             return saved
 
         config = {"configurable": {"thread_id": incident_id}}
@@ -260,7 +260,10 @@ class LLMInvestigationEngine:
 
     async def load(self, incident_id: str) -> InvestigationState | None:
         """Load the current LangGraph state without advancing."""
-        return await self._project_state(incident_id)
+        state = await self._project_state(incident_id)
+        if state is not None and self._memory is not None:
+            state = self._memory.finalize(state)
+        return state
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -353,6 +356,8 @@ class LLMInvestigationEngine:
             conclusion_status=_get("conclusion_status", "not_ready"),
             conclusion_attempt_count=_get("conclusion_attempt_count", 0),
             last_report_rejection_reason=_get("last_report_rejection_reason"),
+            case_id=_get("case_id"),
+            case_status=_get("case_status"),
         )
 
 

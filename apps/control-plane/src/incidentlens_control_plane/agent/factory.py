@@ -19,6 +19,7 @@ from incidentlens_control_plane.agent.state import (
 )
 from incidentlens_control_plane.llm.config import RuntimeMode
 from incidentlens_control_plane.llm.registry import ModelRegistry
+from incidentlens_control_plane.memory.integration import InvestigationMemoryCoordinator
 from incidentlens_control_plane.memory.repository import CaseRepository
 from incidentlens_control_plane.tools.query import ReadOnlyToolkit
 
@@ -30,6 +31,7 @@ def build_investigation_engine(
     toolkit: ReadOnlyToolkit,
     case_repository: CaseRepository | None,
     audit_store: InvestigationAuditStore,
+    memory: InvestigationMemoryCoordinator | None = None,
     checkpointer: Any | None = None,
     skill_runtime: Any | None = None,
     model_registry: ModelRegistry | None = None,
@@ -50,6 +52,9 @@ def build_investigation_engine(
         Optional case memory repository.
     audit_store:
         Shared audit store.
+    memory:
+        Optional memory coordinator for governed case recall and
+        terminal reconciliation.
     checkpointer:
         LangGraph checkpointer (required for LLM_AGENT mode).
     skill_runtime:
@@ -103,6 +108,7 @@ def build_investigation_engine(
             audit_store=audit_store,
             model_identity=identity,
             case_repository=case_repository,
+            memory=memory,
         )
 
     # DETERMINISTIC_BASELINE
@@ -111,5 +117,6 @@ def build_investigation_engine(
         toolkit=toolkit,
         case_repository=case_repository,
         audit_store=audit_store,
+        memory=memory,
     )
     return AsyncBaselineAdapter(engine)

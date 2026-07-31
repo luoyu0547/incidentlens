@@ -98,9 +98,11 @@ class CaseUsageEventRow(CaseBase):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     case_id: Mapped[int] = mapped_column(Integer, index=True)
+    hypothesis_id: Mapped[str] = mapped_column(String(255), default="")
     event_type: Mapped[str] = mapped_column(String(64))
     idempotency_key: Mapped[str] = mapped_column(String(255), unique=True)
     investigation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    details_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(tz=timezone.utc),

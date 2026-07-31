@@ -27,6 +27,7 @@ from incidentlens_control_plane.agent.state import (
     InvestigationState,
 )
 from incidentlens_control_plane.llm.config import RuntimeMode
+from incidentlens_control_plane.memory.integration import InvestigationMemoryCoordinator
 from incidentlens_control_plane.memory.repository import CaseRepository
 from incidentlens_control_plane.tools.query import ReadOnlyToolkit
 
@@ -66,6 +67,7 @@ class DeterministicInvestigationEngine:
         toolkit: ReadOnlyToolkit,
         case_repository: CaseRepository | None = None,
         audit_store: InvestigationAuditStore | None = None,
+        memory: InvestigationMemoryCoordinator | None = None,
         max_rounds: int = 8,
     ) -> None:
         self._telemetry_repo = telemetry_repo
@@ -73,6 +75,7 @@ class DeterministicInvestigationEngine:
         self._case_repository = case_repository or CaseRepository(
             telemetry_repo.engine
         )
+        self._memory = memory
         self._max_rounds = max_rounds
         self._checkpoint_store = CheckpointStore(telemetry_repo.engine)
         self._audit_store = audit_store or InvestigationAuditStore(telemetry_repo.engine)
@@ -173,6 +176,8 @@ class DeterministicInvestigationEngine:
                 "phase_transition",
                 {"to": state.status.value, "reason": "max_rounds_reached"},
             )
+            if self._memory is not None:
+                state = self._memory.finalize(state)
             return state
 
         # Increment round
@@ -236,6 +241,10 @@ class DeterministicInvestigationEngine:
             {"to": state.phase, "round": state.current_round},
         )
 
+        # Finalize terminal states through the memory coordinator
+        if self._memory is not None:
+            state = self._memory.finalize(state)
+
         return state
 
     async def resume(self, incident_id: str) -> InvestigationState | None:
@@ -248,11 +257,13 @@ class DeterministicInvestigationEngine:
         if state is None:
             return None
 
-        # If already completed, just return the state
+        # If already completed, finalize and return the state
         if state.status in (
             InvestigationStatus.REPORT_READY,
             InvestigationStatus.NEEDS_MORE_EVIDENCE,
         ):
+            if self._memory is not None:
+                state = self._memory.finalize(state)
             return state
 
         # Run one more round
@@ -273,11 +284,23 @@ class DeterministicInvestigationEngine:
         return state
 
     def _retrieve_memory(self, state: InvestigationState) -> InvestigationState:
-        """Retrieve relevant historical cases from memory."""
+        """Retrieve relevant historical cases from memory.
+
+        Uses the memory coordinator when available to record usage events
+        and create deterministic candidate hypotheses. Falls back to
+        CaseRepository.search when no coordinator is provided.
+        """
+        if self._memory is not None:
+            prepared = self._memory.prepare(state.incident_id, state.alert)
+            state.retrieved_cases = prepared.retrieved_cases
+            state.hypotheses = prepared.hypotheses
+            state.phase = "generate_hypotheses"
+            return state
+
+        # Fallback: simple keyword search via CaseRepository
         service = state.alert.get("service", "")
         symptom = state.alert.get("symptom", "")
 
-        # Build a search query from alert fields
         query_parts = []
         if symptom:
             query_parts.append(symptom)
@@ -286,17 +309,14 @@ class DeterministicInvestigationEngine:
                 query_parts.append(str(state.alert[key]))
         query = " ".join(query_parts) if query_parts else service
 
-        # Search for historical cases
         if self._case_repository and query:
             cases = self._case_repository.search(query, service, None)
-            # Store retrieved cases for hypothesis generation
-            # Historical cases only produce CANDIDATE hypotheses
             state.retrieved_cases = [
                 {
-                    "case_id": c.id,
+                    "case_id": c.case_id,
                     "symptom": c.symptom,
-                    "root_cause": c.root_cause,
-                    "service": c.service,
+                    "root_cause": c.root_cause_category,
+                    "service": service,
                 }
                 for c in cases
             ]
@@ -305,8 +325,32 @@ class DeterministicInvestigationEngine:
         return state
 
     def _generate_hypotheses(self, state: InvestigationState) -> InvestigationState:
-        """Generate initial hypotheses from alert data and memory."""
+        """Generate initial hypotheses from alert data and memory.
+
+        When the memory coordinator has already populated hypotheses from
+        retrieved cases, only alert-signal hypotheses are added. Otherwise,
+        falls back to the legacy case-based hypothesis generation.
+        """
         service = state.alert.get("service", "")
+
+        # If coordinator already provided hypotheses (with case-based candidates),
+        # only add alert-signal hypotheses
+        if state.hypotheses and self._memory is not None:
+            # Alert-signal hypotheses only
+            error_rate = state.alert.get("error_rate")
+            if error_rate is not None and error_rate > 0.1:
+                state.hypotheses.append(
+                    Hypothesis(
+                        id=str(uuid4()),
+                        description=f"{service} experiencing high error rate ({error_rate:.0%})",
+                        confidence=0.4,
+                        status=HypothesisStatus.ACTIVE,
+                        root_service=service,
+                    )
+                )
+            state.phase = "choose_next_action"
+            return state
+
         hypotheses: list[Hypothesis] = []
 
         # Generate hypotheses from alert signals
