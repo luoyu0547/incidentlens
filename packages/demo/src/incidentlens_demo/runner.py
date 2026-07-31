@@ -83,6 +83,9 @@ class DemoRunner:
         traffic_count: Number of order requests to send through the gateway.
         compose: If True, use deterministic params for Docker Compose mode
                  (e.g. payment_error_rate=1.0).
+        mode: Agent mode - "llm_agent" or "deterministic_baseline".
+        reset_scope: Reset scope - "full" clears everything, "incident" preserves cases.
+        cleanup_after_run: If True (default), perform final reset after run completes.
     """
 
     def __init__(
@@ -92,12 +95,16 @@ class DemoRunner:
         traffic_count: int = 3,
         compose: bool = False,
         mode: str = "llm_agent",
+        reset_scope: str = "full",
+        cleanup_after_run: bool = True,
     ) -> None:
         self._control_plane_url = control_plane_url.rstrip("/")
         self._gateway_url = gateway_url.rstrip("/")
         self._traffic_count = traffic_count
         self._compose = compose
         self._mode = mode
+        self._reset_scope = reset_scope
+        self._cleanup_after_run = cleanup_after_run
         # Client is created fresh per run; tests can inject a mock via _client
         self._client: Any = None
 
@@ -137,8 +144,8 @@ class DemoRunner:
             self._client = httpx.AsyncClient(timeout=30.0)
 
         try:
-            # Step 1: Reset
-            await self._post("/api/scenarios/reset")
+            # Step 1: Reset with scope parameter
+            await self._post("/api/scenarios/reset", params={"scope": self._reset_scope})
 
             # Step 2: Enable scenario
             await self._post(f"/api/scenarios/{scenario}/enable", params)
@@ -195,11 +202,12 @@ class DemoRunner:
             return result
 
         finally:
-            # Always reset at the end
-            try:
-                await self._post("/api/scenarios/reset")
-            except Exception:
-                pass  # Best-effort reset
+            # Reset at the end if cleanup_after_run is True
+            if self._cleanup_after_run:
+                try:
+                    await self._post("/api/scenarios/reset", params={"scope": self._reset_scope})
+                except Exception:
+                    pass  # Best-effort reset
             if own_client:
                 try:
                     await self._client.aclose()
@@ -234,10 +242,15 @@ class DemoRunner:
             params["delay_ms"] = 6000
         return params
 
-    async def _post(self, path: str, json: dict | None = None) -> dict[str, Any]:
+    async def _post(
+        self,
+        path: str,
+        json: dict | None = None,
+        params: dict | None = None,
+    ) -> dict[str, Any]:
         """POST to the control plane and return JSON response."""
         url = f"{self._control_plane_url}{path}"
-        response = await self._client.post(url, json=json)
+        response = await self._client.post(url, json=json, params=params)
         return response.json()
 
     async def _get(self, path: str) -> dict[str, Any]:

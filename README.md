@@ -156,3 +156,110 @@ uv run python scripts/generate_traffic.py --count 20 --url http://localhost:8000
 - Confidence > 0.70 requires evidence references
 - Historical cases only generate candidate hypotheses (never confirmed)
 - Root cause labels are NOT exposed via API (defense-in-depth)
+
+## Phase 5: Knowledge Loop
+
+Phase 5 introduces case memory and governance to enable historical learning:
+
+### Case States
+
+Cases follow a governed state machine:
+
+| State | Description | Allowed Actions |
+|-------|-------------|-----------------|
+| `draft` | Initial state after creation | edit, confirm, abandon |
+| `agent_generated` | Auto-materialized from investigation report | edit, confirm, abandon |
+| `human_verified` | Confirmed by reviewer, indexed for FTS search | edit (creates new revision), abandon |
+| `abandoned` | Withdrawn from active use | none |
+| `superseded` | Replaced by newer revision | none |
+
+### Auto-Materialization
+
+When an investigation reaches `report_ready`, the system automatically creates a case in `agent_generated` state. This ensures every investigation produces a learnable artifact.
+
+### Search and Retrieval
+
+- **FTS5**: Always available, used for keyword-based search
+- **Embeddings**: Optional semantic search with configurable provider
+- **Hybrid retrieval**: Combines FTS5 and embedding scores with explanation
+
+### Review Workflow
+
+```bash
+# Create a case
+curl -X POST /api/cases -d '{"symptom": "...", "root_cause_category": "..."}'
+
+# Edit a case (creates new revision)
+curl -X PATCH /api/cases/{id} -d '{"expected_version": 1, "resolution": "..."}'
+
+# Confirm a case (enables FTS indexing)
+curl -X POST /api/cases/{id}/confirm -d '{"expected_version": 2}'
+
+# Abandon a case
+curl -X POST /api/cases/{id}/abandon -d '{"expected_version": 2}'
+```
+
+### Feedback
+
+Record feedback on case search results:
+
+```bash
+curl -X POST /api/cases/{id}/feedback -d '{
+  "rating": "correct",
+  "incident_id": "inc-123",
+  "idempotency_key": "inc-123:feedback"
+}'
+```
+
+### Export
+
+Export investigation data with sanitization:
+
+```bash
+curl /api/investigations/{incident_id}/export
+```
+
+Exports include evidence references and exclude sensitive fields (API keys, tokens, root_cause_label).
+
+### Evaluation
+
+Run strategy comparisons:
+
+```bash
+# Run all strategies
+python -m incidentlens_evaluation.cli --strategy all --scenario all
+
+# Run single strategy
+python -m incidentlens_evaluation.cli --strategy incidentlens_verified --scenario payment_delay
+```
+
+### Metrics
+
+Eight metrics computed from actual run records:
+
+| Metric | Description |
+|--------|-------------|
+| `root_service_accuracy` | Fraction of runs where identified service matches expected |
+| `root_cause_type_accuracy` | Fraction of runs where cause type matches expected |
+| `evidence_reference_correctness` | Percentage of runs with correct evidence references |
+| `first_effective_hypothesis_round` | Average round where first effective hypothesis appears |
+| `average_tool_calls` | Mean tool calls per investigation |
+| `duplicate_rate` | Fraction of total calls that are duplicates |
+| `historical_case_misleading_rate` | misleading adopted cases / adopted cases |
+| `average_latency_ms` | Mean investigation latency |
+
+### Dashboard
+
+The control plane dashboard provides:
+- Case list with status, revision, and last updated
+- Case detail with full history and usage events
+- Feedback submission and review
+- Investigation export
+
+### Project Boundaries
+
+IncidentLens is a **development and debugging tool**, not a production incident response system. It:
+- Uses read-only diagnostic tools
+- Generates candidate hypotheses (never confirmed root causes)
+- Requires human review for all case confirmations
+- Does not perform automated remediation

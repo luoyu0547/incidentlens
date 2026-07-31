@@ -79,6 +79,7 @@ class ResetResponse(BaseModel):
 
     status: str
     scenarios_cleared: bool
+    scope: str = "full"
     tables_cleared: dict[str, int] | None = None
 
 
@@ -175,15 +176,19 @@ async def disable_scenario(name: str) -> ScenarioStatusResponse:
 
 
 @router.post("/reset", response_model=ResetResponse)
-async def reset_scenarios() -> ResetResponse:
-    """Reset all scenarios and demo data."""
+async def reset_scenarios(scope: str = "full") -> ResetResponse:
+    """Reset all scenarios and demo data.
+
+    Args:
+        scope: Reset scope - "full" clears everything, "incident" preserves cases/evaluations.
+    """
     if _reset_service is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Demo reset service not configured",
         )
 
-    result = _reset_service.reset_demo_data()
+    result = _reset_service.reset_demo_data(scope=scope)
     return ResetResponse(**result)
 
 

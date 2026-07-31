@@ -30,11 +30,12 @@ All metrics are computed from actual run records — never fixed/hardcoded score
 | Metric | Description | Formula |
 |--------|-------------|---------|
 | root_service_accuracy | Fraction of runs where identified service matches expected | correct / total |
+| root_cause_type_accuracy | Fraction of runs where identified cause type matches expected | correct / total |
 | evidence_reference_correctness | Percentage of runs with correct evidence references | correct_refs / total * 100 |
 | first_effective_hypothesis_round | Average round where first effective hypothesis appears | mean(rounds) |
 | average_tool_calls | Mean tool calls per investigation | sum(calls) / total |
 | duplicate_rate | Fraction of total calls that are duplicates | duplicates / total_calls |
-| misleading_rate | Fraction of total calls that are misleading | misleading / total_calls |
+| historical_case_misleading_rate | Fraction of adopted cases that were misleading | misleading / adopted |
 | average_latency_ms | Mean investigation latency | sum(ms) / total |
 
 ## Running Evaluations
