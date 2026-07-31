@@ -10,12 +10,10 @@ These tests verify:
 
 from __future__ import annotations
 
-import pytest
 import httpx
+import pytest
 from httpx import ASGITransport, AsyncClient
-
 from incidentlens_service_common.runtime_client import RuntimeConfigClient
-
 
 # ===================================================================
 # UNIT TESTS — using httpx mock transport
@@ -123,7 +121,6 @@ class TestRuntimeConfigClientIntegration:
     async def test_fetches_enabled_scenario_from_control_plane(self) -> None:
         """RuntimeConfigClient reads scenarios enabled via the control plane API."""
         from fastapi import FastAPI
-
         from incidentlens_control_plane.routes.scenarios import (
             router as scenarios_router,
         )
@@ -165,7 +162,6 @@ class TestRuntimeConfigClientIntegration:
     async def test_returns_empty_after_reset(self) -> None:
         """After reset, RuntimeConfigClient returns empty active dict."""
         from fastapi import FastAPI
-
         from incidentlens_control_plane.routes.scenarios import (
             router as scenarios_router,
         )

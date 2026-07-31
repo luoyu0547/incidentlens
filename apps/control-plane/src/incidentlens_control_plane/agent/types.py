@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Any, NotRequired
+from enum import StrEnum
+from typing import Annotated, Any, Literal, NotRequired
 
 from incidentlens_contracts.models import Evidence, Hypothesis
 from langchain.agents.middleware import AgentState
@@ -49,6 +50,15 @@ class IncidentAgentState(AgentState):
     report: dict[str, Any] | None
     last_error_code: NotRequired[str | None]
     last_checkpoint_id: NotRequired[str | None]
+    invalid_tool_call_count: NotRequired[int]
+
+    # Conclusion phase fields
+    conclusion_phase: NotRequired[bool]
+    eligible_cause_codes: NotRequired[list[str]]
+    eligible_evidence_ids: NotRequired[list[str]]
+    conclusion_status: NotRequired[str]
+    conclusion_attempt_count: NotRequired[int]
+    last_report_rejection_reason: NotRequired[str | None]
 
 
 class InvestigationContext(BaseModel):
@@ -70,4 +80,27 @@ class RootCauseProposal(BaseModel):
     cause_code: str = Field(min_length=1)
     evidence_ids: list[str] = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
-    next_action: str = Field(min_length=1)
+    next_action: Literal["finish", "needs_more_evidence"]
+
+
+# ---------------------------------------------------------------------------
+# Conclusion status and readiness
+# ---------------------------------------------------------------------------
+
+
+class ConclusionStatus(StrEnum):
+    """Lifecycle states for the conclusion path."""
+
+    NOT_READY = "not_ready"
+    READY = "ready"
+    ATTEMPTING = "attempting"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
+class ConclusionReadiness(BaseModel):
+    """Result of evaluate_conclusion_readiness — pure-function readiness check."""
+
+    ready: bool
+    eligible_cause_codes: list[str]
+    eligible_evidence_ids: list[str]

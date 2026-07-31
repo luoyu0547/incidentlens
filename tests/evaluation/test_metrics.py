@@ -17,6 +17,8 @@ def test_metrics_use_records_not_fixed_scores() -> None:
         RunRecord(
             root_service_expected="payment-service",
             root_service_actual="payment-service",
+            root_cause_type_expected="payment_latency_spike",
+            root_cause_type_actual="payment_latency_spike",
             tool_calls=3,
             evidence_reference_correct=True,
             first_effective_round=1,
@@ -27,6 +29,8 @@ def test_metrics_use_records_not_fixed_scores() -> None:
         RunRecord(
             root_service_expected="order-service",
             root_service_actual="payment-service",
+            root_cause_type_expected="database_connection_leak",
+            root_cause_type_actual="payment_service_degradation",
             tool_calls=5,
             evidence_reference_correct=False,
             first_effective_round=3,
@@ -36,6 +40,7 @@ def test_metrics_use_records_not_fixed_scores() -> None:
         ),
     ])
     assert result.root_service_accuracy == 0.5
+    assert result.root_cause_type_accuracy == 0.5
     assert result.average_tool_calls == 4.0
     assert result.evidence_reference_correctness == 50.0
     assert result.first_effective_hypothesis_round == 2.0
@@ -61,6 +66,8 @@ def test_compute_metrics_single_perfect_record() -> None:
         RunRecord(
             root_service_expected="payment-service",
             root_service_actual="payment-service",
+            root_cause_type_expected="payment_latency_spike",
+            root_cause_type_actual="payment_latency_spike",
             tool_calls=2,
             evidence_reference_correct=True,
             first_effective_round=1,
@@ -70,9 +77,51 @@ def test_compute_metrics_single_perfect_record() -> None:
         ),
     ])
     assert result.root_service_accuracy == 1.0
+    assert result.root_cause_type_accuracy == 1.0
     assert result.evidence_reference_correctness == 100.0
     assert result.duplicate_rate == 0.0
     assert result.misleading_rate == 0.0
+
+
+def test_missing_report_is_not_counted_as_correct() -> None:
+    """Records with no report (None actual) should not count as correct."""
+    from incidentlens_evaluation.metrics import RunRecord, compute_metrics
+
+    result = compute_metrics([
+        RunRecord(
+            root_service_expected="payment-service",
+            root_service_actual=None,
+            root_cause_type_expected="payment_latency_spike",
+            root_cause_type_actual=None,
+            tool_calls=0,
+        ),
+    ])
+    assert result.root_service_accuracy == 0.0
+    assert result.root_cause_type_accuracy == 0.0
+
+
+def test_mixed_report_and_no_report_counts_missing_report_as_incorrect() -> None:
+    """A missing report is an incorrect outcome in the full run denominator."""
+    from incidentlens_evaluation.metrics import RunRecord, compute_metrics
+
+    result = compute_metrics([
+        RunRecord(
+            root_service_expected="payment-service",
+            root_service_actual="payment-service",
+            root_cause_type_expected="payment_latency_spike",
+            root_cause_type_actual="payment_latency_spike",
+            tool_calls=3,
+        ),
+        RunRecord(
+            root_service_expected="order-service",
+            root_service_actual=None,
+            root_cause_type_expected="database_connection_leak",
+            root_cause_type_actual=None,
+            tool_calls=0,
+        ),
+    ])
+    assert result.root_service_accuracy == 0.5
+    assert result.root_cause_type_accuracy == 0.5
 
 
 def test_run_evaluation_returns_result_from_actual_run() -> None:

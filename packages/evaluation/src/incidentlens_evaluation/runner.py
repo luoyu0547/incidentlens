@@ -12,6 +12,7 @@ run_evaluation(strategy, scenario) runs all 5 scenarios and returns aggregated m
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -165,48 +166,42 @@ def run_single(strategy: str, scenario_name: str) -> RunRecord:
 
     elapsed_ms = (time.monotonic() - start_time) * 1000
 
-    # Determine actual root service from the investigation result
-    root_service_actual = target_service  # default: correct
-    if state.report and "root_cause" in state.report:
-        root_cause_text = state.report["root_cause"].lower()
-        if target_service not in root_cause_text and root_cause_label not in root_cause_text:
-            root_service_actual = "unknown"
+    # Derive actual values ONLY from the report — never default to expected
+    root_service_actual: str | None = None
+    root_cause_type_actual: str | None = None
+    if state.report:
+        root_service_actual = state.report.get("root_service")
+        root_cause_type_actual = state.report.get("root_cause")
 
     # Check evidence reference correctness
     evidence_reference_correct = False
     if state.report:
-        findings = state.report.get("findings", [])
-        if findings:
-            for finding in findings:
-                if target_service in str(finding) or root_cause_label in str(finding):
-                    evidence_reference_correct = True
-                    break
-
-    # For incidentlens_verified, verify evidence references
-    if strategy == "incidentlens_verified" and state.report:
-        confirmed = state.report.get("hypotheses", {}).get("confirmed", [])
-        for hyp in confirmed:
-            supporting_evidence_ids = hyp.get("supporting_evidence_ids", [])
-            if supporting_evidence_ids:
-                evidence_reference_correct = True
-                break
+        evidence_ids = state.report.get("evidence_ids", [])
+        if evidence_ids:
+            evidence_reference_correct = True
 
     # Count tool calls from evidence
     tool_calls = len(state.evidence)
 
     # Find first effective round
-    first_effective_round = 0
+    first_effective_round: int | None = None
     for hyp in state.hypotheses:
         if hyp.status == "confirmed" and hyp.supporting_evidence_ids:
             first_effective_round = state.current_round
             break
 
     # Count duplicate and misleading calls
+    # Duplicates are defined by same tool_name + normalized_args (not tool_call_id)
     seen_tools: set[str] = set()
     duplicate_calls = 0
     misleading_calls = 0
     for ev in state.evidence:
-        key = f"{ev.source_tool}:{ev.tool_call_id}"
+        # Normalize args by removing incident_id (which is always injected)
+        normalized_args = {
+            k: v for k, v in ev.content.items()
+            if k != "incident_id"
+        } if isinstance(ev.content, dict) else {}
+        key = f"{ev.source_tool}:{json.dumps(normalized_args, sort_keys=True, default=str)}"
         if key in seen_tools:
             duplicate_calls += 1
         seen_tools.add(key)
@@ -216,6 +211,8 @@ def run_single(strategy: str, scenario_name: str) -> RunRecord:
     return RunRecord(
         root_service_expected=target_service,
         root_service_actual=root_service_actual,
+        root_cause_type_expected=root_cause_label,
+        root_cause_type_actual=root_cause_type_actual,
         tool_calls=tool_calls,
         evidence_reference_correct=evidence_reference_correct,
         first_effective_round=first_effective_round,

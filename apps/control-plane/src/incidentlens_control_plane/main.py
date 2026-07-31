@@ -97,6 +97,7 @@ async def lifespan(
     audit_store = InvestigationAuditStore(db_engine)
 
     from incidentlens_scenarios.store import ScenarioStore
+
     from incidentlens_control_plane.services.demo_reset import DemoResetService
 
     scenario_store = ScenarioStore(db_engine)
@@ -174,6 +175,14 @@ def create_app(*, engine_override=None) -> FastAPI:
     engine (test path).  Without an override the lifespan reads env vars
     and builds real resources (production path).
     """
+
+    # Test applications may be exercised through ASGI transports that do not
+    # run lifespan hooks. Install an explicit override eagerly so those apps
+    # still expose the same injected engine contract.
+    if engine_override is not None:
+        set_investigation_engine(engine_override)
+        set_event_bus(_global_bus)
+        set_investigation_event_bus(_global_bus)
 
     @asynccontextmanager
     async def _lifespan(app: FastAPI) -> AsyncIterator[None]:

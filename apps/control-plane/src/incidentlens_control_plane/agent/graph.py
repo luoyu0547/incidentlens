@@ -7,6 +7,7 @@ Composes the agent with:
   - EvidenceRecordingMiddleware for evidence extraction
   - BudgetEnforcementMiddleware for model/tool call limits
   - ReportGateMiddleware for evidence policy gating
+  - ConclusionBoundaryMiddleware for tool restriction during conclusion
 
 Uses only public LangChain/LangGraph APIs (create_agent, middleware).
 """
@@ -16,7 +17,6 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
@@ -24,7 +24,11 @@ from langchain_core.tools import BaseTool
 from incidentlens_control_plane.agent.middleware import (
     AuditMiddleware,
     BudgetEnforcementMiddleware,
+    ConclusionBoundaryMiddleware,
+    DuplicateToolCallMiddleware,
     EvidenceRecordingMiddleware,
+    IncidentToolContextMiddleware,
+    InvestigationContextMiddleware,
     ReportGateMiddleware,
 )
 from incidentlens_control_plane.agent.prompts import SYSTEM_PROMPT
@@ -72,26 +76,32 @@ def build_investigation_agent(
     A compiled LangGraph agent graph.
     """
     # Build middleware list
-    middleware: list[AgentMiddleware] = []
+    middleware: list[Any] = []
 
     # Skill middleware (filesystem, skills, skill_read_audit)
     fs_middleware, skills_middleware, skill_audit = skill_runtime.middleware()
     middleware.extend([fs_middleware, skills_middleware, skill_audit])
 
     # Audit middleware
-    middleware.append(AuditMiddleware(audit_store))
+    middleware.append(InvestigationContextMiddleware(skill_runtime=skill_runtime))  # type: ignore[arg-type]
+    middleware.append(AuditMiddleware(audit_store))  # type: ignore[arg-type]
+    middleware.append(IncidentToolContextMiddleware())  # type: ignore[arg-type]
+    middleware.append(DuplicateToolCallMiddleware())  # type: ignore[arg-type]
 
     # Evidence recording middleware
-    middleware.append(EvidenceRecordingMiddleware())
+    middleware.append(EvidenceRecordingMiddleware())  # type: ignore[arg-type]
+
+    # Conclusion boundary middleware (restricts tools during conclusion phase)
+    middleware.append(ConclusionBoundaryMiddleware())  # type: ignore[arg-type]
 
     # Budget enforcement middleware
-    middleware.append(BudgetEnforcementMiddleware(model_limit=12, tool_limit=12))
+    middleware.append(BudgetEnforcementMiddleware(model_limit=12, tool_limit=12))  # type: ignore[arg-type]
 
     # Report gate middleware
-    middleware.append(ReportGateMiddleware(skill_runtime))
+    middleware.append(ReportGateMiddleware(skill_runtime, audit_store=audit_store))  # type: ignore[arg-type]
 
     # Build the agent
-    agent = create_agent(
+    agent = create_agent(  # type: ignore[misc]
         model=model,
         tools=list(tools),
         system_prompt=SYSTEM_PROMPT,

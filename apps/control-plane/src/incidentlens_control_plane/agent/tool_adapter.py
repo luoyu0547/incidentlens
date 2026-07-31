@@ -144,7 +144,9 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
     "search_logs": "Search log rows by service and keyword.",
     "get_slow_traces": "Find traces with spans that exceed a duration threshold.",
     "get_trace": "Aggregate all spans for a given trace ID.",
-    "get_service_dependencies": "Derive service dependency graph from span parent-child relationships.",
+    "get_service_dependencies": (
+        "Derive service dependency graph from span parent-child relationships."
+    ),
     "list_recent_deployments": "List recent deployments for a service.",
     "get_runbook": "Retrieve a runbook for a service.",
 }
@@ -208,7 +210,16 @@ def build_agent_tools(
                 deduplicated=is_duplicate,
             )
 
-            summary = f"{_tool_name}: {'ok' if result.ok else 'error'}"
+            visible_result = {
+                "evidence_id": evidence.id,
+                "outcome": "success" if result.ok else "tool_error",
+                "data": result.data,
+                "error": result.error,
+                "deduplicated": is_duplicate,
+            }
+            summary = json.dumps(visible_result, default=str)
+            if len(summary) > 4000:
+                summary = summary[:4000] + "... [truncated]"
             return summary, envelope.model_dump(mode="json")
 
         tool = StructuredTool.from_function(
@@ -230,16 +241,30 @@ def build_agent_tools(
             actual_path = path or kwargs.get("path", "")
             result = await skill_runtime.read_file(actual_path)
             if result.ok:
-                return result.content[:2000], {"ok": True, "content": result.content[:2000]}
+                skill_name = _skill_name_from_path(actual_path)
+                return result.content[:2000], {
+                    "ok": True,
+                    "content": result.content[:2000],
+                    "skill_name": skill_name,
+                }
             return f"error: {result.error}", {"ok": False, "error": result.error}
 
         read_file_tool = StructuredTool.from_function(
             coroutine=_read_file_coroutine,
             name="read_file",
-            description="Read a file from the skills directory. Use paths like /skills/downstream-timeout/SKILL.md",
+            description=(
+                "Read a file from the skills directory. Use paths like "
+                "/skills/downstream-timeout/SKILL.md"
+            ),
             args_schema=ReadFileArgs,
             response_format="content_and_artifact",
         )
         tools.append(read_file_tool)
 
     return tools
+
+
+def _skill_name_from_path(path: str) -> str:
+    """Return the skill directory for a valid ``/skills/<name>/...`` path."""
+    parts = path.strip("/").split("/")
+    return parts[1] if len(parts) >= 2 and parts[0] == "skills" else ""

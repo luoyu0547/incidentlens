@@ -6,7 +6,7 @@ These tests require:
   - The INCIDENTLENS_AGENT_MODE=llm_agent environment variable
 
 Run with:
-  INCIDENTLENS_AGENT_MODE=llm_agent uv run pytest tests/integration/test_live_agent_compose.py -m "integration and live_llm" -vv -s
+  INCIDENTLENS_AGENT_MODE=llm_agent uv run pytest tests -vv -s
 """
 
 from __future__ import annotations
@@ -15,9 +15,7 @@ import os
 from pathlib import Path
 
 import pytest
-
 from incidentlens_control_plane.llm.config import load_models_config, resolve_model_profile
-
 
 CONTROL_PLANE_URL = os.environ.get("CONTROL_PLANE_URL", "http://localhost:8003")
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8000")

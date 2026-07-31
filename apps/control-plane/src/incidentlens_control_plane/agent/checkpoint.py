@@ -9,6 +9,18 @@ import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 
+class CheckpointCorruptError(Exception):
+    """Raised when a checkpoint cannot be deserialized from the database."""
+
+    def __init__(self, incident_id: str, detail: str = "") -> None:
+        self.incident_id = incident_id
+        self.detail = detail
+        msg = f"Checkpoint corrupt for incident {incident_id}"
+        if detail:
+            msg += f": {detail}"
+        super().__init__(msg)
+
+
 class AgentCheckpointRuntime:
     """Async context manager that owns an ``AsyncSqliteSaver`` backed by
     a SQLite file on disk.

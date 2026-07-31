@@ -109,6 +109,14 @@ class InvestigationState(BaseModel):
     last_error_code: str | None = None
     last_checkpoint_id: str | None = None
 
+    # Conclusion phase fields
+    conclusion_phase: bool = False
+    eligible_cause_codes: list[str] = Field(default_factory=list)
+    eligible_evidence_ids: list[str] = Field(default_factory=list)
+    conclusion_status: str = "not_ready"
+    conclusion_attempt_count: int = 0
+    last_report_rejection_reason: str | None = None
+
     model_config = {"use_enum_values": False}
 
     @property
@@ -184,7 +192,8 @@ class CheckpointStore:
             }
             if not expected_columns.issubset(existing_columns):
                 # Schema mismatch: drop and recreate
-                InvestigationCheckpointRow.__table__.drop(self._engine)
+                table: Any = InvestigationCheckpointRow.__table__
+                table.drop(self._engine)
         InvestigationBase.metadata.create_all(self._engine)
 
     def save(self, state: InvestigationState) -> None:
@@ -281,7 +290,8 @@ class InvestigationAuditStore:
                 c.name for c in InvestigationAuditRow.__table__.columns
             }
             if not expected_columns.issubset(existing_columns):
-                InvestigationAuditRow.__table__.drop(self._engine)
+                table: Any = InvestigationAuditRow.__table__
+                table.drop(self._engine)
         InvestigationBase.metadata.create_all(self._engine)
 
     def record(self, incident_id: str, action: str, details: dict[str, Any] | None = None) -> None:

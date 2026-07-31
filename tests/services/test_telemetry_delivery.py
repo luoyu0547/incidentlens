@@ -128,7 +128,6 @@ class TestTelemetryDeliveryIntegration:
     async def test_payment_fault_telemetry_reaches_control_plane(self) -> None:
         """When payment_error_rate=1.0, error telemetry reaches the control plane."""
         from fastapi import FastAPI
-
         from incidentlens_control_plane.routes.scenarios import (
             router as scenarios_router,
         )
@@ -169,7 +168,8 @@ class TestTelemetryDeliveryIntegration:
 
         # Set up payment service with in-process ScenarioService (for fault injection)
         # and a TelemetryClient that posts to the control plane
-        from payment_service.main import app as payment_app, set_scenario_service
+        from payment_service.main import app as payment_app
+        from payment_service.main import set_scenario_service
 
         svc = ScenarioService()
         svc.enable("payment_error_rate", {"error_rate": 1.0})
@@ -218,7 +218,6 @@ class TestTelemetryDeliveryIntegration:
     async def test_normal_path_telemetry_reaches_control_plane(self) -> None:
         """On normal (non-fault) path, telemetry events reach the control plane."""
         from fastapi import FastAPI
-
         from incidentlens_control_plane.routes.telemetry import (
             router as telemetry_router,
         )
@@ -238,9 +237,9 @@ class TestTelemetryDeliveryIntegration:
         cp_client = AsyncClient(transport=ASGITransport(app=cp_app), base_url="http://cp")
 
         # Set up payment service with telemetry posting to control plane
-        from payment_service.main import app as payment_app, set_scenario_service
-
         import payment_service.main as pay_mod
+        from payment_service.main import app as payment_app
+        from payment_service.main import set_scenario_service
 
         original_telemetry = pay_mod._telemetry
         pay_mod._telemetry = type(original_telemetry)(
@@ -256,7 +255,10 @@ class TestTelemetryDeliveryIntegration:
             response = await payment_client.post(
                 "/charge",
                 json={"amount": 500, "currency": "USD"},
-                headers={"X-Trace-ID": "trace-normal-telemetry", "X-Request-ID": "req-normal-telemetry"},
+                headers={
+                    "X-Trace-ID": "trace-normal-telemetry",
+                    "X-Request-ID": "req-normal-telemetry",
+                },
             )
             assert response.status_code == 200
 

@@ -32,6 +32,18 @@ _RUNTIME_POLL_INTERVAL = 0.5  # seconds
 _RUNTIME_POLL_TIMEOUT = 10.0  # seconds
 _MAX_ROUNDS = 20  # safety limit for investigation rounds
 
+_SCENARIO_SYMPTOMS: dict[str, str] = {
+    "payment_delay": "Elevated payment-service latency and downstream timeout symptoms.",
+    "payment_error_rate": "Elevated payment-service error rate and failed downstream calls.",
+    "db_pool_exhaustion": (
+        "Database connection acquisition is saturated and requests are timing out."
+    ),
+    "dependency_unavailable": (
+        "A downstream dependency is unavailable and connection attempts fail."
+    ),
+    "deployment_regression": "Failures began after a recent payment-service deployment.",
+}
+
 
 @dataclass
 class DemoRunResult:
@@ -87,7 +99,7 @@ class DemoRunner:
         self._compose = compose
         self._mode = mode
         # Client is created fresh per run; tests can inject a mock via _client
-        self._client: httpx.AsyncClient | Any | None = None
+        self._client: Any = None
 
     @property
     def investigation_timeout_seconds(self) -> float:
@@ -141,7 +153,10 @@ class DemoRunner:
                     trace_ids=[],
                     report=None,
                     failure_stage="wait_for_runtime",
-                    failure_message=f"Scenario {scenario} not visible in runtime config for {target_service}",
+                    failure_message=(
+                        f"Scenario {scenario} not visible in runtime config for "
+                        f"{target_service}"
+                    ),
                 )
 
             # Step 4: Send traffic
@@ -213,6 +228,10 @@ class DemoRunner:
         params = dict(SCENARIOS[scenario]["default_params"])
         if self._compose and scenario == "payment_error_rate":
             params["error_rate"] = 1.0
+        if self._compose and scenario == "payment_delay":
+            # The Skill's default slow-trace threshold is five seconds. Use a
+            # detectable delay in the real Compose acceptance scenario.
+            params["delay_ms"] = 6000
         return params
 
     async def _post(self, path: str, json: dict | None = None) -> dict[str, Any]:
@@ -283,12 +302,20 @@ class DemoRunner:
         body: dict[str, Any] = {
             "service": target_service,
             "error_rate": 1.0 if self._compose else 0.3,
+            "symptom": _SCENARIO_SYMPTOMS[scenario],
         }
         if trace_ids:
             body["trace_id"] = trace_ids[0]
 
         try:
-            data = await self._post("/api/investigations/start", body)
+            response = await self._client.post(
+                f"{self._control_plane_url}/api/investigations/start",
+                json=body,
+                timeout=self.investigation_timeout_seconds,
+            )
+            if response.status_code >= 400:
+                return None
+            data = response.json()
             return data.get("incident_id")
         except Exception:
             return None
@@ -341,7 +368,10 @@ class DemoRunner:
                 trace_ids=trace_ids,
                 report=report,
                 failure_stage="assert_contract",
-                failure_message=f"root_service mismatch: expected {expected_target}, got {root_service}",
+                failure_message=(
+                    f"root_service mismatch: expected {expected_target}, "
+                    f"got {root_service}"
+                ),
             )
 
         # Check non-empty evidence_ids

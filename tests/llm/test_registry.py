@@ -3,11 +3,10 @@ from pathlib import Path
 
 import httpx
 import pytest
-from langchain_core.language_models.chat_models import BaseChatModel
-
 from incidentlens_control_plane.llm.config import load_models_config
 from incidentlens_control_plane.llm.fallback import is_retryable_transport_error
 from incidentlens_control_plane.llm.registry import ModelRegistry
+from langchain_core.language_models.chat_models import BaseChatModel
 
 
 def write_config(tmp_path: Path, body: str) -> Path:
@@ -121,7 +120,6 @@ def test_registry_get_returns_base_chat_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """registry.get() should return a BaseChatModel."""
-    from langchain_openai import ChatOpenAI
 
     config = load_models_config(
         write_config(

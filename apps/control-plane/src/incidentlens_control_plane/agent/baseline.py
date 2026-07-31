@@ -574,7 +574,10 @@ class DeterministicInvestigationEngine:
                 for ev_id, ref_type in ev_refs:
                     if ref_type == "supports" and ev_id not in matching_hyp.supporting_evidence_ids:
                         matching_hyp.supporting_evidence_ids.append(ev_id)
-                    if ref_type == "contradicts" and ev_id not in matching_hyp.contradicting_evidence_ids:
+                    if (
+                        ref_type == "contradicts"
+                        and ev_id not in matching_hyp.contradicting_evidence_ids
+                    ):
                         matching_hyp.contradicting_evidence_ids.append(ev_id)
             else:
                 # Create new hypothesis from assessment
@@ -597,9 +600,15 @@ class DeterministicInvestigationEngine:
             for ev_id, ref_type in ev_refs:
                 for ev in state.evidence:
                     if ev.id == ev_id:
-                        if ref_type == "supports" and matching_hyp.id not in ev.supports_hypothesis_ids:
+                        if (
+                            ref_type == "supports"
+                            and matching_hyp.id not in ev.supports_hypothesis_ids
+                        ):
                             ev.supports_hypothesis_ids.append(matching_hyp.id)
-                        if ref_type == "contradicts" and matching_hyp.id not in ev.contradicts_hypothesis_ids:
+                        if (
+                            ref_type == "contradicts"
+                            and matching_hyp.id not in ev.contradicts_hypothesis_ids
+                        ):
                             ev.contradicts_hypothesis_ids.append(matching_hyp.id)
 
         # Also run the legacy keyword-based evidence association for

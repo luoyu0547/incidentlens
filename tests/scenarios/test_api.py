@@ -15,10 +15,8 @@ from __future__ import annotations
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import Engine
-
 from incidentlens_telemetry.database import create_engine
-
+from sqlalchemy import Engine
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -35,7 +33,6 @@ def engine() -> Engine:
 async def client(engine: Engine) -> AsyncClient:
     """Create an AsyncClient wired to a test control plane app."""
     from fastapi import FastAPI
-
     from incidentlens_control_plane.routes.scenarios import (
         router as scenarios_router,
     )

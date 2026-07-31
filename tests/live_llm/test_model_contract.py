@@ -3,8 +3,7 @@ import os
 from pathlib import Path
 
 import pytest
-
-from incidentlens_control_plane.llm.canary import run_model_canary
+from incidentlens_control_plane.llm.canary import run_model_canary, run_schema_canary
 from incidentlens_control_plane.llm.config import load_models_config
 from incidentlens_control_plane.llm.registry import ModelRegistry
 
@@ -28,3 +27,25 @@ async def test_selected_profile_performs_real_required_tool_call() -> None:
     assert result.audit_nonce == result.nonce
     assert result.identity == registry.identity(config.active_model)
     assert result.fallback_used is False
+
+
+@pytest.mark.live_llm
+async def test_conclusion_canary_validates_provider_schema_call() -> None:
+    """Test that the provider can perform both normal and schema-constrained tool calls."""
+    path = Path(os.environ.get("INCIDENTLENS_MODELS_CONFIG", "config/models.yaml"))
+    config = load_models_config(path, os.environ)
+    profile = config.models[config.active_model]
+    if profile.api_key_env not in os.environ:
+        pytest.skip(f"missing {profile.api_key_env}")
+    if not os.environ[profile.api_key_env].strip():
+        pytest.fail(f"{profile.api_key_env} exists but is empty")
+
+    registry = ModelRegistry(config, os.environ)
+    result = await run_schema_canary(registry, config.active_model)
+
+    assert result.normal_tool_call_passed is True
+    assert result.proposal_tool_call_passed is True
+    assert result.fallback_used is False
+    # ModelIdentity must not contain API key (only profile, model, endpoint_host)
+    identity_dict = result.identity.__dict__
+    assert "api_key" not in identity_dict

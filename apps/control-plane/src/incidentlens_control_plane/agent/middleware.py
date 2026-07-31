@@ -11,8 +11,7 @@ Middleware classes implement LangChain's AgentMiddleware protocol:
 
 from __future__ import annotations
 
-import json
-from typing import Any
+from typing import Any, cast
 
 from incidentlens_contracts.models import Evidence
 from langchain.agents.middleware import (
@@ -22,19 +21,219 @@ from langchain.agents.middleware import (
     Runtime,
     ToolCallRequest,
 )
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langgraph.types import Command
 from pydantic import ValidationError
 
-from incidentlens_control_plane.agent.state import InvestigationAuditStore
-from incidentlens_control_plane.agent.tool_adapter import AgentToolEnvelope
-from incidentlens_control_plane.agent.types import IncidentAgentState, RootCauseProposal
+from incidentlens_control_plane.agent.prompts import build_agent_context
 from incidentlens_control_plane.agent.skills import SkillRuntime
-
+from incidentlens_control_plane.agent.state import InvestigationAuditStore
+from incidentlens_control_plane.agent.tool_adapter import AgentToolEnvelope, stable_sha256
+from incidentlens_control_plane.agent.types import IncidentAgentState, RootCauseProposal
 
 # ---------------------------------------------------------------------------
 # Audit middleware
 # ---------------------------------------------------------------------------
+
+
+class InvestigationContextMiddleware(AgentMiddleware[IncidentAgentState, Any]):
+    """Attach the current bounded investigation state to every model call.
+
+    Also evaluates conclusion readiness via ``abefore_model`` to restrict
+    tools during the conclusion phase, and via ``aafter_model`` to set
+    the conclusion phase flags in state.
+    """
+
+    name = "InvestigationContextMiddleware"
+
+    def __init__(self, skill_runtime: Any = None) -> None:
+        self._skill_runtime = skill_runtime
+
+    async def abefore_model(
+        self,
+        state: IncidentAgentState,
+        runtime: Any,
+    ) -> dict[str, Any] | None:
+        """Before each model call, check if conclusion phase should activate.
+
+        If readiness is met, set conclusion_phase and restrict tools to
+        only RootCauseProposal.
+        """
+        if state.get("conclusion_phase"):
+            # Already in conclusion phase — no state update needed
+            return None
+
+        # If conclusion attempts exhausted, don't re-activate
+        if state.get("conclusion_attempt_count", 0) >= 2:
+            return None
+
+        if not _has_material_evidence(state):
+            return None
+        if not state.get("loaded_skill_names"):
+            return None
+        if self._skill_runtime is None:
+            return None
+
+        from incidentlens_control_plane.agent.conclusion import (
+            evaluate_conclusion_readiness,
+        )
+
+        readiness = evaluate_conclusion_readiness(
+            incident_id=state.get("incident_id", ""),
+            loaded_skill_names=state.get("loaded_skill_names", []),
+            evidence=state.get("evidence", []),
+            policies=self._skill_runtime.policies_by_cause_code,
+        )
+
+        if readiness.ready:
+            return {
+                "conclusion_phase": True,
+                "eligible_cause_codes": readiness.eligible_cause_codes,
+                "eligible_evidence_ids": readiness.eligible_evidence_ids,
+                "conclusion_status": "ready",
+            }
+        return None
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Any,
+    ) -> ModelResponse | AIMessage:
+        base_prompt = request.system_message.text if request.system_message else ""
+        state = cast(IncidentAgentState, request.state)
+
+        # In conclusion phase, restrict tools to only RootCauseProposal
+        # and use conclusion-specific context
+        if state.get("conclusion_phase"):
+            conclusion_ctx = _build_conclusion_context(state)
+            # Filter tools: only RootCauseProposal allowed
+            filtered_tools = [
+                t for t in (request.tools or [])
+                if (getattr(t, "name", "") == "RootCauseProposal"
+                    or (isinstance(t, dict) and t.get("name") == "RootCauseProposal"))
+            ]
+            enriched_request = request.override(
+                system_message=SystemMessage(
+                    content=f"{base_prompt}\n\n## Conclusion Phase\n{conclusion_ctx}"
+                ),
+                tools=filtered_tools if filtered_tools else request.tools,
+                tool_choice={
+                    "type": "function",
+                    "function": {"name": "RootCauseProposal"},
+                },
+            )
+            return await handler(enriched_request)
+
+        context = build_agent_context(state)
+        if _has_material_evidence(state) and state.get("loaded_skill_names"):
+            context += (
+                "\n\nDecision checkpoint: you have current evidence from multiple "
+                "independent tools and have read the relevant Skill. If it supports "
+                "a cause, stop querying and call RootCauseProposal now with only the "
+                "current Evidence IDs that support your conclusion."
+            )
+        enriched_request = request.override(
+            system_message=SystemMessage(
+                content=f"{base_prompt}\n\n## Current Investigation State\n{context}"
+            ),
+        )
+        return await handler(enriched_request)
+
+    async def aafter_model(
+        self,
+        state: IncidentAgentState,
+        runtime: Any,
+    ) -> dict[str, Any] | None:
+        """After each model call, no additional processing needed.
+
+        Readiness is checked in abefore_model. Report persistence is
+        handled by ReportGateMiddleware.aafter_model.
+        """
+        return None
+
+
+def _has_material_evidence(state: IncidentAgentState) -> bool:
+    """Require populated slow-trace and trace evidence before forcing a conclusion."""
+    material_sources: set[str] = set()
+    for evidence in state.get("evidence", []):
+        source_tool = (
+            evidence.get("source_tool", "")
+            if isinstance(evidence, dict)
+            else evidence.source_tool
+        )
+        content = (
+            evidence.get("content", {}) if isinstance(evidence, dict) else evidence.content
+        )
+        if isinstance(content, dict) and content.get("data"):
+            material_sources.add(source_tool)
+    return {"get_slow_traces", "get_trace"}.issubset(material_sources)
+
+
+class IncidentToolContextMiddleware(AgentMiddleware[IncidentAgentState, Any]):
+    """Bind every observability call to the active incident server-side."""
+
+    name = "IncidentToolContextMiddleware"
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Any,
+    ) -> ToolMessage | Command[Any]:
+        incident_id = request.state.get("incident_id", "")
+        if not incident_id or request.tool_call.get("name") == "read_file":
+            return await handler(request)
+
+        tool_call = {
+            **request.tool_call,
+            "args": {
+                **request.tool_call.get("args", {}),
+                "incident_id": incident_id,
+            },
+        }
+        return await handler(request.override(tool_call=cast(Any, tool_call)))
+
+
+class DuplicateToolCallMiddleware(AgentMiddleware[IncidentAgentState, Any]):
+    """Return existing Evidence instead of executing an identical tool call."""
+
+    name = "DuplicateToolCallMiddleware"
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Any,
+    ) -> ToolMessage | Command[Any]:
+        tool_call = request.tool_call
+        tool_name = tool_call.get("name", "")
+        args = tool_call.get("args", {})
+        incident_id = request.state.get("incident_id", "")
+        if tool_name == "read_file" or not incident_id or not isinstance(args, dict):
+            return await handler(request)
+
+        normalized_args = {
+            key: value for key, value in args.items() if key != "incident_id"
+        }
+        call_key = stable_sha256(incident_id, tool_name, normalized_args)
+        for evidence in request.state.get("evidence", []):
+            evidence_call_id = (
+                evidence.get("tool_call_id", "")
+                if isinstance(evidence, dict)
+                else evidence.tool_call_id
+            )
+            if evidence_call_id == call_key:
+                evidence_id = (
+                    evidence.get("id", "") if isinstance(evidence, dict) else evidence.id
+                )
+                return ToolMessage(
+                    content=(
+                        f"Duplicate {tool_name} call. Existing Evidence ID: {evidence_id}. "
+                        "Do not repeat it; choose a different tool required by the Skill."
+                    ),
+                    tool_call_id=tool_call.get("id", ""),
+                    status="error",
+                )
+
+        return await handler(request)
 
 
 class AuditMiddleware(AgentMiddleware[IncidentAgentState, Any]):
@@ -114,9 +313,6 @@ class EvidenceRecordingMiddleware(AgentMiddleware[IncidentAgentState, Any]):
 
     name = "EvidenceRecordingMiddleware"
 
-    def __init__(self) -> None:
-        self._consecutive_invalid: int = 0
-
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
@@ -124,15 +320,14 @@ class EvidenceRecordingMiddleware(AgentMiddleware[IncidentAgentState, Any]):
     ) -> ToolMessage | Command[Any]:
         """Intercept tool calls to record evidence from artifacts."""
         tool_call = request.tool_call
-        tool = request.tool
         state = request.state
 
         try:
             response = await handler(request)
         except ValidationError as exc:
             # Validation error from the tool's Pydantic args
-            self._consecutive_invalid += 1
-            if self._consecutive_invalid >= 2:
+            invalid_count = state.get("invalid_tool_call_count", 0) + 1
+            if invalid_count >= 2:
                 # Two consecutive invalid calls: stop repairing
                 error_msg = f"Tool arguments invalid twice: {exc}"
                 return ToolMessage(
@@ -148,9 +343,9 @@ class EvidenceRecordingMiddleware(AgentMiddleware[IncidentAgentState, Any]):
                 else "unknown"
             )
             synthetic_evidence = Evidence(
-                id=f"ev-invalid-{tool_call.get('id', 'unknown')[:16]}",
+                id=f"ev-invalid-{str(tool_call.get('id') or 'unknown')[:16]}",
                 source_tool=tool_call.get("name", "unknown"),
-                tool_call_id=tool_call.get("id", ""),
+                tool_call_id=tool_call.get("id") or "unknown",
                 content={
                     "incident_id": incident_id,
                     "outcome": "invalid_arguments",
@@ -170,13 +365,47 @@ class EvidenceRecordingMiddleware(AgentMiddleware[IncidentAgentState, Any]):
                     "messages": [tool_msg],
                     "evidence": [synthetic_evidence],
                     "tool_call_count": 1,
+                    "invalid_tool_call_count": invalid_count,
                 },
             )
 
-        # Success path: reset consecutive invalid count and extract evidence
-        self._consecutive_invalid = 0
+        # This is per-incident graph state, not middleware instance state. A
+        # shared middleware instance may serve many concurrent investigations.
+        reset_invalid_count = {"invalid_tool_call_count": 0}
 
-        if isinstance(response, ToolMessage) and hasattr(response, "artifact") and response.artifact is not None:
+        if (
+            isinstance(response, ToolMessage)
+            and tool_call.get("name") == "read_file"
+            and isinstance(getattr(response, "artifact", None), dict)
+        ):
+            artifact = response.artifact
+            skill_name = artifact.get("skill_name", "")
+            if artifact.get("ok") and skill_name:
+                return Command(
+                    update={
+                        "messages": [response],
+                        "loaded_skill_names": [skill_name],
+                        "last_error_code": (
+                            None
+                            if state.get("last_error_code") == "skill_load_failed"
+                            else state.get("last_error_code")
+                        ),
+                        **reset_invalid_count,
+                    }
+                )
+            return Command(
+                update={
+                    "messages": [response],
+                    "last_error_code": "skill_load_failed",
+                    **reset_invalid_count,
+                }
+            )
+
+        if (
+            isinstance(response, ToolMessage)
+            and hasattr(response, "artifact")
+            and response.artifact is not None
+        ):
             try:
                 envelope = AgentToolEnvelope.model_validate(response.artifact)
                 return Command(
@@ -184,12 +413,15 @@ class EvidenceRecordingMiddleware(AgentMiddleware[IncidentAgentState, Any]):
                         "messages": [response],
                         "evidence": [envelope.evidence],
                         "tool_call_count": 1,
+                        **reset_invalid_count,
                     },
                 )
             except Exception:
                 # If artifact can't be parsed, pass through without state update
-                return response
+                return Command(update={"messages": [response], **reset_invalid_count})
 
+        if isinstance(response, ToolMessage):
+            return Command(update={"messages": [response], **reset_invalid_count})
         return response
 
 
@@ -221,8 +453,8 @@ class BudgetEnforcementMiddleware(AgentMiddleware[IncidentAgentState, Any]):
         runtime: Runtime[Any],
     ) -> dict[str, Any] | None:
         """Check if budget is exhausted before allowing another model call."""
-        model_calls = state.get("model_call_count", 0)
-        tool_calls = state.get("tool_call_count", 0)
+        model_calls = int(state.get("model_call_count", 0))
+        tool_calls = int(state.get("tool_call_count", 0))
 
         if model_calls >= self._model_limit:
             return {
@@ -245,8 +477,10 @@ class BudgetEnforcementMiddleware(AgentMiddleware[IncidentAgentState, Any]):
     ) -> ModelResponse | AIMessage:
         """Check budget before model call; short-circuit if exhausted."""
         state = request.state
-        model_calls = state.get("model_call_count", 0)
-        tool_calls = state.get("tool_call_count", 0)
+        model_calls_raw = state.get("model_call_count", 0)
+        tool_calls_raw = state.get("tool_call_count", 0)
+        model_calls = model_calls_raw if isinstance(model_calls_raw, int) else 0
+        tool_calls = tool_calls_raw if isinstance(tool_calls_raw, int) else 0
 
         if model_calls >= self._model_limit or tool_calls >= self._tool_limit:
             # Short-circuit: return a final message instead of calling the model
@@ -267,6 +501,103 @@ class BudgetEnforcementMiddleware(AgentMiddleware[IncidentAgentState, Any]):
 
 
 # ---------------------------------------------------------------------------
+# Conclusion boundary middleware
+# ---------------------------------------------------------------------------
+
+CONCLUSION_TOOL = "RootCauseProposal"
+OBSERVABILITY_TOOLS = frozenset({
+    "search_logs",
+    "get_slow_traces",
+    "get_trace",
+    "query_metrics",
+    "get_service_dependencies",
+    "list_recent_deployments",
+    "get_runbook",
+})
+
+
+class ConclusionBoundaryMiddleware(AgentMiddleware[IncidentAgentState, Any]):
+    """Restrict available tools during the conclusion phase.
+
+    During the conclusion phase, only the RootCauseProposal tool is allowed.
+    Any attempt to call an observability tool is rejected with an error message,
+    preventing the model from mixing investigation and conclusion phases.
+    """
+
+    name = "ConclusionBoundaryMiddleware"
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Any,
+    ) -> ToolMessage | Command[Any]:
+        state = request.state
+        if not state.get("conclusion_phase"):
+            return await handler(request)
+
+        tool_name = request.tool_call.get("name", "")
+        if tool_name == CONCLUSION_TOOL:
+            return await handler(request)
+
+        # Reject non-proposal tools during conclusion
+        return ToolMessage(
+            content=(
+                f"Tool '{tool_name}' is not available during the conclusion phase. "
+                "Only RootCauseProposal is allowed. Please emit a valid proposal."
+            ),
+            tool_call_id=request.tool_call.get("id", ""),
+            status="error",
+        )
+
+
+def _build_conclusion_context(state: IncidentAgentState) -> str:
+    """Build a focused context string for the conclusion phase.
+
+    Includes only the incident summary, eligible cause codes, eligible
+    evidence IDs, and loaded skill names.  Does NOT include raw logs,
+    API keys, or hidden reasoning.
+    """
+    lines: list[str] = []
+    lines.append(f"Incident ID: {state.get('incident_id', '')}")
+    lines.append(f"Status: {state.get('status', '')}")
+
+    eligible_codes = state.get("eligible_cause_codes", [])
+    eligible_ids = state.get("eligible_evidence_ids", [])
+    lines.append(f"Eligible cause codes: {', '.join(eligible_codes)}")
+    lines.append(f"Eligible evidence IDs: {', '.join(eligible_ids)}")
+
+    loaded = state.get("loaded_skill_names", [])
+    if loaded:
+        lines.append(f"Loaded Skills: {', '.join(loaded)}")
+
+    # Brief evidence summary (only eligible evidence)
+    evidence = state.get("evidence", [])
+    ev_by_id: dict[str, Any] = {}
+    for e in evidence:
+        eid = e.id if hasattr(e, "id") else ""
+        ev_by_id[eid] = e
+    lines.append("Eligible evidence:")
+    for ev_id in eligible_ids:
+        ev = ev_by_id.get(ev_id)
+        if ev is None:
+            continue
+        source = (
+            ev.source_tool
+            if hasattr(ev, "source_tool")
+            else ev.get("source_tool", "")
+        )
+        lines.append(f"  - {ev_id}: {source}")
+
+    lines.append("")
+    lines.append(
+        "You MUST emit a RootCauseProposal with root_service, cause_code, "
+        "evidence_ids (from eligible evidence IDs only), confidence, and "
+        "next_action. Do NOT call any other tool."
+    )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Report gate middleware
 # ---------------------------------------------------------------------------
 
@@ -283,8 +614,9 @@ class ReportGateMiddleware(AgentMiddleware[IncidentAgentState, Any]):
 
     name = "ReportGateMiddleware"
 
-    def __init__(self, skill_runtime: SkillRuntime) -> None:
+    def __init__(self, skill_runtime: SkillRuntime, audit_store: Any = None) -> None:
         self._skill_runtime = skill_runtime
+        self._audit_store = audit_store
 
     async def awrap_model_call(
         self,
@@ -303,7 +635,7 @@ class ReportGateMiddleware(AgentMiddleware[IncidentAgentState, Any]):
         # Validate the proposal
         if isinstance(proposal, RootCauseProposal):
             decision = can_generate_guarded_report(
-                state,
+                cast(IncidentAgentState, state),
                 proposal,
                 self._skill_runtime.policies_by_cause_code,
             )
@@ -322,6 +654,86 @@ class ReportGateMiddleware(AgentMiddleware[IncidentAgentState, Any]):
                 )
 
         return response
+
+    async def aafter_model(
+        self,
+        state: IncidentAgentState,
+        runtime: Runtime[Any],
+    ) -> dict[str, Any] | None:
+        """Persist an accepted structured proposal as the public report.
+
+        Also tracks rejected proposals by checking if structured_response
+        was cleared by awrap_model_call (rejection case).
+        """
+        proposal = state.get("structured_response")
+
+        # Detect rejected proposal: if we're in conclusion_phase but
+        # structured_response is None, a rejection happened in awrap_model_call
+        if state.get("conclusion_phase") and proposal is None:
+            attempt = state.get("conclusion_attempt_count", 0) + 1
+            if attempt >= 2 and self._audit_store is not None:
+                self._audit_store.record(
+                    state.get("incident_id", ""),
+                    "conclusion_terminal_failure",
+                    {"attempt": attempt},
+                )
+                return {
+                    "conclusion_attempt_count": attempt,
+                    "conclusion_status": "rejected",
+                    "last_error_code": "conclusion_terminal_failure",
+                    "status": "needs_more_evidence",
+                }
+            return {
+                "conclusion_attempt_count": attempt,
+                "conclusion_status": "attempting",
+            }
+
+        if not isinstance(proposal, RootCauseProposal):
+            return None
+
+        if proposal.next_action != "finish":
+            return {
+                "status": "needs_more_evidence",
+                "phase": "finished",
+            }
+
+        evidence_by_id = {
+            evidence.id if not isinstance(evidence, dict) else evidence.get("id", ""): evidence
+            for evidence in state.get("evidence", [])
+        }
+        findings: list[dict[str, Any]] = []
+        for evidence_id in proposal.evidence_ids:
+            evidence = evidence_by_id[evidence_id]
+            if isinstance(evidence, dict):
+                findings.append(
+                    {
+                        "evidence_id": evidence_id,
+                        "source_tool": evidence.get("source_tool", ""),
+                        "content": evidence.get("content", {}),
+                    }
+                )
+            else:
+                findings.append(
+                    {
+                        "evidence_id": evidence.id,
+                        "source_tool": evidence.source_tool,
+                        "content": evidence.content,
+                    }
+                )
+
+        return {
+            "status": "report_ready",
+            "phase": "generate_report",
+            "report": {
+                "incident_id": state.get("incident_id", ""),
+                "root_service": proposal.root_service,
+                "root_cause": proposal.cause_code,
+                "evidence_ids": proposal.evidence_ids,
+                "findings": findings,
+                "rounds_completed": state.get("current_round", 0),
+                "uncertainty": round(1 - proposal.confidence, 3),
+            },
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +766,11 @@ def can_generate_guarded_report(
       4. No direct contradictions in the evidence
     """
     # Get owned evidence IDs
-    evidence = state.get("evidence", []) if isinstance(state, dict) else getattr(state, "evidence", [])
+    evidence = (
+        state.get("evidence", [])
+        if isinstance(state, dict)
+        else getattr(state, "evidence", [])
+    )
     owned_ids = set()
     for ev in evidence:
         if isinstance(ev, dict):
@@ -384,7 +800,7 @@ def can_generate_guarded_report(
         )
 
     # Check: independent source types
-    evidence_by_id = {}
+    evidence_by_id: dict[str, Any] = {}
     for ev in evidence:
         if isinstance(ev, dict):
             evidence_by_id[ev.get("id", "")] = ev
@@ -400,6 +816,11 @@ def can_generate_guarded_report(
 
     if policies_by_cause_code and proposal.cause_code in policies_by_cause_code:
         policy = policies_by_cause_code[proposal.cause_code]
+        loaded_skill_names = set(state.get("loaded_skill_names", []))
+        if state.get("last_error_code") == "skill_load_failed":
+            return GuardDecision(allowed=False, reason="skill_load_failed")
+        if policy.skill_name not in loaded_skill_names:
+            return GuardDecision(allowed=False, reason="required_skill_not_loaded")
         min_independent = getattr(policy, "minimum_independent_evidence", 0)
         if len(source_tools) < min_independent:
             return GuardDecision(

@@ -93,7 +93,7 @@ async def create_order(
     body: OrderRequest,
     x_request_id: str | None = Header(None, alias="X-Request-ID"),
     x_trace_id: str | None = Header(None, alias="X-Trace-ID"),
-) -> OrderResponse:
+) -> OrderResponse | JSONResponse:
     # Extract/propagate context
     headers = {}
     if x_request_id:

@@ -17,6 +17,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from incidentlens_scenarios.store import ScenarioStore
+from incidentlens_telemetry.models import (
+    DeploymentRow,
+    LogRow,
+    MetricRow,
+    SpanRow,
+)
+from incidentlens_telemetry.repository import TelemetryRepository
 from sqlalchemy.exc import OperationalError
 
 from incidentlens_control_plane.agent.state import (
@@ -25,15 +33,6 @@ from incidentlens_control_plane.agent.state import (
 )
 from incidentlens_control_plane.memory.models import CaseFTSRow, CaseRow
 from incidentlens_control_plane.tools.base import ToolAuditRow
-from incidentlens_telemetry.models import (
-    DeploymentRow,
-    LogRow,
-    MetricRow,
-    SpanRow,
-)
-
-from incidentlens_scenarios.store import ScenarioStore
-from incidentlens_telemetry.repository import TelemetryRepository
 
 logger = logging.getLogger(__name__)
 

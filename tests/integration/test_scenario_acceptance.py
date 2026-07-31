@@ -18,6 +18,8 @@ import json
 import pytest
 from incidentlens_demo.runner import DemoRunner
 
+pytestmark = pytest.mark.integration
+
 # ---------------------------------------------------------------------------
 # Parametrized scenario definitions
 # ---------------------------------------------------------------------------

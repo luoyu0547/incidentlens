@@ -1,10 +1,9 @@
 from pathlib import Path
 
-from langgraph.graph import END, START, StateGraph
-
 from incidentlens_control_plane.agent.checkpoint import AgentCheckpointRuntime
 from incidentlens_control_plane.agent.projection import project_investigation_state
 from incidentlens_control_plane.agent.types import IncidentAgentState
+from langgraph.graph import END, START, StateGraph
 
 
 def test_projection_validates_domain_state() -> None:

@@ -10,7 +10,6 @@ from __future__ import annotations
 import httpx
 import pytest
 from incidentlens_contracts.models import InvestigationStatus
-
 from incidentlens_control_plane.agent.state import InvestigationState
 from incidentlens_control_plane.llm.config import RuntimeMode
 from incidentlens_control_plane.main import create_app

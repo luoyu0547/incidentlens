@@ -62,6 +62,28 @@ def checkpoints(engine):
     return engine.checkpoint_store
 
 
+@pytest.fixture()
+def investigation_api_app(engine):
+    """Create an app with the deterministic engine through the async contract."""
+    from incidentlens_control_plane.agent.runtime import AsyncBaselineAdapter
+    from incidentlens_control_plane.main import create_app
+
+    return create_app(engine_override=AsyncBaselineAdapter(engine))
+
+
+@pytest.fixture()
+def case_api_app(engine):
+    """Create an app with an isolated case repository."""
+    from incidentlens_control_plane.agent.runtime import AsyncBaselineAdapter
+    from incidentlens_control_plane.main import create_app
+    from incidentlens_control_plane.memory.repository import CaseRepository
+    from incidentlens_control_plane.routes.cases import set_repository
+
+    repository = CaseRepository(create_engine("sqlite:///:memory:"))
+    set_repository(repository)
+    return create_app(engine_override=AsyncBaselineAdapter(engine))
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -468,12 +490,10 @@ class TestInvestigationAPI:
     """Tests for the investigation API routes."""
 
     @pytest.mark.asyncio
-    async def test_start_investigation_api(self) -> None:
+    async def test_start_investigation_api(self, investigation_api_app) -> None:
         """POST /api/investigations/start should create an investigation."""
         from httpx import ASGITransport, AsyncClient
-        from incidentlens_control_plane.main import app
-
-        transport = ASGITransport(app=app)
+        transport = ASGITransport(app=investigation_api_app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
                 "/api/investigations/start",
@@ -488,12 +508,10 @@ class TestInvestigationAPI:
         assert data["status"] == "scoping"
 
     @pytest.mark.asyncio
-    async def test_run_round_api(self) -> None:
+    async def test_run_round_api(self, investigation_api_app) -> None:
         """POST /api/investigations/{incident_id}/round should run a round."""
         from httpx import ASGITransport, AsyncClient
-        from incidentlens_control_plane.main import app
-
-        transport = ASGITransport(app=app)
+        transport = ASGITransport(app=investigation_api_app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             # Start an investigation first
             start_response = await client.post(
@@ -511,12 +529,10 @@ class TestInvestigationAPI:
         assert data["current_round"] >= 1
 
     @pytest.mark.asyncio
-    async def test_resume_investigation_api(self) -> None:
+    async def test_resume_investigation_api(self, investigation_api_app) -> None:
         """POST /api/investigations/{incident_id}/resume should resume."""
         from httpx import ASGITransport, AsyncClient
-        from incidentlens_control_plane.main import app
-
-        transport = ASGITransport(app=app)
+        transport = ASGITransport(app=investigation_api_app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             # Start an investigation first
             start_response = await client.post(
@@ -532,12 +548,10 @@ class TestInvestigationAPI:
         assert resume_response.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_resume_nonexistent_returns_404(self) -> None:
+    async def test_resume_nonexistent_returns_404(self, investigation_api_app) -> None:
         """Resume for nonexistent incident should return 404."""
         from httpx import ASGITransport, AsyncClient
-        from incidentlens_control_plane.main import app
-
-        transport = ASGITransport(app=app)
+        transport = ASGITransport(app=investigation_api_app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
                 "/api/investigations/nonexistent-id/resume",
@@ -554,12 +568,10 @@ class TestCaseAPI:
     """Tests for the case memory API routes."""
 
     @pytest.mark.asyncio
-    async def test_save_and_search_case_api(self) -> None:
+    async def test_save_and_search_case_api(self, case_api_app) -> None:
         """POST /api/cases and GET /api/cases/search should work."""
         from httpx import ASGITransport, AsyncClient
-        from incidentlens_control_plane.main import app
-
-        transport = ASGITransport(app=app)
+        transport = ASGITransport(app=case_api_app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             # Save a verified case
             save_response = await client.post(
@@ -575,12 +587,10 @@ class TestCaseAPI:
         assert "case_id" in save_response.json()
 
     @pytest.mark.asyncio
-    async def test_confirm_case_api(self) -> None:
+    async def test_confirm_case_api(self, case_api_app) -> None:
         """POST /api/cases/{case_id}/confirm should confirm a case."""
         from httpx import ASGITransport, AsyncClient
-        from incidentlens_control_plane.main import app
-
-        transport = ASGITransport(app=app)
+        transport = ASGITransport(app=case_api_app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             # Save a pending case
             save_response = await client.post(

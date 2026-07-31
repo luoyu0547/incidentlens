@@ -114,7 +114,10 @@ def _assess_log_item(item: dict[str, Any]) -> list[EvidenceAssessment]:
 
     # Order-service healthy operation contradicts db leak and network partition
     if service == "order-service" and level in ("INFO", "WARN"):
-        if any(kw in message for kw in ("pool ok", "healthy pool", "available", "connected", "success")):
+        if any(
+            kw in message
+            for kw in ("pool ok", "healthy pool", "available", "connected", "success")
+        ):
             assessments.append(
                 EvidenceAssessment(
                     candidate_service="order-service",
