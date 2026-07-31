@@ -39,13 +39,56 @@ from incidentlens_control_plane.agent.types import IncidentAgentState, RootCause
 class InvestigationContextMiddleware(AgentMiddleware[IncidentAgentState, Any]):
     """Attach the current bounded investigation state to every model call.
 
-    Also evaluates conclusion readiness after each model call via the
-    ``aafter_model`` hook.  When sufficient evidence is collected and a
-    valid RootCauseProposal is emitted, the middleware transitions the
-    state to the conclusion phase.
+    Also evaluates conclusion readiness via ``abefore_model`` to restrict
+    tools during the conclusion phase, and via ``aafter_model`` to set
+    the conclusion phase flags in state.
     """
 
     name = "InvestigationContextMiddleware"
+
+    def __init__(self, skill_runtime: Any = None) -> None:
+        self._skill_runtime = skill_runtime
+
+    async def abefore_model(
+        self,
+        state: IncidentAgentState,
+        runtime: Any,
+    ) -> dict[str, Any] | None:
+        """Before each model call, check if conclusion phase should activate.
+
+        If readiness is met, set conclusion_phase and restrict tools to
+        only RootCauseProposal.
+        """
+        if state.get("conclusion_phase"):
+            # Already in conclusion phase — no state update needed
+            return None
+
+        if not _has_material_evidence(state):
+            return None
+        if not state.get("loaded_skill_names"):
+            return None
+        if self._skill_runtime is None:
+            return None
+
+        from incidentlens_control_plane.agent.conclusion import (
+            evaluate_conclusion_readiness,
+        )
+
+        readiness = evaluate_conclusion_readiness(
+            incident_id=state.get("incident_id", ""),
+            loaded_skill_names=state.get("loaded_skill_names", []),
+            evidence=state.get("evidence", []),
+            policies=self._skill_runtime.policies_by_cause_code,
+        )
+
+        if readiness.ready:
+            return {
+                "conclusion_phase": True,
+                "eligible_cause_codes": readiness.eligible_cause_codes,
+                "eligible_evidence_ids": readiness.eligible_evidence_ids,
+                "conclusion_status": "ready",
+            }
+        return None
 
     async def awrap_model_call(
         self,
@@ -54,18 +97,30 @@ class InvestigationContextMiddleware(AgentMiddleware[IncidentAgentState, Any]):
     ) -> ModelResponse | AIMessage:
         base_prompt = request.system_message.text if request.system_message else ""
         state = cast(IncidentAgentState, request.state)
-        context = build_agent_context(state)
 
-        # In conclusion phase, use conclusion-specific context
+        # In conclusion phase, restrict tools to only RootCauseProposal
+        # and use conclusion-specific context
         if state.get("conclusion_phase"):
             conclusion_ctx = _build_conclusion_context(state)
+            # Filter tools: only RootCauseProposal allowed
+            filtered_tools = [
+                t for t in (request.tools or [])
+                if (getattr(t, "name", "") == "RootCauseProposal"
+                    or (isinstance(t, dict) and t.get("name") == "RootCauseProposal"))
+            ]
             enriched_request = request.override(
                 system_message=SystemMessage(
                     content=f"{base_prompt}\n\n## Conclusion Phase\n{conclusion_ctx}"
                 ),
+                tools=filtered_tools if filtered_tools else request.tools,
+                tool_choice={
+                    "type": "function",
+                    "function": {"name": "RootCauseProposal"},
+                },
             )
             return await handler(enriched_request)
 
+        context = build_agent_context(state)
         if _has_material_evidence(state) and state.get("loaded_skill_names"):
             context += (
                 "\n\nDecision checkpoint: you have current evidence from multiple "
@@ -85,54 +140,11 @@ class InvestigationContextMiddleware(AgentMiddleware[IncidentAgentState, Any]):
         state: IncidentAgentState,
         runtime: Any,
     ) -> dict[str, Any] | None:
-        """After each model call, evaluate conclusion readiness.
+        """After each model call, no additional processing needed.
 
-        If the model emitted a RootCauseProposal and the evidence meets
-        the readiness criteria, set conclusion_phase and eligible IDs.
+        Readiness is checked in abefore_model. Report persistence is
+        handled by ReportGateMiddleware.aafter_model.
         """
-        from incidentlens_control_plane.agent.conclusion import (
-            evaluate_conclusion_readiness,
-        )
-
-        # Only evaluate when material evidence and skills are loaded
-        if not _has_material_evidence(state):
-            return None
-        if not state.get("loaded_skill_names"):
-            return None
-
-        # Check if structured_response is a valid proposal
-        structured = state.get("structured_response")
-        if not isinstance(structured, RootCauseProposal):
-            return None
-
-        # Get skills reference from runtime
-        skill_runtime = getattr(runtime, "_skill_runtime", None)
-        if skill_runtime is None:
-            # Try to get from the report gate middleware
-            for mw in getattr(runtime, "_middleware", []):
-                if hasattr(mw, "_skill_runtime"):
-                    skill_runtime = mw._skill_runtime
-                    break
-        if skill_runtime is None:
-            return None
-
-        policies = skill_runtime.policies_by_cause_code
-
-        readiness = evaluate_conclusion_readiness(
-            incident_id=state.get("incident_id", ""),
-            loaded_skill_names=state.get("loaded_skill_names", []),
-            evidence=state.get("evidence", []),
-            policies=policies,
-        )
-
-        if readiness.ready:
-            return {
-                "conclusion_phase": True,
-                "eligible_cause_codes": readiness.eligible_cause_codes,
-                "eligible_evidence_ids": readiness.eligible_evidence_ids,
-                "conclusion_status": "ready",
-            }
-
         return None
 
 

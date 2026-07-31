@@ -84,7 +84,7 @@ def build_investigation_agent(
     middleware.extend([fs_middleware, skills_middleware, skill_audit])
 
     # Audit middleware
-    middleware.append(InvestigationContextMiddleware())  # type: ignore[arg-type]
+    middleware.append(InvestigationContextMiddleware(skill_runtime=skill_runtime))  # type: ignore[arg-type]
     middleware.append(AuditMiddleware(audit_store))  # type: ignore[arg-type]
     middleware.append(IncidentToolContextMiddleware())  # type: ignore[arg-type]
     middleware.append(DuplicateToolCallMiddleware())  # type: ignore[arg-type]
