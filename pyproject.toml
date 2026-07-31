@@ -15,6 +15,7 @@ dependencies = [
     "incidentlens-payment-service",
     "incidentlens-evaluation",
     "incidentlens-demo",
+    "packaging>=24,<27",
     "pydantic>=2.13,<3",
     "sqlalchemy>=2.0,<3",
     "httpx>=0.28,<1",

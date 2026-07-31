@@ -8,6 +8,7 @@ dependencies = [
     "incidentlens-contracts",
     "incidentlens-scenarios",
     "incidentlens-telemetry",
+    "packaging>=24,<27",
     "pydantic>=2.13,<3",
     "sqlalchemy>=2.0,<3",
     "uvicorn>=0.30,<1",
