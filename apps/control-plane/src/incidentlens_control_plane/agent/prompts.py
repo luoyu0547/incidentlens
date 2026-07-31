@@ -71,7 +71,7 @@ When you have gathered sufficient evidence, emit a RootCauseProposal with:
 # ---------------------------------------------------------------------------
 
 
-def build_agent_context(state: IncidentAgentState) -> str:
+def build_agent_context(state_input: IncidentAgentState | dict[str, Any]) -> str:
     """Build a bounded context string from the current investigation state.
 
     Serializes at most:
@@ -85,6 +85,7 @@ def build_agent_context(state: IncidentAgentState) -> str:
     Never serializes raw API keys, Authorization headers, full unbounded
     logs, or hidden reasoning.
     """
+    state: Any = state_input
     if isinstance(state, dict):
         defaults = {
             "incident_id": "",

@@ -72,28 +72,21 @@ def compute_metrics(records: list[RunRecord]) -> EvaluationResult:
 
     n = len(records)
 
-    # Root service accuracy: fraction where actual matches expected
-    # Only count records that have an actual value (i.e., produced a report)
-    records_with_report = [r for r in records if r.root_service_actual is not None]
-    if records_with_report:
-        service_correct = sum(
-            1 for r in records_with_report
-            if r.root_service_actual == r.root_service_expected
-        )
-        root_service_accuracy = service_correct / len(records_with_report)
-    else:
-        root_service_accuracy = 0.0
+    # Accuracy uses every run as the denominator. A missing report is a failed
+    # outcome, rather than being silently excluded from the score.
+    service_correct = sum(
+        1 for r in records
+        if r.root_service_actual is not None
+        and r.root_service_actual == r.root_service_expected
+    )
+    root_service_accuracy = service_correct / n
 
-    # Root cause type accuracy: fraction where actual matches expected
-    records_with_cause = [r for r in records if r.root_cause_type_actual is not None]
-    if records_with_cause:
-        cause_correct = sum(
-            1 for r in records_with_cause
-            if r.root_cause_type_actual == r.root_cause_type_expected
-        )
-        root_cause_type_accuracy = cause_correct / len(records_with_cause)
-    else:
-        root_cause_type_accuracy = 0.0
+    cause_correct = sum(
+        1 for r in records
+        if r.root_cause_type_actual is not None
+        and r.root_cause_type_actual == r.root_cause_type_expected
+    )
+    root_cause_type_accuracy = cause_correct / n
 
     # Evidence reference correctness: percentage of runs with correct refs
     correct_refs = sum(1 for r in records if r.evidence_reference_correct)

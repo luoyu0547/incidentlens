@@ -89,7 +89,7 @@ async def charge(
     body: ChargeRequest,
     x_request_id: str | None = Header(None, alias="X-Request-ID"),
     x_trace_id: str | None = Header(None, alias="X-Trace-ID"),
-) -> ChargeResponse:
+) -> ChargeResponse | JSONResponse:
     # Extract/propagate context
     headers = {}
     if x_request_id:

@@ -6,8 +6,10 @@ FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
-# Install uv for fast dependency resolution
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# Pin uv by digest so BuildKit can reuse the local image without resolving the
+# mutable ``latest`` tag (the latter was the source of intermittent GHCR token
+# timeouts in Compose builds).
+COPY --from=ghcr.io/astral-sh/uv@sha256:606e70c71c852d03f611b1e56a195d08648507018a7057fab82c4974c4eae105 /uv /usr/local/bin/uv
 
 # Copy workspace configuration
 COPY pyproject.toml uv.lock ./

@@ -7,6 +7,7 @@ Provides:
 from __future__ import annotations
 
 from fastapi import APIRouter, status
+from fastapi.responses import JSONResponse
 from incidentlens_contracts.models import TelemetryEvent
 from incidentlens_telemetry.repository import TelemetryRepository
 
@@ -22,12 +23,10 @@ def set_repository(repository: TelemetryRepository) -> None:
     _repository = repository
 
 
-@router.post("/events", status_code=status.HTTP_201_CREATED)
-async def receive_telemetry_event(event: TelemetryEvent) -> dict[str, str]:
+@router.post("/events", status_code=status.HTTP_201_CREATED, response_model=None)
+async def receive_telemetry_event(event: TelemetryEvent) -> dict[str, str] | JSONResponse:
     """Receive a TelemetryEvent and persist it to the telemetry store."""
     if _repository is None:
-        from fastapi.responses import JSONResponse
-
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"status": "error", "message": "repository not configured"},

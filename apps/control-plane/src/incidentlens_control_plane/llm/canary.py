@@ -68,7 +68,7 @@ async def run_model_canary(
     actual_nonce = nonce or secrets.token_hex(16)
     tool_name = "incidentlens_canary"
 
-    def canary_tool(nonce: str) -> str:
+    async def canary_tool(nonce: str) -> str:
         """Echo back the nonce for audit verification."""
         return nonce
 
@@ -140,8 +140,11 @@ async def run_schema_canary(
 
     # Test 1: Normal tool call
     nonce = secrets.token_hex(8)
+    async def echo_nonce(nonce: str) -> str:
+        return nonce
+
     normal_tool = StructuredTool.from_function(
-        coroutine=lambda nonce: nonce,
+        coroutine=echo_nonce,
         name="echo_nonce",
         description="Echo back the nonce",
         args_schema=CanaryArgs,
@@ -157,8 +160,11 @@ async def run_schema_canary(
     )
 
     # Test 2: Schema tool call (proposal-like)
+    async def proposal_tool_fn(**kw: str) -> str:
+        return str(kw)
+
     proposal_tool = StructuredTool.from_function(
-        coroutine=lambda **kw: str(kw),
+        coroutine=proposal_tool_fn,
         name="RootCauseProposal",
         description="Submit a root cause proposal",
         args_schema=ProposalCanaryArgs,

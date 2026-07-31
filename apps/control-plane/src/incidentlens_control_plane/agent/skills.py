@@ -300,7 +300,7 @@ class SkillRuntime:
             self.validate()
 
         lines: list[str] = []
-        for d in self._definitions:
+        for d in self._definitions or ():
             lines.append(f"- **{d.name}**: {d.description}")
         return "\n".join(lines)
 

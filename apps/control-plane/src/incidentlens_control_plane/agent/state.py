@@ -192,7 +192,8 @@ class CheckpointStore:
             }
             if not expected_columns.issubset(existing_columns):
                 # Schema mismatch: drop and recreate
-                InvestigationCheckpointRow.__table__.drop(self._engine)
+                table: Any = InvestigationCheckpointRow.__table__
+                table.drop(self._engine)
         InvestigationBase.metadata.create_all(self._engine)
 
     def save(self, state: InvestigationState) -> None:
@@ -289,7 +290,8 @@ class InvestigationAuditStore:
                 c.name for c in InvestigationAuditRow.__table__.columns
             }
             if not expected_columns.issubset(existing_columns):
-                InvestigationAuditRow.__table__.drop(self._engine)
+                table: Any = InvestigationAuditRow.__table__
+                table.drop(self._engine)
         InvestigationBase.metadata.create_all(self._engine)
 
     def record(self, incident_id: str, action: str, details: dict[str, Any] | None = None) -> None:

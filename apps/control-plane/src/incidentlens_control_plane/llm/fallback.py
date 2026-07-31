@@ -1,5 +1,5 @@
 """Safe Fallback Middleware for LangChain models."""
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 from langchain_core.language_models import BaseChatModel
@@ -29,14 +29,15 @@ def is_retryable_transport_error(exc: BaseException) -> bool:
     return False
 
 
-def _walk_exception_chain(exc: BaseException):
+def _walk_exception_chain(exc: BaseException) -> Iterator[BaseException]:
     """Walk the exception chain via __cause__ and __context__."""
     visited = set()
-    current = exc
+    current: BaseException | None = exc
     while current is not None and id(current) not in visited:
         visited.add(id(current))
         yield current
-        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+        next_exc = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+        current = next_exc if isinstance(next_exc, BaseException) else None
 
 
 class TransportOnlyModelFallbackMiddleware:

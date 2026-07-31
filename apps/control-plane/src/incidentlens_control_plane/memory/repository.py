@@ -153,12 +153,12 @@ class CaseRepository:
             cases = list(session.scalars(stmt3))
 
             # Rank by relevance
-            results = []
+            ranked_results: list[tuple[bool, CaseSearchResult]] = []
             for case in cases:
                 searchable = f"{case.symptom} {case.root_cause}".lower()
                 # Exact match in root_cause gets higher rank
                 is_exact = keyword_lower in (case.root_cause or "").lower()
-                results.append(
+                ranked_results.append(
                     (
                         not is_exact,  # False (exact) sorts before True
                         CaseSearchResult(
@@ -173,8 +173,8 @@ class CaseRepository:
                     )
                 )
 
-            results.sort(key=lambda x: x[0])
-            return [r[1] for r in results]
+            ranked_results.sort(key=lambda x: x[0])
+            return [r[1] for r in ranked_results]
 
     def confirm(self, case_id: int) -> None:
         """Mark a case as human_verified and index it for FTS search."""

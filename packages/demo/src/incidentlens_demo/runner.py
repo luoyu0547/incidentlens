@@ -99,7 +99,7 @@ class DemoRunner:
         self._compose = compose
         self._mode = mode
         # Client is created fresh per run; tests can inject a mock via _client
-        self._client: httpx.AsyncClient | Any | None = None
+        self._client: Any = None
 
     @property
     def investigation_timeout_seconds(self) -> float:

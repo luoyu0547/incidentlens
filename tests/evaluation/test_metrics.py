@@ -100,8 +100,8 @@ def test_missing_report_is_not_counted_as_correct() -> None:
     assert result.root_cause_type_accuracy == 0.0
 
 
-def test_mixed_report_and_no_report() -> None:
-    """Only records with reports should be counted for accuracy."""
+def test_mixed_report_and_no_report_counts_missing_report_as_incorrect() -> None:
+    """A missing report is an incorrect outcome in the full run denominator."""
     from incidentlens_evaluation.metrics import RunRecord, compute_metrics
 
     result = compute_metrics([
@@ -120,9 +120,8 @@ def test_mixed_report_and_no_report() -> None:
             tool_calls=0,
         ),
     ])
-    # Only the first record has a report, and it's correct
-    assert result.root_service_accuracy == 1.0
-    assert result.root_cause_type_accuracy == 1.0
+    assert result.root_service_accuracy == 0.5
+    assert result.root_cause_type_accuracy == 0.5
 
 
 def test_run_evaluation_returns_result_from_actual_run() -> None:

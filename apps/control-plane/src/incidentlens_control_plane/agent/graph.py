@@ -17,7 +17,6 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
@@ -77,7 +76,7 @@ def build_investigation_agent(
     A compiled LangGraph agent graph.
     """
     # Build middleware list
-    middleware: list[AgentMiddleware] = []
+    middleware: list[Any] = []
 
     # Skill middleware (filesystem, skills, skill_read_audit)
     fs_middleware, skills_middleware, skill_audit = skill_runtime.middleware()
@@ -99,7 +98,7 @@ def build_investigation_agent(
     middleware.append(BudgetEnforcementMiddleware(model_limit=12, tool_limit=12))  # type: ignore[arg-type]
 
     # Report gate middleware
-    middleware.append(ReportGateMiddleware(skill_runtime))  # type: ignore[arg-type]
+    middleware.append(ReportGateMiddleware(skill_runtime, audit_store=audit_store))  # type: ignore[arg-type]
 
     # Build the agent
     agent = create_agent(  # type: ignore[misc]

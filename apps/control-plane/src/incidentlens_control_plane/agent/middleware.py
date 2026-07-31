@@ -190,7 +190,7 @@ class IncidentToolContextMiddleware(AgentMiddleware[IncidentAgentState, Any]):
                 "incident_id": incident_id,
             },
         }
-        return await handler(request.override(tool_call=tool_call))
+        return await handler(request.override(tool_call=cast(Any, tool_call)))
 
 
 class DuplicateToolCallMiddleware(AgentMiddleware[IncidentAgentState, Any]):
@@ -345,7 +345,7 @@ class EvidenceRecordingMiddleware(AgentMiddleware[IncidentAgentState, Any]):
             synthetic_evidence = Evidence(
                 id=f"ev-invalid-{str(tool_call.get('id') or 'unknown')[:16]}",
                 source_tool=tool_call.get("name", "unknown"),
-                tool_call_id=tool_call.get("id", ""),
+                tool_call_id=tool_call.get("id") or "unknown",
                 content={
                     "incident_id": incident_id,
                     "outcome": "invalid_arguments",
@@ -614,8 +614,9 @@ class ReportGateMiddleware(AgentMiddleware[IncidentAgentState, Any]):
 
     name = "ReportGateMiddleware"
 
-    def __init__(self, skill_runtime: SkillRuntime) -> None:
+    def __init__(self, skill_runtime: SkillRuntime, audit_store: Any = None) -> None:
         self._skill_runtime = skill_runtime
+        self._audit_store = audit_store
 
     async def awrap_model_call(
         self,
@@ -670,7 +671,7 @@ class ReportGateMiddleware(AgentMiddleware[IncidentAgentState, Any]):
         # structured_response is None, a rejection happened in awrap_model_call
         if state.get("conclusion_phase") and proposal is None:
             attempt = state.get("conclusion_attempt_count", 0) + 1
-            if attempt >= 2:
+            if attempt >= 2 and self._audit_store is not None:
                 self._audit_store.record(
                     state.get("incident_id", ""),
                     "conclusion_terminal_failure",
@@ -799,7 +800,7 @@ def can_generate_guarded_report(
         )
 
     # Check: independent source types
-    evidence_by_id = {}
+    evidence_by_id: dict[str, Any] = {}
     for ev in evidence:
         if isinstance(ev, dict):
             evidence_by_id[ev.get("id", "")] = ev
