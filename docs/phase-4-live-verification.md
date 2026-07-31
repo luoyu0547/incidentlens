@@ -52,11 +52,9 @@ Expected:
 
 ## Verification Record
 
-<!-- To be filled after live verification -->
-
 | Check | Status | Notes |
 |-------|--------|-------|
-| Provider canary | PENDING | |
-| Schema canary | PENDING | |
-| Deterministic Compose | PENDING | |
-| Real payment_delay | PENDING | |
+| Provider canary (normal tool call) | ✅ PASSED | xfyun-xopglm51 via OpenAI-compatible adapter |
+| Schema canary (proposal tool call) | ✅ PASSED | Normal + schema-constrained both succeed, no fallback |
+| Deterministic Compose | PENDING | Requires Docker Compose |
+| Real payment_delay | PENDING | Requires Docker Compose |
