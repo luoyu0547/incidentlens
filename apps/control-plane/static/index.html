@@ -78,6 +78,166 @@
                 <div id="confirm-status" class="status-box"></div>
             </div>
         </section>
+
+        <!-- Case Review Queue -->
+        <section id="case-review-queue" class="panel governance-panel">
+            <h2>Case Review Queue</h2>
+            <p class="hint">Cases pending review (draft or agent_generated)</p>
+            <div id="review-queue-list" class="queue-list"></div>
+            <div id="review-queue-status" class="status-box" aria-live="polite"></div>
+        </section>
+
+        <!-- Case Editor -->
+        <section id="case-editor" class="panel governance-panel">
+            <h2>Case Editor</h2>
+            <form id="case-edit-form">
+                <input type="hidden" id="case-id">
+                <input type="hidden" id="case-revision">
+
+                <label for="edit-symptom">Symptom</label>
+                <textarea id="edit-symptom" rows="2" maxlength="4000"></textarea>
+
+                <label for="edit-services">Affected Services (comma-separated)</label>
+                <input type="text" id="edit-services" placeholder="order-service, payment-service">
+
+                <label for="edit-category">Root Cause Category</label>
+                <input type="text" id="edit-category" maxlength="255">
+
+                <label for="edit-cause">Root Cause Description</label>
+                <textarea id="edit-cause" rows="2" maxlength="8000"></textarea>
+
+                <label for="edit-resolution">Resolution</label>
+                <textarea id="edit-resolution" rows="2" maxlength="8000"></textarea>
+
+                <label for="edit-remediation">Remediation Advice (one per line)</label>
+                <textarea id="edit-remediation" rows="2" maxlength="4000"></textarea>
+
+                <label for="edit-environment">Environment</label>
+                <input type="text" id="edit-environment" maxlength="255">
+
+                <label for="edit-version-exact">Service Version (exact)</label>
+                <input type="text" id="edit-version-exact" maxlength="255">
+
+                <label for="edit-version-min">Service Version (min)</label>
+                <input type="text" id="edit-version-min" maxlength="255">
+
+                <label for="edit-version-max">Service Version (max)</label>
+                <input type="text" id="edit-version-max" maxlength="255">
+
+                <div class="action-row">
+                    <label for="review-actor">Actor</label>
+                    <input type="text" id="review-actor" placeholder="local-user" maxlength="255">
+                    <label for="review-reason">Reason</label>
+                    <input type="text" id="review-reason" maxlength="4000">
+                </div>
+
+                <div class="button-row">
+                    <button type="submit" id="save-case-btn">Save Draft</button>
+                    <button type="button" id="confirm-case-btn">Confirm</button>
+                    <button type="button" id="reject-case-btn" class="btn-danger">Reject</button>
+                    <button type="button" id="deprecate-case-btn" class="btn-warning">Deprecate</button>
+                </div>
+                <div id="editor-status" class="status-box" aria-live="polite"></div>
+            </form>
+        </section>
+
+        <!-- Case Search -->
+        <section id="case-search-form" class="panel governance-panel">
+            <h2>Search Cases</h2>
+            <form id="search-form">
+                <label for="search-query">Query</label>
+                <input type="text" id="search-query" placeholder="e.g. high error rate" maxlength="2000" required>
+
+                <label for="search-service">Service</label>
+                <input type="text" id="search-service" maxlength="255">
+
+                <label for="search-category">Root Cause Category</label>
+                <input type="text" id="search-category" maxlength="255">
+
+                <label for="search-environment">Environment</label>
+                <input type="text" id="search-environment" maxlength="255">
+
+                <label for="search-version">Service Version</label>
+                <input type="text" id="search-version" maxlength="255">
+
+                <button type="submit">Search</button>
+            </form>
+            <div id="search-results" class="search-results"></div>
+            <div id="search-status" class="status-box" aria-live="polite"></div>
+        </section>
+
+        <!-- Case Feedback -->
+        <section id="case-feedback" class="panel governance-panel">
+            <h2>Case Feedback</h2>
+            <p class="hint">Rate a search result for a specific case</p>
+            <div class="feedback-form">
+                <label for="feedback-case-id">Case ID</label>
+                <input type="number" id="feedback-case-id" min="1" required>
+                <label for="feedback-incident-id">Incident ID</label>
+                <input type="text" id="feedback-incident-id" maxlength="255">
+                <label for="feedback-comment">Comment</label>
+                <input type="text" id="feedback-comment" maxlength="4000">
+            </div>
+            <div class="feedback-buttons">
+                <button class="feedback-btn" data-rating="highly_relevant">Highly Relevant</button>
+                <button class="feedback-btn" data-rating="relevant">Relevant</button>
+                <button class="feedback-btn" data-rating="neutral">Neutral</button>
+                <button class="feedback-btn" data-rating="irrelevant">Irrelevant</button>
+                <button class="feedback-btn" data-rating="detrimental">Detrimental</button>
+            </div>
+            <div id="feedback-status" class="status-box" aria-live="polite"></div>
+        </section>
+
+        <!-- Case History -->
+        <section id="case-history" class="panel governance-panel">
+            <h2>Case History</h2>
+            <div class="history-controls">
+                <label for="history-case-id">Case ID</label>
+                <input type="number" id="history-case-id" min="1">
+                <button type="button" id="load-history-btn">Load History</button>
+            </div>
+            <div id="history-list" class="history-list"></div>
+            <div id="history-status" class="status-box" aria-live="polite"></div>
+        </section>
+
+        <!-- Export -->
+        <section id="export-section" class="panel governance-panel">
+            <h2>Export Investigation</h2>
+            <p class="hint">Download investigation data as JSON</p>
+            <button id="export-investigation-btn">Export Investigation</button>
+            <div id="export-status" class="status-box" aria-live="polite"></div>
+        </section>
+
+        <!-- Evaluation Comparison -->
+        <section id="evaluation-comparison" class="panel governance-panel">
+            <h2>Evaluation Comparison</h2>
+            <p class="hint">Strategy performance comparison across completed runs</p>
+            <div class="eval-controls">
+                <label for="eval-scenario">Scenario</label>
+                <select id="eval-scenario">
+                    <option value="all">All Scenarios</option>
+                </select>
+                <button type="button" id="load-eval-btn">Load</button>
+            </div>
+            <table id="eval-table" class="eval-table" aria-label="Evaluation metrics comparison">
+                <thead>
+                    <tr>
+                        <th>Strategy</th>
+                        <th>Scenario</th>
+                        <th>Accuracy</th>
+                        <th>Precision</th>
+                        <th>Recall</th>
+                        <th>F1</th>
+                        <th>Latency (ms)</th>
+                        <th>Cost ($)</th>
+                        <th>Runs</th>
+                    </tr>
+                </thead>
+                <tbody id="eval-table-body"></tbody>
+            </table>
+            <div id="eval-empty-state" class="empty-state">尚无实际运行结果</div>
+            <div id="eval-status" class="status-box" aria-live="polite"></div>
+        </section>
     </main>
 
     <script src="app.js"></script>
