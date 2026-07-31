@@ -2,11 +2,12 @@
 
 Metrics:
   - root_service_accuracy: fraction of runs where actual matches expected
+  - root_cause_type_accuracy: fraction of runs where actual cause matches expected
   - evidence_reference_correctness: percentage of runs with correct evidence refs
   - first_effective_hypothesis_round: average round where first effective hypothesis found
   - average_tool_calls: mean tool calls across runs
   - duplicate_rate: fraction of total calls that are duplicates
-  - misleading_rate: fraction of total calls that are misleading
+  - historical_case_misleading_rate: misleading cases / adopted cases across all records
   - average_latency_ms: mean latency across runs
 
 All values are derived from RunRecord instances — never hardcoded.
@@ -29,7 +30,8 @@ class RunRecord(BaseModel):
         evidence_reference_correct: whether evidence correctly references the root cause
         first_effective_round: the round number where the first effective hypothesis appeared
         duplicate_calls: number of duplicate (same tool+args) calls
-        misleading_calls: number of calls that led to incorrect conclusions
+        historical_cases_adopted: number of historical cases adopted during investigation
+        historical_cases_misleading: number of historical cases that were misleading
         latency_ms: total investigation latency in milliseconds
     """
 
@@ -41,7 +43,8 @@ class RunRecord(BaseModel):
     evidence_reference_correct: bool = False
     first_effective_round: int | None = None
     duplicate_calls: int = 0
-    misleading_calls: int = 0
+    historical_cases_adopted: int = 0
+    historical_cases_misleading: int = 0
     latency_ms: float = 0.0
 
 
@@ -57,7 +60,7 @@ class EvaluationResult(BaseModel):
     first_effective_hypothesis_round: float = 0.0
     average_tool_calls: float = 0.0
     duplicate_rate: float = 0.0
-    misleading_rate: float = 0.0
+    historical_case_misleading_rate: float = 0.0
     average_latency_ms: float = 0.0
 
 
@@ -109,9 +112,12 @@ def compute_metrics(records: list[RunRecord]) -> EvaluationResult:
     total_duplicate = sum(r.duplicate_calls for r in records)
     duplicate_rate = total_duplicate / total_calls if total_calls > 0 else 0.0
 
-    # Misleading rate: fraction of total calls that are misleading
-    total_misleading = sum(r.misleading_calls for r in records)
-    misleading_rate = total_misleading / total_calls if total_calls > 0 else 0.0
+    # Historical case misleading rate: misleading / adopted across all records
+    total_adopted = sum(r.historical_cases_adopted for r in records)
+    total_misleading = sum(r.historical_cases_misleading for r in records)
+    historical_case_misleading_rate = (
+        total_misleading / total_adopted if total_adopted > 0 else 0.0
+    )
 
     # Average latency
     average_latency_ms = sum(r.latency_ms for r in records) / n
@@ -123,6 +129,6 @@ def compute_metrics(records: list[RunRecord]) -> EvaluationResult:
         first_effective_hypothesis_round=first_effective_hypothesis_round,
         average_tool_calls=average_tool_calls,
         duplicate_rate=duplicate_rate,
-        misleading_rate=misleading_rate,
+        historical_case_misleading_rate=historical_case_misleading_rate,
         average_latency_ms=average_latency_ms,
     )

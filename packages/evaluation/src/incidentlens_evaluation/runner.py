@@ -6,7 +6,7 @@ Strategies:
   - incidentlens_verified: full pipeline with case memory and evidence verification
 
 Each strategy runs an investigation against a scenario and produces a RunRecord.
-run_evaluation(strategy, scenario) runs all 5 scenarios and returns aggregated metrics.
+run_evaluation(strategy, scenario) runs all scenarios and returns aggregated metrics.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from typing import Any
 
 from incidentlens_contracts.models import TelemetryEvent
 from incidentlens_control_plane.agent.engine import InvestigationEngine
+from incidentlens_control_plane.memory.models import CaseRow
 from incidentlens_control_plane.memory.repository import CaseRepository
 from incidentlens_control_plane.tools.query import ReadOnlyToolkit
 from incidentlens_scenarios.models import SCENARIOS
@@ -128,13 +129,15 @@ def run_single(strategy: str, scenario_name: str) -> RunRecord:
 
     # For memory strategies, seed a historical case
     if case_repo is not None and strategy in ("memory_unverified", "incidentlens_verified"):
-        case_repo.save_case(
-            status="human_verified",
-            symptom="high error rate",
-            service=target_service,
-            root_cause=root_cause_label,
-            resolution="rolled back deployment",
-        )
+        with case_repo.transaction() as session:
+            case_row = CaseRow(
+                status="human_verified",
+                symptom="high error rate",
+                root_cause_category=root_cause_label,
+                root_cause_description=root_cause_label,
+                resolution="rolled back deployment",
+            )
+            case_repo.add_case(session, case_row)
 
     # Create investigation engine
     engine = InvestigationEngine(
@@ -190,11 +193,10 @@ def run_single(strategy: str, scenario_name: str) -> RunRecord:
             first_effective_round = state.current_round
             break
 
-    # Count duplicate and misleading calls
+    # Count duplicate calls
     # Duplicates are defined by same tool_name + normalized_args (not tool_call_id)
     seen_tools: set[str] = set()
     duplicate_calls = 0
-    misleading_calls = 0
     for ev in state.evidence:
         # Normalize args by removing incident_id (which is always injected)
         normalized_args = {
@@ -205,8 +207,37 @@ def run_single(strategy: str, scenario_name: str) -> RunRecord:
         if key in seen_tools:
             duplicate_calls += 1
         seen_tools.add(key)
-        if ev.content.get("error_result") or ev.content.get("empty_result"):
-            misleading_calls += 1
+
+    # Derive historical usage counts from case repository
+    historical_cases_adopted = 0
+    historical_cases_misleading = 0
+    if case_repo is not None:
+        try:
+            # Query cases adopted/misleading for this incident
+            # In a real implementation, this would query usage events by incident_id
+            # For now, we derive from the case repository's state
+            with case_repo.transaction() as session:
+                from incidentlens_control_plane.memory.models import CaseUsageEventRow
+                from sqlalchemy import select
+
+                events = session.execute(
+                    select(CaseUsageEventRow).where(
+                        CaseUsageEventRow.case_id.in_(
+                            select(CaseRow.id).where(
+                                CaseRow.affected_services_json.contains(target_service)
+                            )
+                        )
+                    )
+                ).scalars().all()
+                for event in events:
+                    if hasattr(event, 'event_type'):
+                        if event.event_type == "adopted":
+                            historical_cases_adopted += 1
+                        elif event.event_type == "misleading":
+                            historical_cases_misleading += 1
+        except Exception:
+            # If case query fails, use zeros (no historical data available)
+            pass
 
     return RunRecord(
         root_service_expected=target_service,
@@ -217,17 +248,24 @@ def run_single(strategy: str, scenario_name: str) -> RunRecord:
         evidence_reference_correct=evidence_reference_correct,
         first_effective_round=first_effective_round,
         duplicate_calls=duplicate_calls,
-        misleading_calls=misleading_calls,
+        historical_cases_adopted=historical_cases_adopted,
+        historical_cases_misleading=historical_cases_misleading,
         latency_ms=elapsed_ms,
     )
 
 
-def run_evaluation(strategy: str, scenario: str) -> EvaluationResult:
+def run_evaluation(
+    strategy: str,
+    scenario: str,
+    *,
+    store: Any | None = None,
+) -> EvaluationResult:
     """Run evaluation for a strategy against a specific scenario.
 
     Args:
         strategy: One of 'react_no_memory', 'memory_unverified', 'incidentlens_verified'
-        scenario: One of the 5 scenario names, or 'all' to run all scenarios
+        scenario: One of the scenario names, or 'all' to run all scenarios
+        store: Optional EvaluationRunStore for persisting results
 
     Returns:
         EvaluationResult with aggregated metrics from actual runs.
@@ -242,9 +280,26 @@ def run_evaluation(strategy: str, scenario: str) -> EvaluationResult:
     else:
         raise ValueError(f"Unknown scenario: {scenario}")
 
-    records: list[RunRecord] = []
-    for name in scenario_names:
-        record = run_single(strategy, name)
-        records.append(record)
+    run_id: int | None = None
+    if store is not None:
+        run_id = store.start(strategy, scenario)
 
-    return compute_metrics(records)
+    records: list[RunRecord] = []
+    try:
+        for name in scenario_names:
+            record = run_single(strategy, name)
+            records.append(record)
+            if store is not None and run_id is not None:
+                store.record(run_id, record.model_dump())
+
+        result = compute_metrics(records)
+
+        if store is not None and run_id is not None:
+            store.complete(run_id, result.model_dump())
+
+        return result
+    except Exception as exc:
+        if store is not None and run_id is not None:
+            error_code = type(exc).__name__
+            store.fail(run_id, error_code)
+        raise

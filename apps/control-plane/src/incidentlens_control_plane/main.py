@@ -14,6 +14,7 @@ Provides:
   - POST /api/scenarios/{name}/disable — deactivate a scenario
   - POST /api/scenarios/reset — reset all scenarios and demo data
   - GET /api/scenarios/runtime/{service} — get active scenarios for a service
+  - GET /api/evaluations/comparison — latest completed evaluation per strategy
   - GET /healthz — health check
 """
 
@@ -60,6 +61,7 @@ from incidentlens_control_plane.routes.scenarios import (
 )
 from incidentlens_control_plane.routes.telemetry import router as telemetry_router
 from incidentlens_control_plane.routes.telemetry import set_repository
+from incidentlens_control_plane.routes.evaluations import router as evaluations_router
 
 logger = logging.getLogger("incidentlens_control_plane")
 
@@ -326,6 +328,7 @@ def create_app(
     app.include_router(cases_router)
     app.include_router(events_router)
     app.include_router(scenarios_router)
+    app.include_router(evaluations_router)
 
     # Mount static dashboard files.
     # NOTE: This MUST come after all include_router() calls above because

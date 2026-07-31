@@ -23,7 +23,8 @@ def test_metrics_use_records_not_fixed_scores() -> None:
             evidence_reference_correct=True,
             first_effective_round=1,
             duplicate_calls=0,
-            misleading_calls=0,
+            historical_cases_adopted=0,
+            historical_cases_misleading=0,
             latency_ms=120.0,
         ),
         RunRecord(
@@ -35,7 +36,8 @@ def test_metrics_use_records_not_fixed_scores() -> None:
             evidence_reference_correct=False,
             first_effective_round=3,
             duplicate_calls=2,
-            misleading_calls=1,
+            historical_cases_adopted=0,
+            historical_cases_misleading=0,
             latency_ms=250.0,
         ),
     ])
@@ -45,7 +47,7 @@ def test_metrics_use_records_not_fixed_scores() -> None:
     assert result.evidence_reference_correctness == 50.0
     assert result.first_effective_hypothesis_round == 2.0
     assert result.duplicate_rate == 0.25  # 2 / 8 total calls
-    assert result.misleading_rate == 0.125  # 1 / 8 total calls
+    assert result.historical_case_misleading_rate == 0.0  # no adopted cases
     assert result.average_latency_ms == 185.0
 
 
@@ -72,7 +74,8 @@ def test_compute_metrics_single_perfect_record() -> None:
             evidence_reference_correct=True,
             first_effective_round=1,
             duplicate_calls=0,
-            misleading_calls=0,
+            historical_cases_adopted=0,
+            historical_cases_misleading=0,
             latency_ms=50.0,
         ),
     ])
@@ -80,7 +83,7 @@ def test_compute_metrics_single_perfect_record() -> None:
     assert result.root_cause_type_accuracy == 1.0
     assert result.evidence_reference_correctness == 100.0
     assert result.duplicate_rate == 0.0
-    assert result.misleading_rate == 0.0
+    assert result.historical_case_misleading_rate == 0.0
 
 
 def test_missing_report_is_not_counted_as_correct() -> None:
@@ -122,6 +125,46 @@ def test_mixed_report_and_no_report_counts_missing_report_as_incorrect() -> None
     ])
     assert result.root_service_accuracy == 0.5
     assert result.root_cause_type_accuracy == 0.5
+
+
+def test_historical_case_misleading_rate_uses_adopted_cases() -> None:
+    """historical_case_misleading_rate = misleading / adopted across all records."""
+    from incidentlens_evaluation.metrics import RunRecord, compute_metrics
+
+    result = compute_metrics([
+        RunRecord(
+            root_service_expected="payment-service",
+            root_service_actual="payment-service",
+            root_cause_type_expected="downstream-timeout",
+            root_cause_type_actual="downstream-timeout",
+            tool_calls=3,
+            evidence_reference_correct=True,
+            first_effective_round=1,
+            duplicate_calls=0,
+            historical_cases_adopted=2,
+            historical_cases_misleading=1,
+            latency_ms=100,
+        )
+    ])
+    assert result.historical_case_misleading_rate == 0.5
+
+
+def test_historical_case_misleading_rate_zero_adopted() -> None:
+    """historical_case_misleading_rate is 0.0 when no cases adopted."""
+    from incidentlens_evaluation.metrics import RunRecord, compute_metrics
+
+    result = compute_metrics([
+        RunRecord(
+            root_service_expected="payment-service",
+            root_service_actual="payment-service",
+            root_cause_type_expected="downstream-timeout",
+            root_cause_type_actual="downstream-timeout",
+            tool_calls=3,
+            historical_cases_adopted=0,
+            historical_cases_misleading=0,
+        )
+    ])
+    assert result.historical_case_misleading_rate == 0.0
 
 
 def test_run_evaluation_returns_result_from_actual_run() -> None:
