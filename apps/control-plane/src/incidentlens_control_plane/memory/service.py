@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from typing import Any
 
 from incidentlens_contracts.models import InvestigationStatus
 from sqlalchemy.exc import IntegrityError
@@ -98,12 +99,14 @@ def _row_to_snapshot(row: CaseRow) -> CaseSnapshot:
     path = json.loads(row.investigation_path_json) if row.investigation_path_json else []
     invalid = json.loads(row.invalid_hypotheses_json) if row.invalid_hypotheses_json else []
     advice = json.loads(row.remediation_advice_json) if row.remediation_advice_json else []
-    applic = json.loads(
-        row.applicability_conditions_json
-    ) if row.applicability_conditions_json else []
-    inapplic = json.loads(
-        row.inapplicability_conditions_json
-    ) if row.inapplicability_conditions_json else []
+    applic = (
+        json.loads(row.applicability_conditions_json) if row.applicability_conditions_json else []
+    )
+    inapplic = (
+        json.loads(row.inapplicability_conditions_json)
+        if row.inapplicability_conditions_json
+        else []
+    )
     return CaseSnapshot(
         id=row.id,
         revision=row.revision,
@@ -237,7 +240,8 @@ class CaseService:
             return _row_to_snapshot(row)
 
     def materialize_from_investigation(
-        self, state: InvestigationState,
+        self,
+        state: InvestigationState,
     ) -> CaseSnapshot:
         """Create or return an existing ``agent_generated`` case.
 
@@ -252,24 +256,25 @@ class CaseService:
 
         draft = CaseDraft(
             symptom=str(state.alert.get("symptom") or state.alert),
-            affected_services=list(dict.fromkeys([
-                s
-                for s in [
-                    str(state.alert.get("service", "")),
-                    str(state.report.get("root_service", "")) if state.report else "",
-                ]
-                if s
-            ])) or [str(state.alert.get("service", ""))],
+            affected_services=list(
+                dict.fromkeys(
+                    [
+                        s
+                        for s in [
+                            str(state.alert.get("service", "")),
+                            str(state.report.get("root_service", "")) if state.report else "",
+                        ]
+                        if s
+                    ]
+                )
+            )
+            or [str(state.alert.get("service", ""))],
             root_cause_category=str(state.report.get("root_cause", "")) if state.report else "",
             root_cause_description=str(state.report.get("root_cause", "")) if state.report else "",
             key_evidence=list(state.report.get("findings", [])) if state.report else [],
-            investigation_path=[
-                {"round": state.current_round, "phase": state.phase}
-            ],
+            investigation_path=[{"round": state.current_round, "phase": state.phase}],
             invalid_hypotheses=[
-                h.model_dump(mode="json")
-                for h in state.hypotheses
-                if str(h.status) == "ruled_out"
+                h.model_dump(mode="json") for h in state.hypotheses if str(h.status) == "ruled_out"
             ],
             remediation_advice=[],
         )
@@ -280,9 +285,7 @@ class CaseService:
                 return _row_to_snapshot(existing)
 
             row = _draft_to_row(draft, status="agent_generated", incident_id=state.incident_id)
-            row.source_report_json = json.dumps(
-                state.report, default=str
-            ) if state.report else "{}"
+            row.source_report_json = json.dumps(state.report, default=str) if state.report else "{}"
             row = self.repo.add_case(session, row)
 
             review = CaseReviewActionRow(
@@ -509,18 +512,18 @@ class CaseService:
                 .order_by(CaseUsageEventRow.id)
                 .all()
             )
-        return [
-            CaseUsageEvent(
-                id=row.id,
-                case_id=row.case_id,
-                incident_id=row.investigation_id or "",
-                hypothesis_id=row.hypothesis_id,
-                event_type=UsageEventType(row.event_type),
-                idempotency_key=row.idempotency_key,
-                details=json.loads(row.details_json) if row.details_json else {},
-            )
-            for row in rows
-        ]
+            return [
+                CaseUsageEvent(
+                    id=row.id,
+                    case_id=row.case_id,
+                    incident_id=row.investigation_id or "",
+                    hypothesis_id=row.hypothesis_id,
+                    event_type=UsageEventType(row.event_type),
+                    idempotency_key=row.idempotency_key,
+                    details=json.loads(row.details_json) if row.details_json else {},
+                )
+                for row in rows
+            ]
 
     def add_feedback(self, command: FeedbackCommand) -> FeedbackRecord:
         """Record feedback on a case search result.
@@ -545,6 +548,8 @@ class CaseService:
                     case_id=existing.case_id,
                     idempotency_key=existing.idempotency_key,
                     rating=FeedbackRating(existing.rating),
+                    incident_id=existing.incident_id,
+                    actor=existing.actor,
                     comment=existing.comment,
                     created_at=existing.created_at,
                 )
@@ -553,6 +558,8 @@ class CaseService:
                 case_id=command.case_id,
                 idempotency_key=command.idempotency_key,
                 rating=command.rating.value,
+                incident_id=command.incident_id,
+                actor=command.actor,
                 comment=command.comment,
             )
             try:
@@ -575,6 +582,8 @@ class CaseService:
                         case_id=existing.case_id,
                         idempotency_key=existing.idempotency_key,
                         rating=FeedbackRating(existing.rating),
+                        incident_id=existing.incident_id,
+                        actor=existing.actor,
                         comment=existing.comment,
                         created_at=existing.created_at,
                     )
@@ -584,6 +593,8 @@ class CaseService:
                 case_id=feedback_row.case_id,
                 idempotency_key=feedback_row.idempotency_key,
                 rating=FeedbackRating(feedback_row.rating),
+                incident_id=feedback_row.incident_id,
+                actor=feedback_row.actor,
                 comment=feedback_row.comment,
                 created_at=feedback_row.created_at,
             )

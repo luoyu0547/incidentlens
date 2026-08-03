@@ -625,8 +625,12 @@ class DeterministicInvestigationEngine:
                         matching_hyp.contradicting_evidence_ids.append(ev_id)
             else:
                 # Create new hypothesis from assessment
-                support_ids = [eid for eid, t in ev_refs if t == "supports"]
-                contradict_ids = [eid for eid, t in ev_refs if t == "contradicts"]
+                support_ids = list(
+                    dict.fromkeys(eid for eid, t in ev_refs if t == "supports")
+                )
+                contradict_ids = list(
+                    dict.fromkeys(eid for eid, t in ev_refs if t == "contradicts")
+                )
                 new_hyp = Hypothesis(
                     id=str(uuid4()),
                     description=f"{service} incident: {cause}",

@@ -93,8 +93,9 @@ def _assess_log_item(item: dict[str, Any]) -> list[EvidenceAssessment]:
                 )
             )
 
-    # Order-service connection pool patterns
-    if service == "order-service" and level == "ERROR":
+    # Order-service connection pool patterns. The service emits expected pool
+    # saturation as WARN because the request remains recoverable.
+    if service == "order-service" and level in ("ERROR", "WARN"):
         if any(kw in message for kw in ("pool", "connection", "exhaust", "acquire")):
             assessments.append(
                 EvidenceAssessment(
@@ -103,7 +104,9 @@ def _assess_log_item(item: dict[str, Any]) -> list[EvidenceAssessment]:
                     supports=True,
                 )
             )
-        if any(kw in message for kw in ("dependency", "unavailable", "502", "upstream")):
+        if level == "ERROR" and any(
+            kw in message for kw in ("dependency", "unavailable", "502", "upstream")
+        ):
             assessments.append(
                 EvidenceAssessment(
                     candidate_service="order-service",

@@ -6,12 +6,11 @@ with its metrics, timestamp, and records.
 
 from __future__ import annotations
 
-import pytest
 import httpx
-from sqlalchemy import create_engine
-
+import pytest
 from incidentlens_control_plane.evaluations.store import EvaluationRunStore
 from incidentlens_control_plane.main import create_app
+from sqlalchemy import create_engine
 
 
 @pytest.fixture

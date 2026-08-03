@@ -35,19 +35,20 @@ from incidentlens_control_plane.routes.cases import router as cases_router
 from incidentlens_control_plane.routes.cases import set_case_service as set_case_service_route
 from incidentlens_control_plane.routes.cases import set_repository as set_case_repository
 from incidentlens_control_plane.routes.cases import set_retriever as set_case_retriever
+from incidentlens_control_plane.routes.evaluations import router as evaluations_router
 from incidentlens_control_plane.routes.events import router as events_router
 from incidentlens_control_plane.routes.events import set_event_bus
 from incidentlens_control_plane.routes.investigations import (
     router as investigations_router,
 )
 from incidentlens_control_plane.routes.investigations import (
+    set_case_service as set_investigation_case_service,
+)
+from incidentlens_control_plane.routes.investigations import (
     set_engine as set_investigation_engine,
 )
 from incidentlens_control_plane.routes.investigations import (
     set_event_bus as set_investigation_event_bus,
-)
-from incidentlens_control_plane.routes.investigations import (
-    set_case_service as set_investigation_case_service,
 )
 from incidentlens_control_plane.routes.investigations import (
     set_export_service as set_investigation_export_service,
@@ -61,7 +62,6 @@ from incidentlens_control_plane.routes.scenarios import (
 )
 from incidentlens_control_plane.routes.telemetry import router as telemetry_router
 from incidentlens_control_plane.routes.telemetry import set_repository
-from incidentlens_control_plane.routes.evaluations import router as evaluations_router
 
 logger = logging.getLogger("incidentlens_control_plane")
 
@@ -93,10 +93,10 @@ async def lifespan(
             set_investigation_case_service(case_service_override)
 
             # Build and wire the export service for test path
+            from incidentlens_control_plane.agent.state import InvestigationAuditStore
             from incidentlens_control_plane.services.investigation_export import (
                 InvestigationExportService,
             )
-            from incidentlens_control_plane.agent.state import InvestigationAuditStore
 
             # Use the engine's audit store if available, otherwise create a minimal one
             audit_store = getattr(engine_override, "audit_store", None)
@@ -165,6 +165,17 @@ async def lifespan(
     retriever = HybridCaseRetriever(case_repository)
     set_case_retriever(retriever)
 
+    from incidentlens_control_plane.memory.integration import (
+        InvestigationMemoryCoordinator,
+    )
+
+    memory_coordinator = InvestigationMemoryCoordinator(
+        retriever=retriever,
+        case_service=case_svc,
+        repository=case_repository,
+        audit_store=audit_store,
+    )
+
     # Build and wire the export service
     from incidentlens_control_plane.services.investigation_export import (
         InvestigationExportService,
@@ -208,6 +219,7 @@ async def lifespan(
                 toolkit=toolkit,
                 case_repository=case_repository,
                 audit_store=audit_store,
+                memory=memory_coordinator,
                 model_registry=registry,
                 checkpointer=checkpoints.saver,
                 skill_runtime=skill_runtime,
@@ -227,6 +239,7 @@ async def lifespan(
             toolkit=toolkit,
             case_repository=case_repository,
             audit_store=audit_store,
+            memory=memory_coordinator,
             model_registry=None,
             checkpointer=None,
             skill_runtime=None,
@@ -263,10 +276,10 @@ def create_app(
         set_investigation_case_service(case_service_override)
 
         # Build and wire the export service eagerly for test path
+        from incidentlens_control_plane.agent.state import InvestigationAuditStore
         from incidentlens_control_plane.services.investigation_export import (
             InvestigationExportService,
         )
-        from incidentlens_control_plane.agent.state import InvestigationAuditStore
 
         audit_store = getattr(engine_override, "audit_store", None) if engine_override else None
         if audit_store is None:

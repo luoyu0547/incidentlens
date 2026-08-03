@@ -148,8 +148,10 @@ async def charge(
     # deployment_regression: simulate buggy deployment
     params = active.get("deployment_regression")
     if params is not None:
+        version = str(params.get("version", "unknown"))
+        _telemetry.emit_deployment(trace_id, version)
         _telemetry.emit_log(
-            trace_id, "WARN", f"Running buggy version: {params.get('version', 'unknown')}"
+            trace_id, "WARN", f"Running buggy version: {version}"
         )
         # Buggy deployment returns wrong amounts
         return ChargeResponse(

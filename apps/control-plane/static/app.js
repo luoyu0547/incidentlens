@@ -562,6 +562,8 @@ document.querySelectorAll('.feedback-btn').forEach(btn => {
                 body: JSON.stringify({
                     idempotency_key: uiKey,
                     rating: rating,
+                    incident_id: incidentIdVal || null,
+                    actor: 'local-user',
                     comment: comment,
                 }),
             });

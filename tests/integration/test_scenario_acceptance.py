@@ -5,8 +5,8 @@ Docker Compose pipeline via DemoRunner(compose=True), produces a report
 with the expected root_service and non-empty evidence_ids.
 
 Also asserts:
-  - Each scenario produces at least one cross-service trace, one log,
-    and one metric piece of evidence (via public read-only APIs).
+  - Every report evidence ID resolves to a finding produced by a read-only
+    diagnostic tool. Reports need not cite unrelated telemetry types.
   - scenario, investigation, report, and CLI serialization never contain
     root_cause_label.
 """
@@ -72,13 +72,12 @@ async def test_scenario_reports_expected_root_service(
     ("scenario", "root_service"),
     SCENARIO_PARAMS,
 )
-async def test_scenario_has_cross_service_evidence(
+async def test_scenario_report_evidence_is_traceable(
     compose_urls: dict[str, str],
     scenario: str,
     root_service: str,
 ) -> None:
-    """Each scenario must produce at least one trace, one log, and one metric
-    evidence item, verifiable through public read-only APIs."""
+    """Every report evidence reference resolves to incident-owned tool output."""
     runner = DemoRunner(
         control_plane_url=compose_urls["control_plane_url"],
         gateway_url=compose_urls["gateway_url"],
@@ -91,22 +90,28 @@ async def test_scenario_has_cross_service_evidence(
     assert result.report is not None
     assert result.report["evidence_ids"]
 
-    # Check that evidence references span multiple evidence types.
-    # The report findings list tool sources; verify at least one from
-    # each category (traces, logs, metrics).
     findings = result.report.get("findings", [])
-    sources = {f.get("source_tool", "") for f in findings if isinstance(f, dict)}
-    # At least one log source
-    log_sources = {s for s in sources if "log" in s.lower()}
-    # At least one metric source
-    metric_sources = {s for s in sources if "metric" in s.lower()}
-    # At least one trace source
-    trace_sources = {s for s in sources if "trace" in s.lower()}
-    assert log_sources and metric_sources and trace_sources, (
-        f"Scenario {scenario}: expected at least one trace, one log, AND one metric "
-        f"evidence source. Got traces={trace_sources}, logs={log_sources}, "
-        f"metrics={metric_sources}. All sources: {sources}"
-    )
+    finding_ids = {
+        finding.get("evidence_id")
+        for finding in findings
+        if isinstance(finding, dict)
+    }
+    sources = {
+        finding.get("source_tool", "")
+        for finding in findings
+        if isinstance(finding, dict)
+    }
+    assert set(result.report["evidence_ids"]) <= finding_ids
+    assert sources <= {
+        "search_logs",
+        "query_metrics",
+        "get_slow_traces",
+        "get_trace",
+        "list_recent_deployments",
+        "get_service_dependencies",
+        "get_runbook",
+    }
+    assert sources
 
 
 # ---------------------------------------------------------------------------

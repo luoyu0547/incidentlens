@@ -164,3 +164,43 @@ async def test_deprecate_from_verified(case_api_client) -> None:
     )
     assert response.status_code == 200
     assert response.json()["status"] == "deprecated"
+
+
+async def test_history_includes_feedback_context_and_usage_events(
+    case_api_client, case_service
+) -> None:
+    """Governance history exposes review, feedback, and memory usage audit data."""
+    from incidentlens_control_plane.memory.models import CaseUsageEventRow
+
+    created = await _create_draft(case_api_client)
+    with case_service.repo.transaction() as session:
+        session.add(
+            CaseUsageEventRow(
+                case_id=created["id"],
+                hypothesis_id="hyp-1",
+                event_type="misleading",
+                idempotency_key="inc-1:misleading",
+                investigation_id="inc-1",
+                details_json='{"accepted_evidence_ids":["ev-1"]}',
+            )
+        )
+
+    feedback = await case_api_client.post(
+        f"/api/cases/{created['id']}/feedback",
+        json={
+            "rating": "wrong",
+            "actor": "reviewer",
+            "incident_id": "inc-1",
+            "comment": "current evidence contradicts this case",
+            "idempotency_key": "inc-1:feedback",
+        },
+    )
+    assert feedback.status_code == 201
+
+    history = (
+        await case_api_client.get(f"/api/cases/{created['id']}/history")
+    ).json()
+    assert history["feedback"][0]["actor"] == "reviewer"
+    assert history["feedback"][0]["incident_id"] == "inc-1"
+    assert history["usage_events"][0]["event_type"] == "misleading"
+    assert history["usage_events"][0]["incident_id"] == "inc-1"

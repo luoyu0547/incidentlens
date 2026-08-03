@@ -15,6 +15,7 @@ Provides:
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -157,6 +158,8 @@ class FeedbackRequest(BaseModel):
 
     idempotency_key: str = Field(min_length=1, max_length=255)
     rating: FeedbackRating
+    incident_id: str | None = Field(default=None, max_length=255)
+    actor: str = Field(min_length=1, max_length=255)
     comment: str = Field(default="", max_length=4000)
 
 
@@ -212,6 +215,8 @@ class CaseHistoryResponse(BaseModel):
     """Append-only review action history for a case."""
 
     reviews: list[dict[str, Any]]
+    feedback: list[dict[str, Any]]
+    usage_events: list[dict[str, Any]]
 
 
 class FeedbackResponse(BaseModel):
@@ -221,6 +226,8 @@ class FeedbackResponse(BaseModel):
     case_id: int
     idempotency_key: str
     rating: FeedbackRating
+    incident_id: str | None = None
+    actor: str
     comment: str = ""
     created_at: str
 
@@ -358,6 +365,7 @@ async def list_cases(
         )
 
     from incidentlens_control_plane.memory.models import CaseRow
+    from incidentlens_control_plane.memory.retrieval import _row_to_snapshot
 
     with svc.repo.transaction() as session:
         query = session.query(CaseRow)
@@ -379,15 +387,10 @@ async def list_cases(
             query = query.filter(CaseRow.id > cursor)
 
         rows = query.limit(limit + 1).all()
-
-    has_more = len(rows) > limit
-    page_rows = rows[:limit]
-
-    # Convert rows to snapshots and then to responses
-    from incidentlens_control_plane.memory.retrieval import _row_to_snapshot
-
-    cases = [_snapshot_to_response(_row_to_snapshot(row)) for row in page_rows]
-    next_cursor = page_rows[-1].id if has_more and page_rows else None
+        has_more = len(rows) > limit
+        page_rows = rows[:limit]
+        cases = [_snapshot_to_response(_row_to_snapshot(row)) for row in page_rows]
+        next_cursor = page_rows[-1].id if has_more and page_rows else None
 
     return CaseListResponse(cases=cases, next_cursor=next_cursor)
 
@@ -516,6 +519,8 @@ async def add_feedback(
                 case_id=case_id,
                 idempotency_key=request.idempotency_key,
                 rating=request.rating,
+                incident_id=request.incident_id,
+                actor=request.actor,
                 comment=request.comment,
             )
         )
@@ -528,6 +533,8 @@ async def add_feedback(
         case_id=record.case_id,
         idempotency_key=record.idempotency_key,
         rating=record.rating,
+        incident_id=record.incident_id,
+        actor=record.actor,
         comment=record.comment,
         created_at=record.created_at.isoformat(),
     )
@@ -542,7 +549,12 @@ async def case_history(case_id: int) -> CaseHistoryResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Case repository not configured",
         )
-    from incidentlens_control_plane.memory.models import CaseReviewActionRow, CaseRow
+    from incidentlens_control_plane.memory.models import (
+        CaseFeedbackRow,
+        CaseReviewActionRow,
+        CaseRow,
+        CaseUsageEventRow,
+    )
 
     with svc.repo.transaction() as session:
         row = session.get(CaseRow, case_id)
@@ -569,4 +581,46 @@ async def case_history(case_id: int) -> CaseHistoryResponse:
             }
             for r in reviews
         ]
-    return CaseHistoryResponse(reviews=review_data)
+        feedback_rows = (
+            session.query(CaseFeedbackRow)
+            .filter(CaseFeedbackRow.case_id == case_id)
+            .order_by(CaseFeedbackRow.id)
+            .all()
+        )
+        feedback_data = [
+            {
+                "id": item.id,
+                "case_id": item.case_id,
+                "incident_id": item.incident_id,
+                "actor": item.actor,
+                "rating": item.rating,
+                "comment": item.comment,
+                "idempotency_key": item.idempotency_key,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in feedback_rows
+        ]
+        usage_rows = (
+            session.query(CaseUsageEventRow)
+            .filter(CaseUsageEventRow.case_id == case_id)
+            .order_by(CaseUsageEventRow.id)
+            .all()
+        )
+        usage_data = [
+            {
+                "id": item.id,
+                "case_id": item.case_id,
+                "incident_id": item.investigation_id,
+                "hypothesis_id": item.hypothesis_id,
+                "event_type": item.event_type,
+                "idempotency_key": item.idempotency_key,
+                "details": json.loads(item.details_json) if item.details_json else {},
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in usage_rows
+        ]
+    return CaseHistoryResponse(
+        reviews=review_data,
+        feedback=feedback_data,
+        usage_events=usage_data,
+    )

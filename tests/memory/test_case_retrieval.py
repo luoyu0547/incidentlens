@@ -177,6 +177,7 @@ class TestFeedbackIdempotency:
             case_id=case.id,
             idempotency_key="fb-001",
             rating=FeedbackRating.HELPFUL,
+            actor="reviewer",
             comment="great",
         )
         first = service.add_feedback(cmd)
@@ -190,10 +191,20 @@ class TestFeedbackIdempotency:
             actor="user",
         )
         r1 = service.add_feedback(
-            FeedbackCommand(case_id=case.id, idempotency_key="fb-a", rating=FeedbackRating.HELPFUL)
+            FeedbackCommand(
+                case_id=case.id,
+                idempotency_key="fb-a",
+                rating=FeedbackRating.HELPFUL,
+                actor="reviewer",
+            )
         )
         r2 = service.add_feedback(
-            FeedbackCommand(case_id=case.id, idempotency_key="fb-b", rating=FeedbackRating.WRONG)
+            FeedbackCommand(
+                case_id=case.id,
+                idempotency_key="fb-b",
+                rating=FeedbackRating.WRONG,
+                actor="reviewer",
+            )
         )
         assert r1.id != r2.id
 

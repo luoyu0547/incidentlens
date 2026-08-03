@@ -84,6 +84,8 @@ class CaseFeedbackRow(CaseBase):
     case_id: Mapped[int] = mapped_column(Integer, index=True)
     idempotency_key: Mapped[str] = mapped_column(String(255), unique=True)
     rating: Mapped[str] = mapped_column(String(64))
+    incident_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    actor: Mapped[str] = mapped_column(String(255), default="")
     comment: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

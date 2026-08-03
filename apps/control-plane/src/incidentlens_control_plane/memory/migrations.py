@@ -15,7 +15,7 @@ from sqlalchemy import Engine, text
 logger = logging.getLogger(__name__)
 
 CASE_SCHEMA_COMPONENT = "case_memory"
-CASE_SCHEMA_VERSION = 6
+CASE_SCHEMA_VERSION = 7
 
 # Mapping of legacy status values to the new governed status.
 # "pending_review" maps to "draft"; "human_verified" is preserved;
@@ -174,7 +174,6 @@ def _create_governance_tables(conn: Any) -> None:
             ")"
         )
     )
-
     # Feedback with idempotency
     conn.execute(
         text(
@@ -183,6 +182,8 @@ def _create_governance_tables(conn: Any) -> None:
             "case_id INTEGER NOT NULL, "
             "idempotency_key VARCHAR(255) NOT NULL, "
             "rating VARCHAR(64) NOT NULL, "
+            "incident_id VARCHAR(255), "
+            "actor VARCHAR(255) NOT NULL DEFAULT '', "
             "comment TEXT NOT NULL DEFAULT '', "
             "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
             "FOREIGN KEY (case_id) REFERENCES case_memory(id), "
@@ -190,6 +191,18 @@ def _create_governance_tables(conn: Any) -> None:
             ")"
         )
     )
+    feedback_columns = {
+        row[1] for row in conn.execute(text("PRAGMA table_info(case_feedback)"))
+    }
+    if "incident_id" not in feedback_columns:
+        conn.execute(text("ALTER TABLE case_feedback ADD COLUMN incident_id VARCHAR(255)"))
+    if "actor" not in feedback_columns:
+        conn.execute(
+            text(
+                "ALTER TABLE case_feedback ADD COLUMN actor VARCHAR(255) "
+                "NOT NULL DEFAULT ''"
+            )
+        )
 
     # Usage events with idempotency
     conn.execute(

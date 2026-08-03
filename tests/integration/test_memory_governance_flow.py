@@ -24,12 +24,8 @@ async def test_investigation_review_retrieval_feedback_and_export(
 ) -> None:
     """Full governance flow: investigation -> review -> memory -> feedback -> export."""
     # Step 1: Reset with full scope
-    async with httpx.AsyncClient(
-        base_url=compose_urls["control_plane_url"]
-    ) as setup_client:
-        reset = await setup_client.post(
-            "/api/scenarios/reset", params={"scope": "full"}
-        )
+    async with httpx.AsyncClient(base_url=compose_urls["control_plane_url"]) as setup_client:
+        reset = await setup_client.post("/api/scenarios/reset", params={"scope": "full"})
         assert reset.status_code == 200
 
     # Step 2: Run investigation
@@ -45,11 +41,9 @@ async def test_investigation_review_retrieval_feedback_and_export(
 
     # Step 3: Review and confirm the case
     async with httpx.AsyncClient(base_url=compose_urls["control_plane_url"]) as client:
-        cases = (
-            await client.get(
-                "/api/cases", params={"incident_id": first.incident_id}
-            )
-        ).json()["results"]
+        cases = (await client.get("/api/cases", params={"incident_id": first.incident_id})).json()[
+            "cases"
+        ]
         generated = cases[0]
         assert generated["status"] == "agent_generated"
 
@@ -85,7 +79,7 @@ async def test_investigation_review_retrieval_feedback_and_export(
             "/api/cases",
             json={
                 "symptom": generated["symptom"],
-                "affected_services": ["order-service"],
+                "affected_services": ["payment-service"],
                 "root_cause_category": "deployment-regression",
                 "root_cause_description": "legacy deployment hypothesis",
                 "key_evidence": [
@@ -108,6 +102,18 @@ async def test_investigation_review_retrieval_feedback_and_export(
         )
         assert wrong_verified.json()["status"] == "human_verified"
 
+        recalled = await client.get(
+            "/api/cases/search",
+            params={
+                "q": generated["symptom"],
+                "service": "payment-service",
+            },
+        )
+        assert recalled.status_code == 200
+        assert wrong.json()["id"] in {hit["case_id"] for hit in recalled.json()["results"]}, (
+            recalled.json()
+        )
+
         # Step 5: Run investigation again - memory should detect misleading case
         memory_runner = DemoRunner(
             control_plane_url=compose_urls["control_plane_url"],
@@ -118,16 +124,14 @@ async def test_investigation_review_retrieval_feedback_and_export(
             cleanup_after_run=False,
         )
         second = await memory_runner.run("payment_delay")
+        assert second.status == "passed", second
 
         # Step 6: Check usage events for misleading detection
-        history = (
-            await client.get(f"/api/cases/{wrong.json()['id']}/history")
-        ).json()
+        history = (await client.get(f"/api/cases/{wrong.json()['id']}/history")).json()
         assert any(
-            event["event_type"] == "misleading"
-            and event["incident_id"] == second.incident_id
+            event["event_type"] == "misleading" and event["incident_id"] == second.incident_id
             for event in history["usage_events"]
-        )
+        ), history
 
         # Step 7: Submit feedback
         feedback = await client.post(
@@ -143,16 +147,12 @@ async def test_investigation_review_retrieval_feedback_and_export(
         assert feedback.status_code == 201
 
         # Step 8: Export investigation
-        export = await client.get(
-            f"/api/investigations/{second.incident_id}/export"
-        )
+        export = await client.get(f"/api/investigations/{second.incident_id}/export")
         assert export.status_code == 200
         assert export.json()["investigation"]["report"]["evidence_ids"]
         # Ensure no root_cause_label in export
         assert "root_cause_label" not in export.text
 
         # Step 9: Cleanup with incident scope
-        cleanup = await client.post(
-            "/api/scenarios/reset", params={"scope": "incident"}
-        )
+        cleanup = await client.post("/api/scenarios/reset", params={"scope": "incident"})
         assert cleanup.status_code == 200

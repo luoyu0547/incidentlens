@@ -32,6 +32,7 @@ from incidentlens_control_plane.memory.integration import (
     InvestigationMemoryCoordinator,
     historical_hypothesis_id,
 )
+from incidentlens_control_plane.memory.models import CaseUsageEventRow
 from incidentlens_control_plane.memory.repository import CaseRepository
 from incidentlens_control_plane.memory.service import CaseService
 from sqlalchemy import create_engine
@@ -90,8 +91,10 @@ class FakeRetriever:
     def __init__(self, hits: list[CaseSearchHit] | None = None) -> None:
         self._hits = hits or []
         self.last_degradation_reason: str | None = None
+        self.last_query: CaseSearchQuery | None = None
 
     def search(self, query: CaseSearchQuery) -> list[CaseSearchHit]:
+        self.last_query = query
         return self._hits
 
 
@@ -158,9 +161,7 @@ def audit_store(engine) -> InvestigationAuditStore:
 
 
 @pytest.fixture
-def coordinator(
-    repository, case_service, audit_store
-) -> InvestigationMemoryCoordinator:
+def coordinator(repository, case_service, audit_store) -> InvestigationMemoryCoordinator:
     retriever = FakeRetriever(hits=[])
     return InvestigationMemoryCoordinator(
         retriever=retriever,
@@ -207,11 +208,23 @@ def test_prepare_turns_each_hit_into_a_candidate_with_traceable_id(
         "validated": 0,
         "misleading": 0,
     }
+    with repository.transaction() as session:
+        persisted = [
+            row.event_type
+            for row in (
+                session.query(CaseUsageEventRow)
+                .filter(CaseUsageEventRow.investigation_id == "inc-current")
+                .all()
+            )
+        ]
+    assert persisted == ["recalled", "adopted"]
+    assert [event.event_type.value for event in case_service.list_usage("inc-current")] == [
+        "recalled",
+        "adopted",
+    ]
 
 
-def test_prepare_returns_empty_for_empty_alert(
-    repository, case_service, audit_store
-) -> None:
+def test_prepare_returns_empty_for_empty_alert(repository, case_service, audit_store) -> None:
     """Empty alert produces no hits, no hypotheses, no events."""
     retriever = FakeRetriever(hits=[])
     coordinator = InvestigationMemoryCoordinator(
@@ -225,9 +238,31 @@ def test_prepare_returns_empty_for_empty_alert(
     assert prepared.hypotheses == []
 
 
-def test_prepare_deterministic_hypothesis_ids(
+def test_prepare_does_not_overconstrain_symptom_with_numeric_alert_signal(
     repository, case_service, audit_store
 ) -> None:
+    retriever = FakeRetriever()
+    coordinator = InvestigationMemoryCoordinator(
+        retriever=retriever,
+        case_service=case_service,
+        repository=repository,
+        audit_store=audit_store,
+    )
+
+    coordinator.prepare(
+        "inc-current",
+        {
+            "service": "payment-service",
+            "symptom": "Elevated payment latency",
+            "error_rate": 1.0,
+        },
+    )
+
+    assert retriever.last_query is not None
+    assert retriever.last_query.text == "Elevated payment latency"
+
+
+def test_prepare_deterministic_hypothesis_ids(repository, case_service, audit_store) -> None:
     """Hypothesis IDs are deterministic UUID5, not random."""
     hyp_id_1 = historical_hypothesis_id("inc-1", 42)
     hyp_id_2 = historical_hypothesis_id("inc-1", 42)
@@ -318,9 +353,7 @@ def test_guarded_different_cause_marks_adopted_prior_misleading(
     assert misleading[0].details["accepted_evidence_ids"] == state.report["evidence_ids"]
 
 
-def test_finalize_unchanged_for_non_terminal(
-    repository, case_service, audit_store
-) -> None:
+def test_finalize_unchanged_for_non_terminal(repository, case_service, audit_store) -> None:
     """Non-terminal states pass through unchanged."""
     coordinator = InvestigationMemoryCoordinator(
         retriever=FakeRetriever(),
@@ -338,9 +371,7 @@ def test_finalize_unchanged_for_non_terminal(
     assert result.case_id is None
 
 
-def test_finalize_unchanged_for_needs_more_evidence(
-    repository, case_service, audit_store
-) -> None:
+def test_finalize_unchanged_for_needs_more_evidence(repository, case_service, audit_store) -> None:
     """needs_more_evidence states pass through unchanged."""
     coordinator = InvestigationMemoryCoordinator(
         retriever=FakeRetriever(),
@@ -354,10 +385,9 @@ def test_finalize_unchanged_for_needs_more_evidence(
     assert result.case_id is None
 
 
-def test_finalize_materialization_failure_returns_unchanged(
-    repository, audit_store
-) -> None:
+def test_finalize_materialization_failure_returns_unchanged(repository, audit_store) -> None:
     """A materialization error is caught, recorded, and the state is unchanged."""
+
     # Create a CaseService with a broken materialization (non-report_ready state)
     # We'll use a mock that raises on materialize
     class BrokenCaseService:
@@ -434,8 +464,7 @@ def test_repeated_finalize_produces_one_case_and_one_terminal_event(
 
     # Terminal events should not duplicate
     validated = [
-        e for e in coordinator.list_usage("inc-current")
-        if e.event_type == UsageEventType.VALIDATED
+        e for e in coordinator.list_usage("inc-current") if e.event_type == UsageEventType.VALIDATED
     ]
     assert len(validated) == 1
 
@@ -473,9 +502,7 @@ def test_prepare_records_degradation_when_retriever_reports_reason(
 # ---------------------------------------------------------------------------
 
 
-def test_needs_more_evidence_never_creates_case(
-    repository, case_service, audit_store
-) -> None:
+def test_needs_more_evidence_never_creates_case(repository, case_service, audit_store) -> None:
     """A needs_more_evidence terminal state never materializes a case."""
     coordinator = InvestigationMemoryCoordinator(
         retriever=FakeRetriever(),

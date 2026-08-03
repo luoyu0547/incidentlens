@@ -87,6 +87,22 @@ class TestTelemetryClientHTTPDelivery:
             mock_post.assert_awaited_once_with(event)
 
     @pytest.mark.asyncio()
+    async def test_emit_deployment_schedules_structured_event(self) -> None:
+        """Deployment telemetry is persisted through the same delivery path."""
+        from unittest.mock import AsyncMock, patch
+
+        from incidentlens_service_common.telemetry_client import TelemetryClient
+
+        client = TelemetryClient("payment-service", control_plane_url="http://cp:8003")
+        with patch.object(client, "_post_event", new_callable=AsyncMock) as mock_post:
+            event = client.emit_deployment("trace-1", "v2.0.0-buggy")
+            import asyncio
+            await asyncio.sleep(0.05)
+            mock_post.assert_awaited_once_with(event)
+        assert event.event_type == "deployment"
+        assert event.payload == {"version": "v2.0.0-buggy"}
+
+    @pytest.mark.asyncio()
     async def test_post_event_catches_http_error(self) -> None:
         """_post_event catches httpx.HTTPError and does not raise."""
         from incidentlens_service_common.telemetry_client import TelemetryClient

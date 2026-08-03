@@ -21,6 +21,7 @@ from incidentlens_contracts.models import (
     HypothesisStatus,
     InvestigationStatus,
 )
+from sqlalchemy.exc import IntegrityError
 
 from incidentlens_control_plane.agent.state import (
     InvestigationAuditStore,
@@ -111,13 +112,18 @@ class InvestigationMemoryCoordinator:
         symptom = alert.get("symptom", "")
 
         # Build search query
-        query_parts: list[str] = []
+        # FTS5 joins normalized terms with AND. Appending a transient numeric
+        # signal (for example ``error_rate=1.0``) to a descriptive symptom
+        # over-constrains recall because reviewed cases rarely contain that
+        # exact value. Prefer the stable symptom and use alert values only as
+        # a fallback when no symptom was supplied.
         if symptom:
-            query_parts.append(symptom)
-        for key in ("error_rate", "latency", "error"):
-            if key in alert:
-                query_parts.append(str(alert[key]))
-        text = " ".join(query_parts) if query_parts else service
+            text = symptom
+        else:
+            query_parts = [
+                str(alert[key]) for key in ("error_rate", "latency", "error") if key in alert
+            ]
+            text = " ".join(query_parts) if query_parts else service
 
         if not text:
             return MemoryPreparation(retrieved_cases=[], hypotheses=[])
@@ -183,11 +189,8 @@ class InvestigationMemoryCoordinator:
                 ),
                 confidence=0.3,
                 status=HypothesisStatus.ACTIVE,
-                root_service=service or (
-                    snapshot.affected_services[0]
-                    if snapshot.affected_services
-                    else ""
-                ),
+                root_service=service
+                or (snapshot.affected_services[0] if snapshot.affected_services else ""),
                 cause_code=root_cause,
             )
             hypotheses.append(hypothesis)
@@ -262,18 +265,23 @@ class InvestigationMemoryCoordinator:
             snapshot = self._case_service.materialize_from_investigation(state)
             state.case_id = snapshot.id
             state.case_status = "agent_generated"
-        except Exception:
+        except Exception as exc:
+            logger.exception(
+                "case materialization failed for incident %s",
+                state.incident_id,
+            )
             self._audit_store.record(
                 state.incident_id,
                 "case_materialization_failed",
-                {"error_code": "case_storage_error"},
+                {
+                    "error_code": "case_storage_error",
+                    "exception_type": type(exc).__name__,
+                },
             )
             return state
 
         # Classify each adopted prior against the report root cause
-        report_root_cause = (
-            state.report.get("root_cause", "") if state.report else ""
-        )
+        report_root_cause = state.report.get("root_cause", "") if state.report else ""
 
         for case_dict in state.retrieved_cases:
             case_id = case_dict.get("case_id")
@@ -283,9 +291,7 @@ class InvestigationMemoryCoordinator:
             if case_id is None:
                 continue
 
-            evidence_ids = (
-                state.report.get("evidence_ids", []) if state.report else []
-            )
+            evidence_ids = state.report.get("evidence_ids", []) if state.report else []
 
             if case_category == report_root_cause:
                 event_type = UsageEventType.VALIDATED
@@ -301,9 +307,7 @@ class InvestigationMemoryCoordinator:
                     case_id=case_id,
                     hypothesis_id=hyp_id,
                     event_type=event_type,
-                    idempotency_key=(
-                        f"{state.incident_id}:{case_id}:{hyp_id}:{event_type.value}"
-                    ),
+                    idempotency_key=(f"{state.incident_id}:{case_id}:{hyp_id}:{event_type.value}"),
                     investigation_id=state.incident_id,
                     details_json=json.dumps(details),
                 ),
@@ -314,9 +318,7 @@ class InvestigationMemoryCoordinator:
                     incident_id=state.incident_id,
                     hypothesis_id=hyp_id,
                     event_type=event_type,
-                    idempotency_key=(
-                        f"{state.incident_id}:{case_id}:{hyp_id}:{event_type.value}"
-                    ),
+                    idempotency_key=(f"{state.incident_id}:{case_id}:{hyp_id}:{event_type.value}"),
                     details=details,
                 ),
             )
@@ -364,7 +366,7 @@ class InvestigationMemoryCoordinator:
         try:
             with self._repository.transaction() as session:
                 self._repository.add_usage_event(session, row)
-        except Exception:
+        except IntegrityError:
             # Duplicate idempotency_key — expected on retries
             pass
 
@@ -372,8 +374,6 @@ class InvestigationMemoryCoordinator:
         if incident_id not in self._events:
             self._events[incident_id] = []
         # Deduplicate by idempotency_key
-        existing_keys = {
-            e.idempotency_key for e in self._events[incident_id]
-        }
+        existing_keys = {e.idempotency_key for e in self._events[incident_id]}
         if memory_event.idempotency_key not in existing_keys:
             self._events[incident_id].append(memory_event)

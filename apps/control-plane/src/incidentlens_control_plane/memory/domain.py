@@ -159,6 +159,8 @@ class FeedbackCommand(BaseModel):
     case_id: int
     idempotency_key: str = Field(min_length=1, max_length=255)
     rating: FeedbackRating
+    incident_id: str | None = Field(default=None, max_length=255)
+    actor: str = Field(min_length=1, max_length=255)
     comment: str = Field(default="", max_length=4000)
 
 
@@ -182,6 +184,8 @@ class FeedbackRecord(BaseModel):
     case_id: int
     idempotency_key: str
     rating: FeedbackRating
+    incident_id: str | None = None
+    actor: str
     comment: str = ""
     created_at: datetime
 

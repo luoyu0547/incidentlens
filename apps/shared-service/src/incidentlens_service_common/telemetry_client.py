@@ -164,6 +164,26 @@ class TelemetryClient:
         self._schedule_post(event)
         return event
 
+    def emit_deployment(
+        self,
+        trace_id: str,
+        version: str,
+        **extra: Any,
+    ) -> TelemetryEvent:
+        """Emit a structured deployment event."""
+        payload: dict[str, Any] = {"version": version}
+        payload.update(extra)
+        event = TelemetryEvent(
+            event_type="deployment",
+            service=self._service,
+            trace_id=trace_id,
+            occurred_at=datetime.now(tz=timezone.utc),
+            payload=payload,
+        )
+        self._log_event(event)
+        self._schedule_post(event)
+        return event
+
     def _log_event(self, event: TelemetryEvent) -> None:
         """Log the event as JSON to stdout."""
         logger.info(json.dumps(event.model_dump(mode="json")))

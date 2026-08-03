@@ -66,7 +66,35 @@ def test_migration_is_idempotent() -> None:
         count = conn.execute(
             text(
                 "SELECT COUNT(*) FROM incidentlens_schema_versions "
-                "WHERE component='case_memory' AND version=6"
+                "WHERE component='case_memory' AND version=7"
             )
         ).scalar_one()
     assert count == 1
+
+
+def test_v6_feedback_table_is_extended_non_destructively() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE TABLE incidentlens_schema_versions ("
+            "id INTEGER PRIMARY KEY, component VARCHAR(128), version INTEGER, "
+            "applied_at DATETIME)"
+        )
+        conn.exec_driver_sql(
+            "INSERT INTO incidentlens_schema_versions(component, version) "
+            "VALUES ('case_memory', 6)"
+        )
+        conn.exec_driver_sql(
+            "CREATE TABLE case_feedback ("
+            "id INTEGER PRIMARY KEY, case_id INTEGER, "
+            "idempotency_key VARCHAR(255), rating VARCHAR(64), "
+            "comment TEXT, created_at DATETIME)"
+        )
+
+    migrate_case_schema(engine)
+
+    with engine.connect() as conn:
+        columns = {
+            row[1] for row in conn.exec_driver_sql("PRAGMA table_info(case_feedback)")
+        }
+    assert {"actor", "incident_id"} <= columns

@@ -24,8 +24,10 @@ COPY apps/order-service/ apps/order-service/
 COPY apps/payment-service/ apps/payment-service/
 COPY apps/control-plane/ apps/control-plane/
 
-# Install the workspace
-RUN uv sync --frozen --no-dev
+# Install the workspace. Keep uv's download cache across BuildKit retries so a
+# transient package-index timeout does not restart every dependency download.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_HTTP_TIMEOUT=300 uv sync --frozen --no-dev
 
 # ---- Runtime stage ----
 FROM python:3.12-slim

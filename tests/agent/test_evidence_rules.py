@@ -185,6 +185,27 @@ class TestAssessEvidenceDBPoolExhaustion:
         assert assessments[0].candidate_service == "order-service"
         assert assessments[0].root_cause == "database_connection_leak"
 
+    def test_db_pool_exhaustion_warning_creates_order_candidate(self) -> None:
+        """The real order service emits pool exhaustion as a warning."""
+        from incidentlens_control_plane.agent.evidence_rules import assess_evidence
+
+        evidence = _make_evidence(
+            source_tool="search_logs",
+            content={
+                "items": [
+                    {
+                        "service": "order-service",
+                        "level": "WARN",
+                        "message": "DB pool exhausted, simulating slow query",
+                    }
+                ]
+            },
+        )
+        assessments = assess_evidence(evidence)
+        assert [(item.candidate_service, item.root_cause) for item in assessments] == [
+            ("order-service", "database_connection_leak")
+        ]
+
     def test_db_pool_metrics_creates_order_candidate(self) -> None:
         """Metrics showing pool exhaustion for order-service maps to database_connection_leak."""
         from incidentlens_control_plane.agent.evidence_rules import assess_evidence

@@ -167,11 +167,11 @@ Cases follow a governed state machine:
 
 | State | Description | Allowed Actions |
 |-------|-------------|-----------------|
-| `draft` | Initial state after creation | edit, confirm, abandon |
-| `agent_generated` | Auto-materialized from investigation report | edit, confirm, abandon |
-| `human_verified` | Confirmed by reviewer, indexed for FTS search | edit (creates new revision), abandon |
-| `abandoned` | Withdrawn from active use | none |
-| `superseded` | Replaced by newer revision | none |
+| `draft` | Initial state after creation or editing | edit, confirm, reject |
+| `agent_generated` | Auto-materialized from investigation report | edit, confirm, reject |
+| `human_verified` | Confirmed by reviewer and included in formal retrieval | edit, deprecate |
+| `deprecated` | Removed from formal retrieval | edit for re-review |
+| `rejected` | Rejected during review | edit for re-review |
 
 ### Auto-Materialization
 
@@ -186,17 +186,30 @@ When an investigation reaches `report_ready`, the system automatically creates a
 ### Review Workflow
 
 ```bash
-# Create a case
-curl -X POST /api/cases -d '{"symptom": "...", "root_cause_category": "..."}'
+# Create a draft case
+curl -X POST /api/cases \
+  -H 'Content-Type: application/json' \
+  -d '{"symptom":"payment timeout","affected_services":["order-service"],"actor":"local-user"}'
 
 # Edit a case (creates new revision)
-curl -X PATCH /api/cases/{id} -d '{"expected_version": 1, "resolution": "..."}'
+curl -X PATCH /api/cases/{id} \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version":1,"actor":"reviewer","symptom":"payment timeout","affected_services":["order-service"],"root_cause_category":"downstream-timeout","root_cause_description":"payment latency","key_evidence":[{"evidence_id":"ev-1"}],"resolution":"remove downstream delay"}'
 
 # Confirm a case (enables FTS indexing)
-curl -X POST /api/cases/{id}/confirm -d '{"expected_version": 2}'
+curl -X POST /api/cases/{id}/confirm \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version":2,"actor":"reviewer","reason":"evidence checked"}'
 
-# Abandon a case
-curl -X POST /api/cases/{id}/abandon -d '{"expected_version": 2}'
+# Reject a draft or agent-generated case
+curl -X POST /api/cases/{id}/reject \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version":1,"actor":"reviewer","reason":"incorrect conclusion"}'
+
+# Deprecate a verified case
+curl -X POST /api/cases/{id}/deprecate \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version":3,"actor":"reviewer","reason":"no longer applicable"}'
 ```
 
 ### Feedback
@@ -205,7 +218,8 @@ Record feedback on case search results:
 
 ```bash
 curl -X POST /api/cases/{id}/feedback -d '{
-  "rating": "correct",
+  "rating": "helpful",
+  "actor": "local-user",
   "incident_id": "inc-123",
   "idempotency_key": "inc-123:feedback"
 }'
