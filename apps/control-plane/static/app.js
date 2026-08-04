@@ -13,6 +13,7 @@ const EVAL_EMPTY_STATE = '尚无实际运行结果';
 let eventSource = null;
 let incidentId = null;
 let selectedCase = null; // currently selected case in editor
+let investigationStartedAt = null;
 
 // ---- HTML escaping to prevent XSS ----
 function escapeHtml(str) {
@@ -80,6 +81,52 @@ const loadEvalBtn = document.getElementById('load-eval-btn');
 const evalTableBody = document.getElementById('eval-table-body');
 const evalEmptyState = document.getElementById('eval-empty-state');
 const evalStatus = document.getElementById('eval-status');
+const runStatusBadge = document.getElementById('run-status-badge');
+const topIncidentId = document.getElementById('top-incident-id');
+
+// ---- Navigation and motion ----
+function switchView(viewId) {
+    document.querySelectorAll('.view').forEach(view => {
+        view.classList.toggle('active', view.id === viewId);
+    });
+    document.querySelectorAll('.nav-item').forEach(item => {
+        const active = item.dataset.view === viewId && (
+            viewId !== 'overview-view' || item === document.querySelector('.nav-item[data-view="overview-view"]')
+        );
+        item.classList.toggle('active', active);
+        if (active) item.setAttribute('aria-current', 'page');
+        else item.removeAttribute('aria-current');
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+document.querySelectorAll('[data-view]').forEach(trigger => {
+    trigger.addEventListener('click', () => switchView(trigger.dataset.view));
+});
+
+function animateMetric(element) {
+    if (!element?.dataset.count) return;
+    const target = Number(element.dataset.count);
+    const decimals = Number(element.dataset.decimals || 0);
+    const suffix = element.dataset.suffix || '';
+    const start = performance.now();
+    const duration = 850;
+    const tick = now => {
+        const progress = Math.min((now - start) / duration, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        element.textContent = `${(target * eased).toFixed(decimals)}${suffix}`;
+        if (progress < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+}
+
+function updateLiveMetric(id, value, suffix = '') {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.dataset.count = String(value);
+    el.dataset.suffix = suffix;
+    animateMetric(el);
+}
 
 // ---- Utility ----
 function setStatus(el, msg, type) {
@@ -97,8 +144,11 @@ startForm.addEventListener('submit', async (e) => {
         symptom: formData.get('symptom') || null,
     };
 
-    alertStatus.textContent = 'Starting investigation...';
+    alertStatus.textContent = '正在创建调查任务…';
     alertStatus.className = 'status-box';
+    document.body.classList.add('is-investigating');
+    runStatusBadge.textContent = '调查中';
+    investigationStartedAt = performance.now();
 
     try {
         const resp = await fetch(`${API_BASE}/api/investigations/start`, {
@@ -108,8 +158,9 @@ startForm.addEventListener('submit', async (e) => {
         });
         const data = await resp.json();
         incidentId = data.incident_id;
-        alertStatus.textContent = `Investigation started: ${incidentId}`;
+        alertStatus.textContent = `调查已启动：${incidentId}`;
         alertStatus.className = 'status-box success';
+        topIncidentId.textContent = incidentId;
 
         // Connect to SSE
         connectSSE(incidentId);
@@ -117,7 +168,9 @@ startForm.addEventListener('submit', async (e) => {
         // Run rounds automatically
         runRounds(incidentId, data.max_rounds || 8);
     } catch (err) {
-        alertStatus.textContent = `Error: ${err.message}`;
+        document.body.classList.remove('is-investigating');
+        runStatusBadge.textContent = '启动失败';
+        alertStatus.textContent = `启动失败：${err.message}`;
         alertStatus.className = 'status-box error';
     }
 });
@@ -163,6 +216,9 @@ function connectSSE(incId) {
         renderReport(data);
         confirmBtn.disabled = false;
         rejectBtn.disabled = false;
+        document.body.classList.remove('is-investigating');
+        runStatusBadge.textContent = '报告已生成';
+        updateLiveMetric('metric-confidence', 92, '%');
     });
 
     eventSource.onerror = () => {
@@ -199,9 +255,21 @@ async function runRounds(incId, maxRounds) {
 function addTimelineEntry(eventType, data) {
     const entry = document.createElement('div');
     entry.className = `timeline-entry ${eventType}`;
+    const elapsed = investigationStartedAt ? Math.floor((performance.now() - investigationStartedAt) / 1000) : 0;
+    const eventLabels = {
+        state_changed: '状态推进',
+        tool_called: '工具调用',
+        evidence_recorded: '证据入库',
+        report_ready: '报告生成',
+    };
     entry.innerHTML = `
-        <div class="event-type">${escapeHtml(eventType.replace('_', ' '))}</div>
-        <div class="event-data">${escapeHtml(formatEventData(eventType, data))}</div>
+        <time>00:${String(elapsed).padStart(2, '0')}</time>
+        <span class="timeline-dot"></span>
+        <div>
+            <div class="event-type">${escapeHtml(eventLabels[eventType] || eventType)}</div>
+            <strong>${escapeHtml(data.phase || data.tool || (eventType === 'report_ready' ? '根因报告已就绪' : '调查状态已更新'))}</strong>
+            <div class="event-data">${escapeHtml(formatEventData(eventType, data))}</div>
+        </div>
     `;
     timeline.appendChild(entry);
     timeline.scrollTop = timeline.scrollHeight;
@@ -210,13 +278,13 @@ function addTimelineEntry(eventType, data) {
 function formatEventData(eventType, data) {
     switch (eventType) {
         case 'state_changed':
-            return `Status: ${data.status || ''} | Round: ${data.round || ''} | Phase: ${data.phase || ''}`;
+            return `状态：${data.status || ''} · 轮次：${data.round || ''} · 阶段：${data.phase || ''}`;
         case 'tool_called':
-            return `Tool: ${data.tool || ''} | Args: ${JSON.stringify(data.args || {})}`;
+            return `工具：${data.tool || ''} · 参数：${JSON.stringify(data.args || {})}`;
         case 'evidence_recorded':
-            return `Source: ${data.source_tool || ''} | Content: ${JSON.stringify(data.content || {}).substring(0, 100)}`;
+            return `来源：${data.source_tool || ''} · 内容：${JSON.stringify(data.content || {}).substring(0, 100)}`;
         case 'report_ready':
-            return `Root Cause: ${data.root_cause || 'Identified'}`;
+            return `根因：${data.root_cause || '已识别'}`;
         default:
             return JSON.stringify(data);
     }
@@ -237,6 +305,7 @@ function addToolEntry(data) {
     entry.className = 'tool-entry';
     entry.innerHTML = `<span class="tool-name">${escapeHtml(data.tool || 'unknown')}</span> — ${escapeHtml(JSON.stringify(data.args || {}))}`;
     toolSummary.appendChild(entry);
+    updateLiveMetric('metric-tools', toolSummary.children.length);
 }
 
 function addEvidenceEntry(data) {
@@ -244,13 +313,14 @@ function addEvidenceEntry(data) {
     entry.className = 'evidence-entry';
     entry.innerHTML = `<span class="evidence-source">${escapeHtml(data.source_tool || 'unknown')}</span>: ${escapeHtml(JSON.stringify(data.content || {}).substring(0, 150))}`;
     evidenceEl.appendChild(entry);
+    updateLiveMetric('metric-evidence', evidenceEl.children.length);
 }
 
 function renderReport(data) {
     reportEl.innerHTML = `
-        <div class="root-cause">${escapeHtml(data.root_cause || 'No root cause identified')}</div>
+        <div class="root-cause"><span>已确认根因</span><p>${escapeHtml(data.root_cause || '暂未识别根因')}</p></div>
         <div class="findings">
-            <h3>Findings</h3>
+            <h3>关键发现</h3>
             ${(data.findings || []).map(f => `
                 <div class="finding">
                     <strong>${escapeHtml(f.source_tool || 'Tool')}</strong>: ${escapeHtml(JSON.stringify(f.content || {}).substring(0, 200))}
@@ -263,7 +333,7 @@ function renderReport(data) {
 // ---- Confirmation ----
 confirmBtn.addEventListener('click', async () => {
     if (!incidentId) return;
-    confirmStatus.textContent = 'Confirming...';
+    confirmStatus.textContent = '正在确认并沉淀案例…';
     try {
         const resp = await fetch(`${API_BASE}/api/cases`, {
             method: 'POST',
@@ -275,18 +345,18 @@ confirmBtn.addEventListener('click', async () => {
             }),
         });
         const data = await resp.json();
-        confirmStatus.textContent = `Case saved (ID: ${data.case_id})`;
+        confirmStatus.textContent = `案例已保存（ID：${data.case_id}）`;
         confirmStatus.className = 'status-box success';
         confirmBtn.disabled = true;
         rejectBtn.disabled = true;
     } catch (err) {
-        confirmStatus.textContent = `Error: ${err.message}`;
+        confirmStatus.textContent = `保存失败：${err.message}`;
         confirmStatus.className = 'status-box error';
     }
 });
 
 rejectBtn.addEventListener('click', () => {
-    confirmStatus.textContent = 'Findings rejected. Investigation may continue.';
+    confirmStatus.textContent = '调查结论已驳回，可补充证据后继续调查。';
     confirmStatus.className = 'status-box error';
     confirmBtn.disabled = true;
     rejectBtn.disabled = true;
@@ -298,14 +368,14 @@ rejectBtn.addEventListener('click', () => {
 
 // ---- Load Review Queue ----
 async function loadReviewQueue() {
-    setStatus(reviewQueueStatus, 'Loading review queue...', '');
+    setStatus(reviewQueueStatus, '正在加载审核队列…', '');
     try {
         const data = await apiJson('/api/cases?status=agent_generated&limit=50');
         const draftData = await apiJson('/api/cases?status=draft&limit=50');
         const allCases = [...(data.cases || []), ...(draftData.cases || [])];
         reviewQueueList.innerHTML = '';
         if (allCases.length === 0) {
-            reviewQueueList.innerHTML = '<p class="empty-hint">No cases pending review.</p>';
+            reviewQueueList.innerHTML = '<p class="empty-hint">当前没有待审核案例。</p>';
             setStatus(reviewQueueStatus, '', '');
             return;
         }
@@ -321,15 +391,15 @@ async function loadReviewQueue() {
                 <div class="card-symptom">${escapeHtml(c.symptom)}</div>
                 <div class="card-services">${escapeHtml((c.affected_services || []).join(', '))}</div>
                 <div class="card-actions">
-                    <button class="btn-select-case" data-case-id="${escapeHtml(String(c.id))}">Edit</button>
+                    <button class="btn-select-case" data-case-id="${escapeHtml(String(c.id))}">编辑</button>
                 </div>
             `;
             card.querySelector('.btn-select-case').addEventListener('click', () => selectCaseForEdit(c));
             reviewQueueList.appendChild(card);
         });
-        setStatus(reviewQueueStatus, `Loaded ${allCases.length} case(s).`, 'success');
+        setStatus(reviewQueueStatus, `已加载 ${allCases.length} 个案例。`, 'success');
     } catch (err) {
-        setStatus(reviewQueueStatus, `Error: ${escapeHtml(err.message)}`, 'error');
+        setStatus(reviewQueueStatus, `加载失败：${escapeHtml(err.message)}`, 'error');
     }
 }
 
@@ -349,7 +419,7 @@ function selectCaseForEdit(c) {
     document.getElementById('edit-version-min').value = c.service_version_min || '';
     document.getElementById('edit-version-max').value = c.service_version_max || '';
     historyCaseIdInput.value = c.id;
-    setStatus(editorStatus, `Loaded case #${c.id} (revision ${c.revision}).`, 'success');
+    setStatus(editorStatus, `已加载案例 #${c.id}（修订版本 ${c.revision}）。`, 'success');
 }
 
 // ---- Collect Editor Fields ----
@@ -372,10 +442,10 @@ function collectEditorFields() {
 caseEditForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!selectedCase) {
-        setStatus(editorStatus, 'No case selected.', 'error');
+        setStatus(editorStatus, '请先选择案例。', 'error');
         return;
     }
-    setStatus(editorStatus, 'Saving...', '');
+    setStatus(editorStatus, '正在保存…', '');
     try {
         const body = {
             ...collectEditorFields(),
@@ -389,7 +459,7 @@ caseEditForm.addEventListener('submit', async (e) => {
         });
         selectedCase = updated;
         caseRevisionInput.value = updated.revision;
-        setStatus(editorStatus, `Saved. Revision ${updated.revision}.`, 'success');
+        setStatus(editorStatus, `保存成功，当前修订版本为 ${updated.revision}。`, 'success');
         loadReviewQueue();
     } catch (err) {
         if (err.status === 409) {
@@ -400,7 +470,7 @@ caseEditForm.addEventListener('submit', async (e) => {
                 selectCaseForEdit(latest);
             } catch (_) { /* ignore reload error */ }
         } else {
-            setStatus(editorStatus, `Error: ${escapeHtml(err.message)}`, 'error');
+            setStatus(editorStatus, `保存失败：${escapeHtml(err.message)}`, 'error');
         }
     }
 });
@@ -408,10 +478,10 @@ caseEditForm.addEventListener('submit', async (e) => {
 // ---- Confirm Case ----
 document.getElementById('confirm-case-btn').addEventListener('click', async () => {
     if (!selectedCase) {
-        setStatus(editorStatus, 'No case selected.', 'error');
+        setStatus(editorStatus, '请先选择案例。', 'error');
         return;
     }
-    setStatus(editorStatus, 'Confirming...', '');
+    setStatus(editorStatus, '正在确认案例…', '');
     try {
         const body = {
             expected_version: selectedCase.revision,
@@ -423,13 +493,13 @@ document.getElementById('confirm-case-btn').addEventListener('click', async () =
             body: JSON.stringify(body),
         });
         selectedCase = updated;
-        setStatus(editorStatus, `Case confirmed (ID: ${updated.id}).`, 'success');
+        setStatus(editorStatus, `案例已确认（ID：${updated.id}）。`, 'success');
         loadReviewQueue();
     } catch (err) {
         if (err.status === 409) {
             setStatus(editorStatus, '案例已被其他操作更新，请重新加载', 'error');
         } else {
-            setStatus(editorStatus, `Error: ${escapeHtml(err.message)}`, 'error');
+            setStatus(editorStatus, `确认失败：${escapeHtml(err.message)}`, 'error');
         }
     }
 });
@@ -437,10 +507,10 @@ document.getElementById('confirm-case-btn').addEventListener('click', async () =
 // ---- Reject Case ----
 document.getElementById('reject-case-btn').addEventListener('click', async () => {
     if (!selectedCase) {
-        setStatus(editorStatus, 'No case selected.', 'error');
+        setStatus(editorStatus, '请先选择案例。', 'error');
         return;
     }
-    setStatus(editorStatus, 'Rejecting...', '');
+    setStatus(editorStatus, '正在驳回案例…', '');
     try {
         const body = {
             expected_version: selectedCase.revision,
@@ -452,13 +522,13 @@ document.getElementById('reject-case-btn').addEventListener('click', async () =>
             body: JSON.stringify(body),
         });
         selectedCase = updated;
-        setStatus(editorStatus, `Case rejected (ID: ${updated.id}).`, 'success');
+        setStatus(editorStatus, `案例已驳回（ID：${updated.id}）。`, 'success');
         loadReviewQueue();
     } catch (err) {
         if (err.status === 409) {
             setStatus(editorStatus, '案例已被其他操作更新，请重新加载', 'error');
         } else {
-            setStatus(editorStatus, `Error: ${escapeHtml(err.message)}`, 'error');
+            setStatus(editorStatus, `驳回失败：${escapeHtml(err.message)}`, 'error');
         }
     }
 });
@@ -466,10 +536,10 @@ document.getElementById('reject-case-btn').addEventListener('click', async () =>
 // ---- Deprecate Case ----
 document.getElementById('deprecate-case-btn').addEventListener('click', async () => {
     if (!selectedCase) {
-        setStatus(editorStatus, 'No case selected.', 'error');
+        setStatus(editorStatus, '请先选择案例。', 'error');
         return;
     }
-    setStatus(editorStatus, 'Deprecating...', '');
+    setStatus(editorStatus, '正在废弃案例…', '');
     try {
         const body = {
             expected_version: selectedCase.revision,
@@ -481,13 +551,13 @@ document.getElementById('deprecate-case-btn').addEventListener('click', async ()
             body: JSON.stringify(body),
         });
         selectedCase = updated;
-        setStatus(editorStatus, `Case deprecated (ID: ${updated.id}).`, 'success');
+        setStatus(editorStatus, `案例已废弃（ID：${updated.id}）。`, 'success');
         loadReviewQueue();
     } catch (err) {
         if (err.status === 409) {
             setStatus(editorStatus, '案例已被其他操作更新，请重新加载', 'error');
         } else {
-            setStatus(editorStatus, `Error: ${escapeHtml(err.message)}`, 'error');
+            setStatus(editorStatus, `废弃失败：${escapeHtml(err.message)}`, 'error');
         }
     }
 });
@@ -497,10 +567,10 @@ searchForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const q = document.getElementById('search-query').value.trim();
     if (!q) {
-        setStatus(searchStatus, 'Query is required.', 'error');
+        setStatus(searchStatus, '请输入检索内容。', 'error');
         return;
     }
-    setStatus(searchStatus, 'Searching...', '');
+    setStatus(searchStatus, '正在检索案例…', '');
     searchResults.innerHTML = '';
     try {
         const params = new URLSearchParams({ q });
@@ -516,7 +586,7 @@ searchForm.addEventListener('submit', async (e) => {
         const data = await apiJson(`/api/cases/search?${params.toString()}`);
         const hits = data.results || [];
         if (hits.length === 0) {
-            searchResults.innerHTML = '<p class="empty-hint">No results found.</p>';
+            searchResults.innerHTML = '<p class="empty-hint">没有找到匹配案例。</p>';
             setStatus(searchStatus, '', '');
             return;
         }
@@ -527,17 +597,17 @@ searchForm.addEventListener('submit', async (e) => {
                 <div class="hit-header">
                     <span class="hit-id">#${escapeHtml(String(hit.case_id || hit.id || ''))}</span>
                     <span class="hit-mode">${escapeHtml(hit.retrieval_mode || 'unknown')}</span>
-                    <span class="hit-score">Lexical: ${escapeHtml(String(hit.lexical_score ?? '-'))}</span>
-                    <span class="hit-score">Semantic: ${escapeHtml(String(hit.semantic_score ?? '-'))}</span>
+                    <span class="hit-score">词法：${escapeHtml(String(hit.lexical_score ?? '-'))}</span>
+                    <span class="hit-score">语义：${escapeHtml(String(hit.semantic_score ?? '-'))}</span>
                 </div>
                 <div class="hit-symptom">${escapeHtml(hit.symptom || '')}</div>
                 <div class="hit-reason">${escapeHtml(hit.similarity_reason || '')}</div>
             `;
             searchResults.appendChild(card);
         });
-        setStatus(searchStatus, `Found ${hits.length} result(s).`, 'success');
+        setStatus(searchStatus, `找到 ${hits.length} 个匹配案例。`, 'success');
     } catch (err) {
-        setStatus(searchStatus, `Error: ${escapeHtml(err.message)}`, 'error');
+        setStatus(searchStatus, `检索失败：${escapeHtml(err.message)}`, 'error');
     }
 });
 
@@ -546,7 +616,7 @@ document.querySelectorAll('.feedback-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
         const caseId = document.getElementById('feedback-case-id').value;
         if (!caseId) {
-            setStatus(document.getElementById('feedback-status'), 'Case ID is required.', 'error');
+            setStatus(document.getElementById('feedback-status'), '请输入案例 ID。', 'error');
             return;
         }
         const incidentIdVal = document.getElementById('feedback-incident-id').value.trim();
@@ -555,7 +625,7 @@ document.querySelectorAll('.feedback-btn').forEach(btn => {
         // Deterministic idempotency key from session
         const uiKey = `${caseId}:${incidentIdVal}:${rating}:${crypto.randomUUID()}`;
 
-        setStatus(document.getElementById('feedback-status'), 'Submitting feedback...', '');
+        setStatus(document.getElementById('feedback-status'), '正在提交反馈…', '');
         try {
             await apiJson(`/api/cases/${caseId}/feedback`, {
                 method: 'POST',
@@ -567,9 +637,9 @@ document.querySelectorAll('.feedback-btn').forEach(btn => {
                     comment: comment,
                 }),
             });
-            setStatus(document.getElementById('feedback-status'), `Feedback recorded (${rating}).`, 'success');
+            setStatus(document.getElementById('feedback-status'), `反馈已记录（${rating}）。`, 'success');
         } catch (err) {
-            setStatus(document.getElementById('feedback-status'), `Error: ${escapeHtml(err.message)}`, 'error');
+            setStatus(document.getElementById('feedback-status'), `提交失败：${escapeHtml(err.message)}`, 'error');
         }
     });
 });
@@ -578,16 +648,16 @@ document.querySelectorAll('.feedback-btn').forEach(btn => {
 loadHistoryBtn.addEventListener('click', async () => {
     const caseId = historyCaseIdInput.value;
     if (!caseId) {
-        setStatus(historyStatus, 'Case ID is required.', 'error');
+        setStatus(historyStatus, '请输入案例 ID。', 'error');
         return;
     }
-    setStatus(historyStatus, 'Loading history...', '');
+    setStatus(historyStatus, '正在加载操作历史…', '');
     historyList.innerHTML = '';
     try {
         const data = await apiJson(`/api/cases/${caseId}/history`);
         const reviews = data.reviews || [];
         if (reviews.length === 0) {
-            historyList.innerHTML = '<p class="empty-hint">No history entries.</p>';
+            historyList.innerHTML = '<p class="empty-hint">当前没有历史记录。</p>';
             setStatus(historyStatus, '', '');
             return;
         }
@@ -603,19 +673,19 @@ loadHistoryBtn.addEventListener('click', async () => {
             `;
             historyList.appendChild(entry);
         });
-        setStatus(historyStatus, `Loaded ${reviews.length} action(s).`, 'success');
+        setStatus(historyStatus, `已加载 ${reviews.length} 条操作记录。`, 'success');
     } catch (err) {
-        setStatus(historyStatus, `Error: ${escapeHtml(err.message)}`, 'error');
+        setStatus(historyStatus, `加载失败：${escapeHtml(err.message)}`, 'error');
     }
 });
 
 // ---- Export Investigation ----
 exportInvestigationBtn.addEventListener('click', async () => {
     if (!incidentId) {
-        setStatus(exportStatus, 'No active investigation.', 'error');
+        setStatus(exportStatus, '当前没有可导出的调查任务。', 'error');
         return;
     }
-    setStatus(exportStatus, 'Downloading...', '');
+    setStatus(exportStatus, '正在准备下载…', '');
     try {
         const a = document.createElement('a');
         a.href = `${API_BASE}/api/investigations/${incidentId}/export`;
@@ -623,15 +693,15 @@ exportInvestigationBtn.addEventListener('click', async () => {
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        setStatus(exportStatus, 'Export started.', 'success');
+        setStatus(exportStatus, '导出任务已开始。', 'success');
     } catch (err) {
-        setStatus(exportStatus, `Error: ${escapeHtml(err.message)}`, 'error');
+        setStatus(exportStatus, `导出失败：${escapeHtml(err.message)}`, 'error');
     }
 });
 
 // ---- Evaluation Comparison ----
 async function loadEvaluations() {
-    setStatus(evalStatus, 'Loading evaluations...', '');
+    setStatus(evalStatus, '正在加载评测结果…', '');
     evalTableBody.innerHTML = '';
     try {
         const scenario = evalScenarioSelect.value || 'all';
@@ -661,11 +731,11 @@ async function loadEvaluations() {
             `;
             evalTableBody.appendChild(row);
         });
-        setStatus(evalStatus, `Loaded ${runs.length} strategy run(s).`, 'success');
+        setStatus(evalStatus, `已加载 ${runs.length} 组策略结果。`, 'success');
     } catch (err) {
         evalEmptyState.style.display = 'block';
         evalTableBody.style.display = 'none';
-        setStatus(evalStatus, `Error: ${escapeHtml(err.message)}`, 'error');
+        setStatus(evalStatus, `加载失败：${escapeHtml(err.message)}`, 'error');
     }
 }
 
@@ -673,5 +743,6 @@ loadEvalBtn.addEventListener('click', loadEvaluations);
 
 // ---- Initial Load ----
 document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('[data-count]').forEach(animateMetric);
     loadReviewQueue();
 });

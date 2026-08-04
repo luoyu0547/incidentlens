@@ -6,6 +6,8 @@ regions, endpoints, and accessibility features.
 
 from pathlib import Path
 
+import pytest
+
 HTML = Path("apps/control-plane/static/index.html")
 JS = Path("apps/control-plane/static/app.js")
 
@@ -41,3 +43,15 @@ def test_dashboard_never_labels_content_as_chain_of_thought() -> None:
     source = (HTML.read_text() + JS.read_text()).lower()
     assert "chain of thought" not in source
     assert "思维链" not in source
+
+
+@pytest.mark.asyncio
+async def test_dashboard_is_served_without_shadowing_healthz(agent_api_client) -> None:
+    """The packaged dashboard and health endpoint must both remain reachable."""
+    dashboard = await agent_api_client.get("/")
+    health = await agent_api_client.get("/healthz")
+
+    assert dashboard.status_code == 200
+    assert "IncidentLens Dashboard" in dashboard.text
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok"}

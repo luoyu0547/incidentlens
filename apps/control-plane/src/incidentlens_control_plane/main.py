@@ -343,18 +343,18 @@ def create_app(
     app.include_router(scenarios_router)
     app.include_router(evaluations_router)
 
+    @app.get("/healthz")
+    async def healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
     # Mount static dashboard files.
     # NOTE: This MUST come after all include_router() calls above because
     # StaticFiles mounted at "/" with html=True acts as a catch-all — any
     # request not matched by an earlier route will be served from the static
     # directory. If route registration order changes, this mount must remain last.
-    _static_dir = pathlib.Path(__file__).parent.parent.parent.parent / "static"
+    _static_dir = pathlib.Path(__file__).parent.parent.parent / "static"
     if _static_dir.is_dir():
         app.mount("/", StaticFiles(directory=str(_static_dir), html=True), name="static")
-
-    @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
 
     return app
 
