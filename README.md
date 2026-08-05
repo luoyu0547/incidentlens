@@ -14,9 +14,35 @@ IncidentLens 是一个可本地完整运行的 Agent 工程 MVP。仓库内置 4
 
 ## 效果预览
 
-![IncidentLens Dashboard](docs/assets/dashboard.png)
+![IncidentLens 实时调查总览](docs/assets/dashboard-overview.png)
 
-Dashboard 展示告警输入、调查时间线、候选假设、工具调用、证据、历史案例、最终报告及人工审核入口，并提供数字滚动、时间线渐入、状态脉冲与视图切换动画。完整页面启动后访问 [http://localhost:8003](http://localhost:8003)，也可以查看[可编辑的 Figma 设计稿](https://www.figma.com/design/wFVXruMTmTATUxZrPlV6Fu)。
+这是确定性模式下的真实页面快照：告警上下文、调查时间线、证据链、候选根因、根因报告和处置建议均由页面状态渲染。页面同时提供数字滚动、时间线渐入、状态脉冲、证据卡片悬浮和视图切换动画。完整页面启动后访问 [http://localhost:8003](http://localhost:8003)，也可以查看[可编辑的 Figma 设计稿](https://www.figma.com/design/wFVXruMTmTATUxZrPlV6Fu)。
+
+### 功能分块展示
+
+#### 1. 实时调查总览
+
+从一条 P0 告警开始，页面集中呈现服务、环境、SLO、错误率和症状描述；调查推进后，时间线按阶段展示范围确认、信号调查、证据验证和报告生成。
+
+![实时调查总览：告警、时间线与证据链](docs/assets/dashboard-overview.png)
+
+#### 2. 证据链与根因报告
+
+右侧证据链把指标、Trace、连接池和部署信息拆成可核对的证据卡片；根因报告同步给出置信度、关键发现与可执行的处置建议，避免只展示一句没有依据的结论。
+
+![证据链与根因报告](docs/assets/dashboard-overview.png)
+
+#### 3. 案例记忆
+
+案例记忆独立成页，拆分为审核队列、案例编辑器、混合检索、案例反馈、审计历史和 JSON 导出，便于演示“调查结果如何沉淀为团队知识”。
+
+![案例记忆：审核队列与案例编辑器](docs/assets/dashboard-case-memory.png)
+
+#### 4. 效果评测
+
+效果评测页提供场景与推理策略筛选，并预留准确率、召回率、延迟和成本结果表，用于展示 Agent 从 Demo 走向可量化评估的完整闭环。
+
+![效果评测：场景与策略对比](docs/assets/dashboard-evaluation.png)
 
 ## 它解决什么问题
 
