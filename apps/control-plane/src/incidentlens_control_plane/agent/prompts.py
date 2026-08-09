@@ -4,7 +4,6 @@ The system prompt explicitly instructs the LLM to:
   - Investigate only the current incident
   - Use only registered read-only observability tools
   - Read a relevant Skill before relying on its evidence policy
-  - Treat historical cases as priors, never current proof
   - Never invent tool results or Evidence IDs
   - Stop safely when evidence is insufficient or contradictory
 
@@ -32,14 +31,9 @@ You investigate only the current incident.
 - Choose only registered read-only observability tools.
 - Read a relevant Skill BEFORE relying on its evidence policy.
   Use the read_file tool with paths like /skills/<skill-name>/SKILL.md
-- Historical cases are priors, never current proof.
 - Never invent tool results or Evidence IDs.
 - When evidence is insufficient or contradictory, say so and stop safely.
 - Do not request writes, Shell, rollback, restart, or configuration mutation.
-
-## Historical Cases
-Each prior is labeled with case=<id> and candidate_hypothesis=<id>.
-Use current-incident tools and Evidence before accepting or rejecting them.
 
 ## Available Skills
 Use read_file to load the full skill guide when you identify a matching symptom:
@@ -82,7 +76,6 @@ def build_agent_context(state_input: IncidentAgentState | dict[str, Any]) -> str
       - Alert summary (no raw payloads)
       - Up to 8 hypotheses
       - Up to 12 evidence summaries
-      - Verified historical cases
       - Loaded Skill names
       - Round count and remaining budgets
 
@@ -100,7 +93,6 @@ def build_agent_context(state_input: IncidentAgentState | dict[str, Any]) -> str
             "max_rounds": 8,
             "hypotheses": [],
             "evidence": [],
-            "retrieved_cases": [],
             "loaded_skill_names": [],
             "model_call_count": 0,
             "tool_call_count": 0,
@@ -146,21 +138,6 @@ def build_agent_context(state_input: IncidentAgentState | dict[str, Any]) -> str
         lines.append(
             f"  - {ev.id}: {ev.source_tool} -> {content_summary}"
         )
-
-    # --- Historical cases ---
-    if state.retrieved_cases:
-        lines.append("Historical cases (priors):")
-        for case in state.retrieved_cases[:5]:
-            case_id = case.get("case_id", "?")
-            hyp_id = case.get("hypothesis_id", "")
-            cause = case.get("root_cause_category", case.get("root_cause", "?"))
-            reason = case.get("similarity_reason", "")
-            hyp_label = f" candidate_hypothesis={hyp_id}" if hyp_id else ""
-            reason_label = f"; similarity={reason}" if reason else ""
-            lines.append(
-                f"  - case={case_id}{hyp_label} cause={cause}{reason_label}; "
-                f"this is an unverified prior"
-            )
 
     # --- Loaded skills ---
     if state.loaded_skill_names:

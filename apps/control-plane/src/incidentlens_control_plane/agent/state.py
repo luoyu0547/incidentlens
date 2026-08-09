@@ -1,7 +1,7 @@
 """Investigation state machine and checkpoint models.
 
 State machine phases:
-  parse_alert -> scope_incident -> retrieve_memory -> generate_hypotheses ->
+  parse_alert -> scope_incident -> generate_hypotheses ->
   choose_next_action -> execute_tool -> record_evidence -> update_hypotheses ->
   verify_root_cause -> generate_report
 
@@ -50,7 +50,6 @@ class InvestigationCheckpointRow(InvestigationBase):
     hypotheses_json: Mapped[str] = mapped_column(Text, default="[]")
     evidence_json: Mapped[str] = mapped_column(Text, default="[]")
     report_json: Mapped[str] = mapped_column(Text, default="null")
-    retrieved_cases_json: Mapped[str] = mapped_column(Text, default="[]")
     phase: Mapped[str] = mapped_column(String(64), default="parse_alert")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -98,7 +97,6 @@ class InvestigationState(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
     report: dict[str, Any] | None = None
     phase: str = "parse_alert"
-    retrieved_cases: list[dict[str, Any]] = Field(default_factory=list)
 
     # LangGraph agent telemetry fields
     loaded_skill_names: list[str] = Field(default_factory=list)
@@ -116,10 +114,6 @@ class InvestigationState(BaseModel):
     conclusion_status: str = "not_ready"
     conclusion_attempt_count: int = 0
     last_report_rejection_reason: str | None = None
-
-    # Memory integration fields
-    case_id: int | None = None
-    case_status: str | None = None
 
     model_config = {"use_enum_values": False}
 
@@ -148,11 +142,6 @@ class InvestigationState(BaseModel):
     def report_json(self) -> str:
         """Serialize report to JSON using model_dump(mode='json')."""
         return json.dumps(self.report, default=self._json_default)
-
-    @property
-    def retrieved_cases_json(self) -> str:
-        """Serialize retrieved_cases to JSON."""
-        return json.dumps(self.retrieved_cases, default=self._json_default)
 
     @staticmethod
     def _json_default(obj: Any) -> Any:
@@ -220,7 +209,6 @@ class CheckpointStore:
                 "hypotheses_json": state.hypotheses_json,
                 "evidence_json": state.evidence_json,
                 "report_json": state.report_json,
-                "retrieved_cases_json": state.retrieved_cases_json,
                 "phase": state.phase,
             }
 
@@ -253,7 +241,6 @@ class CheckpointStore:
                 Evidence(**e) for e in json.loads(row.evidence_json)
             ]
             report = json.loads(row.report_json)
-            retrieved_cases = json.loads(row.retrieved_cases_json)
 
             return InvestigationState(
                 incident_id=incident_id,
@@ -265,7 +252,6 @@ class CheckpointStore:
                 evidence=evidence,
                 report=report,
                 phase=row.phase,
-                retrieved_cases=retrieved_cases,
             )
 
 
@@ -347,7 +333,6 @@ class InvestigationAuditStore:
 PHASES = [
     "parse_alert",
     "scope_incident",
-    "retrieve_memory",
     "generate_hypotheses",
     "choose_next_action",
     "execute_tool",

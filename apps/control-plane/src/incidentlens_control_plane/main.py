@@ -165,17 +165,6 @@ async def lifespan(
     retriever = HybridCaseRetriever(case_repository)
     set_case_retriever(retriever)
 
-    from incidentlens_control_plane.memory.integration import (
-        InvestigationMemoryCoordinator,
-    )
-
-    memory_coordinator = InvestigationMemoryCoordinator(
-        retriever=retriever,
-        case_service=case_svc,
-        repository=case_repository,
-        audit_store=audit_store,
-    )
-
     # Build and wire the export service
     from incidentlens_control_plane.services.investigation_export import (
         InvestigationExportService,
@@ -217,9 +206,7 @@ async def lifespan(
                 mode=mode,
                 telemetry_repo=telemetry_repo,
                 toolkit=toolkit,
-                case_repository=case_repository,
                 audit_store=audit_store,
-                memory=memory_coordinator,
                 model_registry=registry,
                 checkpointer=checkpoints.saver,
                 skill_runtime=skill_runtime,
@@ -237,9 +224,7 @@ async def lifespan(
             mode=mode,
             telemetry_repo=telemetry_repo,
             toolkit=toolkit,
-            case_repository=case_repository,
             audit_store=audit_store,
-            memory=memory_coordinator,
             model_registry=None,
             checkpointer=None,
             skill_runtime=None,

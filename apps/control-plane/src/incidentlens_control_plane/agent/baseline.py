@@ -27,8 +27,6 @@ from incidentlens_control_plane.agent.state import (
     InvestigationState,
 )
 from incidentlens_control_plane.llm.config import RuntimeMode
-from incidentlens_control_plane.memory.integration import InvestigationMemoryCoordinator
-from incidentlens_control_plane.memory.repository import CaseRepository
 from incidentlens_control_plane.tools.query import ReadOnlyToolkit
 
 # ---------------------------------------------------------------------------
@@ -65,17 +63,11 @@ class DeterministicInvestigationEngine:
         self,
         telemetry_repo: Any,
         toolkit: ReadOnlyToolkit,
-        case_repository: CaseRepository | None = None,
         audit_store: InvestigationAuditStore | None = None,
-        memory: InvestigationMemoryCoordinator | None = None,
         max_rounds: int = 8,
     ) -> None:
         self._telemetry_repo = telemetry_repo
         self._toolkit = toolkit
-        self._case_repository = case_repository or CaseRepository(
-            telemetry_repo.engine
-        )
-        self._memory = memory
         self._max_rounds = max_rounds
         self._checkpoint_store = CheckpointStore(telemetry_repo.engine)
         self._audit_store = audit_store or InvestigationAuditStore(telemetry_repo.engine)
@@ -120,22 +112,13 @@ class DeterministicInvestigationEngine:
             {"from": "parse_alert", "to": "scope_incident"},
         )
 
-        # Phase: scope_incident -> retrieve_memory
+        # Phase: scope_incident -> generate_hypotheses
         state = self._scope_incident(state)
         self._checkpoint_store.save(state)
         self._audit_store.record(
             incident_id,
             "phase_transition",
-            {"from": "scope_incident", "to": "retrieve_memory"},
-        )
-
-        # Phase: retrieve_memory -> generate_hypotheses
-        state = self._retrieve_memory(state)
-        self._checkpoint_store.save(state)
-        self._audit_store.record(
-            incident_id,
-            "phase_transition",
-            {"from": "retrieve_memory", "to": "generate_hypotheses"},
+            {"from": "scope_incident", "to": "generate_hypotheses"},
         )
 
         # Phase: generate_hypotheses
@@ -176,8 +159,6 @@ class DeterministicInvestigationEngine:
                 "phase_transition",
                 {"to": state.status.value, "reason": "max_rounds_reached"},
             )
-            if self._memory is not None:
-                state = self._memory.finalize(state)
             return state
 
         # Increment round
@@ -241,10 +222,6 @@ class DeterministicInvestigationEngine:
             {"to": state.phase, "round": state.current_round},
         )
 
-        # Finalize terminal states through the memory coordinator
-        if self._memory is not None:
-            state = self._memory.finalize(state)
-
         return state
 
     async def resume(self, incident_id: str) -> InvestigationState | None:
@@ -257,13 +234,11 @@ class DeterministicInvestigationEngine:
         if state is None:
             return None
 
-        # If already completed, finalize and return the state
+        # If already completed, return the state
         if state.status in (
             InvestigationStatus.REPORT_READY,
             InvestigationStatus.NEEDS_MORE_EVIDENCE,
         ):
-            if self._memory is not None:
-                state = self._memory.finalize(state)
             return state
 
         # Run one more round
@@ -280,76 +255,12 @@ class DeterministicInvestigationEngine:
 
     def _scope_incident(self, state: InvestigationState) -> InvestigationState:
         """Scope the incident based on alert data."""
-        state.phase = "retrieve_memory"
-        return state
-
-    def _retrieve_memory(self, state: InvestigationState) -> InvestigationState:
-        """Retrieve relevant historical cases from memory.
-
-        Uses the memory coordinator when available to record usage events
-        and create deterministic candidate hypotheses. Falls back to
-        CaseRepository.search when no coordinator is provided.
-        """
-        if self._memory is not None:
-            prepared = self._memory.prepare(state.incident_id, state.alert)
-            state.retrieved_cases = prepared.retrieved_cases
-            state.hypotheses = prepared.hypotheses
-            state.phase = "generate_hypotheses"
-            return state
-
-        # Fallback: simple keyword search via CaseRepository
-        service = state.alert.get("service", "")
-        symptom = state.alert.get("symptom", "")
-
-        query_parts = []
-        if symptom:
-            query_parts.append(symptom)
-        for key in ("error_rate", "latency", "error"):
-            if key in state.alert:
-                query_parts.append(str(state.alert[key]))
-        query = " ".join(query_parts) if query_parts else service
-
-        if self._case_repository and query:
-            cases = self._case_repository.search(query, service, None)
-            state.retrieved_cases = [
-                {
-                    "case_id": c.case_id,
-                    "symptom": c.symptom,
-                    "root_cause": c.root_cause_category,
-                    "service": service,
-                }
-                for c in cases
-            ]
-
         state.phase = "generate_hypotheses"
         return state
 
     def _generate_hypotheses(self, state: InvestigationState) -> InvestigationState:
-        """Generate initial hypotheses from alert data and memory.
-
-        When the memory coordinator has already populated hypotheses from
-        retrieved cases, only alert-signal hypotheses are added. Otherwise,
-        falls back to the legacy case-based hypothesis generation.
-        """
+        """Generate initial hypotheses from alert data."""
         service = state.alert.get("service", "")
-
-        # If coordinator already provided hypotheses (with case-based candidates),
-        # only add alert-signal hypotheses
-        if state.hypotheses and self._memory is not None:
-            # Alert-signal hypotheses only
-            error_rate = state.alert.get("error_rate")
-            if error_rate is not None and error_rate > 0.1:
-                state.hypotheses.append(
-                    Hypothesis(
-                        id=str(uuid4()),
-                        description=f"{service} experiencing high error rate ({error_rate:.0%})",
-                        confidence=0.4,
-                        status=HypothesisStatus.ACTIVE,
-                        root_service=service,
-                    )
-                )
-            state.phase = "choose_next_action"
-            return state
 
         hypotheses: list[Hypothesis] = []
 
@@ -365,25 +276,6 @@ class DeterministicInvestigationEngine:
                     root_service=service,
                 )
             )
-
-        # Generate hypotheses from retrieved cases (candidates only)
-        for case in state.retrieved_cases:
-            root_cause = case.get("root_cause")
-            case_service = case.get("service", "")
-            if root_cause:
-                hypotheses.append(
-                    Hypothesis(
-                        id=str(uuid4()),
-                        description=(
-                            f"Candidate from historical case: "
-                            f"{root_cause} (similar to '{case.get('symptom', '')}')"
-                        ),
-                        confidence=0.3,  # Candidate, not confirmed
-                        status=HypothesisStatus.ACTIVE,
-                        root_service=case_service,
-                        cause_code=root_cause,
-                    )
-                )
 
         # Default hypothesis if none generated
         if not hypotheses:
@@ -659,7 +551,7 @@ class DeterministicInvestigationEngine:
                         ):
                             ev.contradicts_hypothesis_ids.append(matching_hyp.id)
 
-        # Also run the legacy keyword-based evidence association for
+        # Also run the keyword-based evidence association for
         # hypotheses that don't have root_service/cause_code yet
         for hyp in state.hypotheses:
             if hyp.status != HypothesisStatus.ACTIVE:
@@ -668,7 +560,7 @@ class DeterministicInvestigationEngine:
                 # Already handled by assess_evidence above
                 continue
 
-            # Legacy keyword-based association
+            # Keyword-based association
             for ev in state.evidence:
                 supports = self._evidence_supports_hypothesis(ev, hyp, state)
                 contradicts = self._evidence_contradicts_hypothesis(ev, hyp, state)

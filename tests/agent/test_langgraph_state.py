@@ -18,7 +18,6 @@ def test_projection_validates_domain_state() -> None:
             "evidence": [],
             "report": None,
             "phase": "agent_loop",
-            "retrieved_cases": [],
             "loaded_skill_names": ["downstream-timeout"],
             "model_profile": "deepseek",
             "model_call_count": 1,

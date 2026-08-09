@@ -344,7 +344,6 @@ class AgentHarness:
             "max_rounds": 8,
             "hypotheses": [],
             "evidence": [],
-            "retrieved_cases": [],
             "loaded_skill_names": [],
             "model_profile": "test",
             "model_call_count": 0,
@@ -491,7 +490,6 @@ async def recovery_harness(
                 model="test",
                 endpoint_host="localhost",
             ),
-            case_repository=None,
             total_timeout_seconds=5.0,
         )
 

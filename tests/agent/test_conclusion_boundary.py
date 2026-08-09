@@ -39,7 +39,6 @@ def _make_state(**overrides: object) -> IncidentAgentState:
         "max_rounds": 8,
         "hypotheses": [],
         "evidence": [],
-        "retrieved_cases": [],
         "loaded_skill_names": [],
         "model_profile": "test",
         "model_call_count": 0,

@@ -19,8 +19,6 @@ from incidentlens_control_plane.agent.state import (
 )
 from incidentlens_control_plane.llm.config import RuntimeMode
 from incidentlens_control_plane.llm.registry import ModelRegistry
-from incidentlens_control_plane.memory.integration import InvestigationMemoryCoordinator
-from incidentlens_control_plane.memory.repository import CaseRepository
 from incidentlens_control_plane.tools.query import ReadOnlyToolkit
 
 
@@ -29,12 +27,12 @@ def build_investigation_engine(
     mode: RuntimeMode,
     telemetry_repo: Any,
     toolkit: ReadOnlyToolkit,
-    case_repository: CaseRepository | None,
     audit_store: InvestigationAuditStore,
-    memory: InvestigationMemoryCoordinator | None = None,
     checkpointer: Any | None = None,
     skill_runtime: Any | None = None,
     model_registry: ModelRegistry | None = None,
+    project_memory_runtime: Any | None = None,
+    compaction_runtime: Any | None = None,
 ) -> InvestigationEngineProtocol:
     """Build an investigation engine runtime for the given mode.
 
@@ -48,19 +46,18 @@ def build_investigation_engine(
         Telemetry repository (used by the baseline engine).
     toolkit:
         Read-only query toolkit.
-    case_repository:
-        Optional case memory repository.
     audit_store:
         Shared audit store.
-    memory:
-        Optional memory coordinator for governed case recall and
-        terminal reconciliation.
     checkpointer:
         LangGraph checkpointer (required for LLM_AGENT mode).
     skill_runtime:
         SkillRuntime (required for LLM_AGENT mode).
     model_registry:
         ModelRegistry (required for LLM_AGENT mode).
+    project_memory_runtime:
+        Optional project-level memory runtime (reserved for future use).
+    compaction_runtime:
+        Optional compaction runtime (reserved for future use).
 
     Returns
     -------
@@ -107,16 +104,12 @@ def build_investigation_engine(
             graph=graph,
             audit_store=audit_store,
             model_identity=identity,
-            case_repository=case_repository,
-            memory=memory,
         )
 
     # DETERMINISTIC_BASELINE
     engine = DeterministicInvestigationEngine(
         telemetry_repo=telemetry_repo,
         toolkit=toolkit,
-        case_repository=case_repository,
         audit_store=audit_store,
-        memory=memory,
     )
     return AsyncBaselineAdapter(engine)

@@ -41,7 +41,6 @@ class IncidentAgentState(AgentState):
     max_rounds: int
     hypotheses: list[Hypothesis]
     evidence: Annotated[list[Evidence], merge_evidence]
-    retrieved_cases: list[dict[str, Any]]
     loaded_skill_names: Annotated[list[str], merge_unique_strings]
     model_profile: str
     model_call_count: Annotated[int, operator.add]
@@ -59,10 +58,6 @@ class IncidentAgentState(AgentState):
     conclusion_status: NotRequired[str]
     conclusion_attempt_count: NotRequired[int]
     last_report_rejection_reason: NotRequired[str | None]
-
-    # Memory integration fields
-    case_id: NotRequired[int | None]
-    case_status: NotRequired[str | None]
 
 
 class InvestigationContext(BaseModel):
