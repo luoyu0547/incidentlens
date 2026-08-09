@@ -94,3 +94,22 @@ class LoadedMemories(BaseModel):
     entries: list[MemoryRecord]
     total_bytes: int = Field(ge=0)
     truncated: bool = False
+
+
+class MemoryQuery(BaseModel):
+    """Query for selecting relevant memories."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    alert_summary: str = Field(min_length=1, max_length=10_000)
+    recent_text: str = Field(min_length=0, max_length=10_000, default="")
+
+
+class MemorySelection(BaseModel):
+    """Result of memory selection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    filenames: list[str] = Field(default_factory=list)
+    mode: Literal["model", "keyword", "empty"] = "empty"
+    reason: str = ""
