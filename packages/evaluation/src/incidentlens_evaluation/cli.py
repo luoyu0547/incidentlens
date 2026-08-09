@@ -2,7 +2,7 @@
 
 Usage:
     python -m incidentlens_evaluation.cli --strategy all --scenario all
-    python -m incidentlens_evaluation.cli --strategy incidentlens_verified --scenario payment_delay
+    python -m incidentlens_evaluation.cli --strategy deterministic_baseline --scenario payment_delay
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import json
 from incidentlens_control_plane.evaluations.store import EvaluationRunStore
 from incidentlens_telemetry.database import create_engine
 
-from incidentlens_evaluation.runner import run_evaluation
+from incidentlens_evaluation.runner import EVALUATION_STRATEGIES, run_evaluation
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--strategy",
-        choices=["react_no_memory", "memory_unverified", "incidentlens_verified", "all"],
+        choices=[*EVALUATION_STRATEGIES, "all"],
         required=True,
         help="Evaluation strategy to run",
     )
@@ -54,7 +54,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # Determine strategies to run
     strategies = (
-        ["react_no_memory", "memory_unverified", "incidentlens_verified"]
+        list(EVALUATION_STRATEGIES)
         if args.strategy == "all"
         else [args.strategy]
     )

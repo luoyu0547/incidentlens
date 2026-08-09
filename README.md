@@ -1,6 +1,6 @@
 # IncidentLens
 
-> 面向微服务故障的证据驱动型调查 Agent：从告警出发，自动收集遥测、维护假设、约束结论，并将已审核案例沉淀为可检索的团队知识。
+> 面向微服务故障的证据驱动型调查 Agent：从告警出发，自动收集遥测、维护假设、约束结论，并将已审核事故沉淀为可检索的团队记忆。
 
 ![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)
@@ -8,7 +8,7 @@
 ![Docker Compose](https://img.shields.io/badge/Runtime-Docker_Compose-2496ED?logo=docker&logoColor=white)
 ![Tests](https://img.shields.io/badge/unit_tests-410_passed-brightgreen)
 
-IncidentLens 是一个可本地完整运行的 Agent 工程 MVP。仓库内置 4 个微服务、5 类故障注入场景、只读诊断工具、调查状态机、SSE 事件流、案例知识闭环和离线评估框架，可用于演示一条从“制造故障”到“产出可追溯调查报告”的完整链路。
+IncidentLens 是一个可本地完整运行的 Agent 工程 MVP。仓库内置 4 个微服务、5 类故障注入场景、只读诊断工具、调查状态机、SSE 事件流、项目记忆与历史压缩和离线评估框架，可用于演示一条从”制造故障”到”产出可追溯调查报告”的完整链路。
 
 > 项目边界：当前版本用于 Agent 工程研究、开发与面试演示，不是可直接接管生产告警的自动化运维平台；它不会执行重启、回滚或扩容等写操作。
 
@@ -32,11 +32,11 @@ IncidentLens 是一个可本地完整运行的 Agent 工程 MVP。仓库内置 4
 
 ![证据链与根因报告](docs/assets/dashboard-overview.png)
 
-#### 3. 案例记忆
+#### 3. 项目记忆
 
-案例记忆独立成页，拆分为审核队列、案例编辑器、混合检索、案例反馈、审计历史和 JSON 导出，便于演示“调查结果如何沉淀为团队知识”。
+项目记忆页面展示调查过程中加载的项目级记忆文件和历史压缩统计，帮助团队理解 Agent 如何利用组织知识加速调查。
 
-![案例记忆：审核队列与案例编辑器](docs/assets/dashboard-case-memory.png)
+![项目记忆：压缩统计与项目文件](docs/assets/dashboard-case-memory.png)
 
 #### 4. 效果评测
 
@@ -46,27 +46,27 @@ IncidentLens 是一个可本地完整运行的 Agent 工程 MVP。仓库内置 4
 
 ## 它解决什么问题
 
-传统故障排查往往依赖工程师在日志、指标、Trace 和变更记录之间反复切换。普通 ReAct Agent 又容易出现重复查询、证据不足便下结论，或者直接照搬历史案例的问题。IncidentLens 将调查过程拆成受约束的状态机：
+传统故障排查往往依赖工程师在日志、指标、Trace 和变更记录之间反复切换。普通 ReAct Agent 又容易出现重复查询、证据不足便下结论，或者直接照搬历史结论的问题。IncidentLens 将调查过程拆成受约束的状态机：
 
 1. 接收告警并限定受影响服务与 Trace 范围；
 2. 根据故障特征加载对应调查 Skill；
 3. 只调用只读诊断工具，所有结果统一封装为 `ToolResult`；
 4. 将观察结果登记为可引用 Evidence，并持续更新或排除 Hypothesis；
 5. 只有满足证据策略和置信度边界时，才生成结构化调查报告；
-6. 报告自动生成待审核案例，经人工确认后进入正式检索；
-7. 新事件可召回历史案例，但历史结论只能作为候选假设，不能替代当前证据。
+6. 项目记忆文件在调查启动时加载，为 Agent 提供组织级调查经验；
+7. 当上下文接近窗口限制时，历史压缩自动将旧轮次压缩为摘要。
 
 ## 核心能力
 
 | 能力 | 实现方式 | 工程价值 |
 |---|---|---|
 | 有状态调查 Agent | LangGraph、SQLite checkpoint、分阶段状态机 | 支持多轮调查、恢复与审计 |
-| 证据约束 | Evidence ID、置信度阈值、独立证据源策略 | 降低无依据结论和“历史答案照抄” |
+| 证据约束 | Evidence ID、置信度阈值、独立证据源策略 | 降低无依据结论和”历史答案照抄” |
 | 只读工具层 | 日志、指标、Trace、部署及依赖查询 | 调查与处置解耦，控制副作用 |
 | 场景化 Skill | `SKILL.md` + `evidence-policy.yaml` | 将调查方法和证据标准显式化 |
 | 实时可视化 | FastAPI + SSE + 原生 Web Dashboard | 展示状态、工具调用、证据和报告 |
-| 知识闭环 | FTS5、可选 Embedding、混合检索、版本化审核 | 将已验证经验复用于后续事件 |
-| 可评估性 | 三种策略、8 项指标、5 类故障场景 | 避免只凭 Demo 主观判断 Agent 效果 |
+| 项目记忆与历史压缩 | Markdown 记忆文件、自动压缩、回退摘要 | 为 Agent 提供组织级调查经验 |
+| 可评估性 | 两种策略、8 项指标、5 类故障场景 | 避免只凭 Demo 主观判断 Agent 效果 |
 | 防泄漏导出 | 版本化 JSON、敏感字段清洗、大小限制 | 为复盘和离线分析提供安全边界 |
 
 ## 系统架构
@@ -337,13 +337,12 @@ uv run pytest tests/live_llm/test_model_contract.py -m live_llm -vv -s
 
 ## Evaluation
 
-评估框架比较三种策略：
+评估框架比较两种策略：
 
-| 策略 | 案例记忆 | 证据校验 | 用途 |
+| 策略 | 项目记忆 | LLM 推理 | 用途 |
 |---|---:|---:|---|
-| `react_no_memory` | 否 | 否 | 纯 ReAct 基线 |
-| `memory_unverified` | 是 | 否 | 观察未校验记忆带来的收益与风险 |
-| `incidentlens_verified` | 是 | 是 | 完整 IncidentLens 策略 |
+| `deterministic_baseline` | 否 | 否 | 纯规则与工具调用基线 |
+| `llm_agent` | 是 | 是 | 完整 Agent 策略，含记忆、压缩与 LLM |
 
 运行所有策略和场景：
 
@@ -357,12 +356,12 @@ uv run python -m incidentlens_evaluation.cli \
 
 ```bash
 uv run python -m incidentlens_evaluation.cli \
-  --strategy incidentlens_verified \
+  --strategy llm_agent \
   --scenario payment_delay \
   --database-url sqlite:///control_plane.db
 ```
 
-框架从实际 RunRecord 计算 8 项指标：根因服务准确率、根因类型准确率、证据引用正确率、首个有效假设轮次、平均工具调用数、重复调用率、历史案例误导率和平均调查延迟。详细定义见 [`docs/evaluation.md`](docs/evaluation.md)。
+框架从实际 RunRecord 计算 8 项指标：根因服务准确率、根因类型准确率、证据引用正确率、首个有效假设轮次、平均工具调用数、重复调用率、项目记忆加载数、压缩与回退摘要计数以及平均调查延迟。详细定义见 [`docs/evaluation.md`](docs/evaluation.md)。
 
 ## 测试与开发
 
@@ -380,7 +379,6 @@ INCIDENTLENS_AGENT_MODE=deterministic_baseline \
 uv run pytest \
   tests/integration/test_compose_flow.py \
   tests/integration/test_scenario_acceptance.py \
-  tests/integration/test_memory_governance_flow.py \
   -m integration -q
 ```
 
@@ -447,8 +445,6 @@ docker compose -f infra/compose/compose.yaml logs --tail=200
 
 - 所有诊断工具只读，不执行自动修复；
 - `confidence > 0.70` 的结论必须引用 Evidence；
-- 历史案例只能生成候选假设，不能直接确认根因；
-- 只有 `human_verified` 案例进入正式检索；
 - 导出会过滤 API Key、Token、Authorization 等敏感字段；
 - 公开 Demo 输出不会暴露内部 `root_cause_label`；
 - `docker compose down` 保留数据，`down -v` 会不可逆删除本地命名卷。
@@ -463,10 +459,6 @@ docker compose -f infra/compose/compose.yaml logs --tail=200
 | `POST` | `/api/investigations/{id}/resume` | 从 checkpoint 恢复 |
 | `GET` | `/api/investigations/{id}/events` | 订阅 SSE 调查事件 |
 | `GET` | `/api/investigations/{id}/export` | 导出脱敏调查记录 |
-| `GET` | `/api/cases/search` | 混合检索已验证案例 |
-| `POST` | `/api/cases` | 创建草稿案例 |
-| `POST` | `/api/cases/{id}/confirm` | 人工确认案例 |
-| `POST` | `/api/cases/{id}/feedback` | 记录案例相关性反馈 |
 | `GET` | `/api/scenarios` | 查看故障场景 |
 | `POST` | `/api/scenarios/{name}/enable` | 启用故障注入 |
 | `POST` | `/api/scenarios/reset` | 清理场景和 Demo 数据 |
@@ -478,7 +470,7 @@ docker compose -f infra/compose/compose.yaml logs --tail=200
 ```text
 incidentlens/
 ├── apps/
-│   ├── control-plane/       # Agent、API、SSE、Dashboard、案例治理
+│   ├── control-plane/       # Agent、API、SSE、Dashboard
 │   ├── gateway-service/     # 请求入口与遥测上报
 │   ├── order-service/       # 订单服务及故障注入点
 │   ├── payment-service/     # 支付服务及故障注入点

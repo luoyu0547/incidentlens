@@ -7,7 +7,9 @@ Metrics:
   - first_effective_hypothesis_round: average round where first effective hypothesis found
   - average_tool_calls: mean tool calls across runs
   - duplicate_rate: fraction of total calls that are duplicates
-  - historical_case_misleading_rate: misleading cases / adopted cases across all records
+  - project_memories_loaded: total project memories loaded across all records
+  - compaction_count: total compactions across all records
+  - summary_fallback_count: total summary fallbacks across all records
   - average_latency_ms: mean latency across runs
 
 All values are derived from RunRecord instances — never hardcoded.
@@ -30,8 +32,9 @@ class RunRecord(BaseModel):
         evidence_reference_correct: whether evidence correctly references the root cause
         first_effective_round: the round number where the first effective hypothesis appeared
         duplicate_calls: number of duplicate (same tool+args) calls
-        historical_cases_adopted: number of historical cases adopted during investigation
-        historical_cases_misleading: number of historical cases that were misleading
+        project_memories_loaded: number of project memory files loaded during investigation
+        compaction_count: number of compaction operations performed
+        summary_fallback_count: number of summary fallback (circuit) activations
         latency_ms: total investigation latency in milliseconds
     """
 
@@ -43,8 +46,9 @@ class RunRecord(BaseModel):
     evidence_reference_correct: bool = False
     first_effective_round: int | None = None
     duplicate_calls: int = 0
-    historical_cases_adopted: int = 0
-    historical_cases_misleading: int = 0
+    project_memories_loaded: int = 0
+    compaction_count: int = 0
+    summary_fallback_count: int = 0
     latency_ms: float = 0.0
 
 
@@ -60,7 +64,9 @@ class EvaluationResult(BaseModel):
     first_effective_hypothesis_round: float = 0.0
     average_tool_calls: float = 0.0
     duplicate_rate: float = 0.0
-    historical_case_misleading_rate: float = 0.0
+    project_memories_loaded: int = 0
+    compaction_count: int = 0
+    summary_fallback_count: int = 0
     average_latency_ms: float = 0.0
 
 
@@ -112,12 +118,10 @@ def compute_metrics(records: list[RunRecord]) -> EvaluationResult:
     total_duplicate = sum(r.duplicate_calls for r in records)
     duplicate_rate = total_duplicate / total_calls if total_calls > 0 else 0.0
 
-    # Historical case misleading rate: misleading / adopted across all records
-    total_adopted = sum(r.historical_cases_adopted for r in records)
-    total_misleading = sum(r.historical_cases_misleading for r in records)
-    historical_case_misleading_rate = (
-        total_misleading / total_adopted if total_adopted > 0 else 0.0
-    )
+    # Memory and compaction observability
+    project_memories_loaded = sum(r.project_memories_loaded for r in records)
+    compaction_count = sum(r.compaction_count for r in records)
+    summary_fallback_count = sum(r.summary_fallback_count for r in records)
 
     # Average latency
     average_latency_ms = sum(r.latency_ms for r in records) / n
@@ -129,6 +133,8 @@ def compute_metrics(records: list[RunRecord]) -> EvaluationResult:
         first_effective_hypothesis_round=first_effective_hypothesis_round,
         average_tool_calls=average_tool_calls,
         duplicate_rate=duplicate_rate,
-        historical_case_misleading_rate=historical_case_misleading_rate,
+        project_memories_loaded=project_memories_loaded,
+        compaction_count=compaction_count,
+        summary_fallback_count=summary_fallback_count,
         average_latency_ms=average_latency_ms,
     )

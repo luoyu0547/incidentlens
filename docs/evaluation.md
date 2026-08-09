@@ -7,11 +7,10 @@ identifies root causes across different fault scenarios and strategies.
 
 ## Strategies
 
-| Strategy | Case Memory | Evidence Verification | Description |
-|----------|-------------|----------------------|-------------|
-| `react_no_memory` | No | No | Baseline: no historical cases, no evidence verification |
-| `memory_unverified` | Yes | No | Case memory enabled, but evidence not verified |
-| `incidentlens_verified` | Yes | Yes | Full pipeline: case memory + evidence verification |
+| Strategy | Project Memory | LLM Reasoning | Description |
+|----------|---------------|---------------|-------------|
+| `deterministic_baseline` | No | No | Baseline: no memory, no LLM, pure rules and tool calls |
+| `llm_agent` | Yes | Yes | Full pipeline: project memory, compaction, and LLM reasoning |
 
 ## Scenarios
 
@@ -35,7 +34,9 @@ All metrics are computed from actual run records — never fixed/hardcoded score
 | first_effective_hypothesis_round | Average round where first effective hypothesis appears | mean(rounds) |
 | average_tool_calls | Mean tool calls per investigation | sum(calls) / total |
 | duplicate_rate | Fraction of total calls that are duplicates | duplicates / total_calls |
-| historical_case_misleading_rate | Fraction of adopted cases that were misleading | misleading / adopted |
+| project_memories_loaded | Total project memories loaded across runs | sum(loaded) |
+| compaction_count | Total compaction events triggered | sum(count) |
+| summary_fallback_count | Total fallback to summary mode | sum(count) |
 | average_latency_ms | Mean investigation latency | sum(ms) / total |
 
 ## Running Evaluations
@@ -44,10 +45,10 @@ All metrics are computed from actual run records — never fixed/hardcoded score
 from incidentlens_evaluation.runner import run_evaluation
 
 # Run a single scenario
-result = run_evaluation("incidentlens_verified", "payment_delay")
+result = run_evaluation("llm_agent", "payment_delay")
 
 # Run all scenarios
-result = run_evaluation("incidentlens_verified", "all")
+result = run_evaluation("llm_agent", "all")
 ```
 
 ## Compose Acceptance Validation
@@ -82,11 +83,10 @@ metrics and serve as a quality gate for the full investigation pipeline.
 
 ## Expected Outcomes
 
-The `incidentlens_verified` strategy should outperform `react_no_memory` on:
-- Higher root_service_accuracy (case memory guides investigation)
+The `llm_agent` strategy should outperform `deterministic_baseline` on:
+- Higher root_service_accuracy (project memory guides investigation)
 - Lower duplicate_rate (evidence dedup prevents redundant calls)
-- Lower misleading_rate (evidence verification filters bad signals)
-- Earlier first_effective_hypothesis_round (historical cases accelerate)
+- Earlier first_effective_hypothesis_round (project memory accelerates)
 
-The `memory_unverified` strategy should fall between the other two,
-benefiting from case memory but lacking evidence verification.
+The `deterministic_baseline` strategy provides a lower bound without any
+memory or LLM capabilities.

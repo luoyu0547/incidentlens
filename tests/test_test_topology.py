@@ -14,7 +14,6 @@ import pytest
     [
         Path("tests/integration/test_scenario_acceptance.py"),
         Path("tests/integration/test_compose_flow.py"),
-        Path("tests/integration/test_memory_governance_flow.py"),
     ],
 )
 def test_integration_modules_declare_marker(path: Path) -> None:

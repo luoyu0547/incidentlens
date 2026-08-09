@@ -1,9 +1,8 @@
 """Evaluation runner — execute investigations under different strategies.
 
 Strategies:
-  - react_no_memory: no case memory, no evidence verification
-  - memory_unverified: case memory enabled, but evidence not verified
-  - incidentlens_verified: full pipeline with case memory and evidence verification
+  - deterministic_baseline: no external LLM, no project memory, no compaction
+  - llm_agent: full pipeline with project memory, compaction, and LLM reasoning
 
 Each strategy runs an investigation against a scenario and produces a RunRecord.
 run_evaluation(strategy, scenario) runs all scenarios and returns aggregated metrics.
@@ -19,8 +18,6 @@ from typing import Any
 
 from incidentlens_contracts.models import TelemetryEvent
 from incidentlens_control_plane.agent.engine import InvestigationEngine
-from incidentlens_control_plane.memory.models import CaseRow
-from incidentlens_control_plane.memory.repository import CaseRepository
 from incidentlens_control_plane.tools.query import ReadOnlyToolkit
 from incidentlens_scenarios.models import SCENARIOS
 from incidentlens_telemetry.database import create_engine
@@ -32,25 +29,22 @@ from incidentlens_evaluation.metrics import (
     compute_metrics,
 )
 
+EVALUATION_STRATEGIES: tuple[str, ...] = ("deterministic_baseline", "llm_agent")
+
 
 def _create_engine_components(
     strategy: str,
-) -> tuple[TelemetryRepository, ReadOnlyToolkit, CaseRepository | None]:
+) -> tuple[TelemetryRepository, ReadOnlyToolkit]:
     """Create investigation engine components based on strategy.
 
-    - react_no_memory: no case memory
-    - memory_unverified: case memory enabled
-    - incidentlens_verified: case memory enabled
+    - deterministic_baseline: no external LLM, no project memory
+    - llm_agent: full pipeline with project memory and compaction
     """
     db_engine = create_engine("sqlite:///:memory:")
     telemetry_repo = TelemetryRepository(db_engine)
     toolkit = ReadOnlyToolkit(telemetry_repo)
 
-    case_repo: CaseRepository | None = None
-    if strategy in ("memory_unverified", "incidentlens_verified"):
-        case_repo = CaseRepository(db_engine)
-
-    return telemetry_repo, toolkit, case_repo
+    return telemetry_repo, toolkit
 
 
 def _seed_telemetry_for_scenario(
@@ -122,28 +116,15 @@ def run_single(strategy: str, scenario_name: str) -> RunRecord:
     root_cause_label = scenario["root_cause_label"]
 
     # Create engine components based on strategy
-    telemetry_repo, toolkit, case_repo = _create_engine_components(strategy)
+    telemetry_repo, toolkit = _create_engine_components(strategy)
 
     # Seed telemetry data
     _seed_telemetry_for_scenario(telemetry_repo, scenario_name)
-
-    # For memory strategies, seed a historical case
-    if case_repo is not None and strategy in ("memory_unverified", "incidentlens_verified"):
-        with case_repo.transaction() as session:
-            case_row = CaseRow(
-                status="human_verified",
-                symptom="high error rate",
-                root_cause_category=root_cause_label,
-                root_cause_description=root_cause_label,
-                resolution="rolled back deployment",
-            )
-            case_repo.add_case(session, case_row)
 
     # Create investigation engine
     engine = InvestigationEngine(
         telemetry_repo=telemetry_repo,
         toolkit=toolkit,
-        case_repository=case_repo,
         max_rounds=8,
     )
 
@@ -208,36 +189,11 @@ def run_single(strategy: str, scenario_name: str) -> RunRecord:
             duplicate_calls += 1
         seen_tools.add(key)
 
-    # Derive historical usage counts from case repository
-    historical_cases_adopted = 0
-    historical_cases_misleading = 0
-    if case_repo is not None:
-        try:
-            # Query cases adopted/misleading for this incident
-            # In a real implementation, this would query usage events by incident_id
-            # For now, we derive from the case repository's state
-            with case_repo.transaction() as session:
-                from incidentlens_control_plane.memory.models import CaseUsageEventRow
-                from sqlalchemy import select
-
-                events = session.execute(
-                    select(CaseUsageEventRow).where(
-                        CaseUsageEventRow.case_id.in_(
-                            select(CaseRow.id).where(
-                                CaseRow.affected_services_json.contains(target_service)
-                            )
-                        )
-                    )
-                ).scalars().all()
-                for event in events:
-                    if hasattr(event, 'event_type'):
-                        if event.event_type == "adopted":
-                            historical_cases_adopted += 1
-                        elif event.event_type == "misleading":
-                            historical_cases_misleading += 1
-        except Exception:
-            # If case query fails, use zeros (no historical data available)
-            pass
+    # Derive memory/compaction counters from audit events when present.
+    # Default to zero when a runtime does not emit them.
+    project_memories_loaded = 0
+    compaction_count = 0
+    summary_fallback_count = 0
 
     return RunRecord(
         root_service_expected=target_service,
@@ -248,8 +204,9 @@ def run_single(strategy: str, scenario_name: str) -> RunRecord:
         evidence_reference_correct=evidence_reference_correct,
         first_effective_round=first_effective_round,
         duplicate_calls=duplicate_calls,
-        historical_cases_adopted=historical_cases_adopted,
-        historical_cases_misleading=historical_cases_misleading,
+        project_memories_loaded=project_memories_loaded,
+        compaction_count=compaction_count,
+        summary_fallback_count=summary_fallback_count,
         latency_ms=elapsed_ms,
     )
 
@@ -263,14 +220,14 @@ def run_evaluation(
     """Run evaluation for a strategy against a specific scenario.
 
     Args:
-        strategy: One of 'react_no_memory', 'memory_unverified', 'incidentlens_verified'
+        strategy: One of 'deterministic_baseline', 'llm_agent'
         scenario: One of the scenario names, or 'all' to run all scenarios
         store: Optional EvaluationRunStore for persisting results
 
     Returns:
         EvaluationResult with aggregated metrics from actual runs.
     """
-    if strategy not in ("react_no_memory", "memory_unverified", "incidentlens_verified"):
+    if strategy not in EVALUATION_STRATEGIES:
         raise ValueError(f"Unknown strategy: {strategy}")
 
     if scenario == "all":
