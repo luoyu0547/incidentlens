@@ -97,6 +97,8 @@ models:
     connect_timeout_seconds: 15
     read_timeout_seconds: 300
     max_retries: 2
+    context_window_tokens: 64000
+    reserved_output_tokens: 2048
 fallback_models: []
 """,
     )
@@ -104,3 +106,77 @@ fallback_models: []
     with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
         resolve_model_profile(config, "deepseek", {})
     assert RuntimeMode.DETERMINISTIC_BASELINE.value == "deterministic_baseline"
+
+
+def test_model_profile_defaults_include_token_fields(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        """
+active_model: deepseek
+models:
+  deepseek:
+    adapter: openai_compatible
+    model: deepseek-chat
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    connect_timeout_seconds: 15
+    read_timeout_seconds: 300
+    max_retries: 2
+fallback_models: []
+""",
+    )
+    config = load_models_config(path, {})
+    profile = config.models["deepseek"]
+    assert profile.context_window_tokens == 128_000
+    assert profile.reserved_output_tokens == 4_096
+
+
+def test_model_profile_accepts_custom_token_fields(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        """
+active_model: deepseek
+models:
+  deepseek:
+    adapter: openai_compatible
+    model: deepseek-chat
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    connect_timeout_seconds: 15
+    read_timeout_seconds: 300
+    max_retries: 2
+    context_window_tokens: 64000
+    reserved_output_tokens: 2048
+fallback_models: []
+""",
+    )
+    config = load_models_config(path, {})
+    profile = config.models["deepseek"]
+    assert profile.context_window_tokens == 64_000
+    assert profile.reserved_output_tokens == 2_048
+
+
+def test_resolved_profile_includes_token_fields(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        """
+active_model: deepseek
+models:
+  deepseek:
+    adapter: openai_compatible
+    model: deepseek-chat
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    connect_timeout_seconds: 15
+    read_timeout_seconds: 300
+    max_retries: 2
+    context_window_tokens: 64000
+    reserved_output_tokens: 2048
+fallback_models: []
+""",
+    )
+    environ = {"DEEPSEEK_API_KEY": "test-secret"}
+    config = load_models_config(path, environ)
+    resolved = resolve_model_profile(config, "deepseek", environ)
+    assert resolved.context_window_tokens == 64_000
+    assert resolved.reserved_output_tokens == 2_048

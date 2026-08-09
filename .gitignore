@@ -8,3 +8,6 @@ __pycache__/
 dist/
 .ruff_cache/
 .mypy_cache/
+.incidentlens/sessions/
+.incidentlens/task-outputs/
+.incidentlens/transcripts/

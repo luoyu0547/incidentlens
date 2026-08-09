@@ -20,6 +20,8 @@ class ModelProfile(BaseModel):
     connect_timeout_seconds: float = Field(default=15, gt=0)
     read_timeout_seconds: float = Field(default=300, gt=0)
     max_retries: int = Field(default=2, ge=0, le=2)
+    context_window_tokens: int = Field(default=128_000, gt=0)
+    reserved_output_tokens: int = Field(default=4_096, gt=0)
 
 
 class ModelsConfig(BaseModel):
@@ -47,6 +49,8 @@ class ResolvedModelProfile(BaseModel):
     connect_timeout_seconds: float
     read_timeout_seconds: float
     max_retries: int
+    context_window_tokens: int
+    reserved_output_tokens: int
 
 
 def load_models_config(path: Path, environ: Mapping[str, str]) -> ModelsConfig:
