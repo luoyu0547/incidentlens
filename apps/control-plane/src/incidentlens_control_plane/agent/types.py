@@ -59,6 +59,12 @@ class IncidentAgentState(AgentState):
     conclusion_attempt_count: NotRequired[int]
     last_report_rejection_reason: NotRequired[str | None]
 
+    # Session memory and compaction fields
+    session_memory_path: NotRequired[str | None]
+    session_memory_revision: NotRequired[int]
+    last_compaction_id: NotRequired[str | None]
+    pre_compact_transcript_path: NotRequired[str | None]
+
 
 class InvestigationContext(BaseModel):
     """Immutable context passed to agent nodes at invocation time."""
