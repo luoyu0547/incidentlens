@@ -38,7 +38,6 @@ def project_investigation_state(raw: Mapping[str, Any]) -> InvestigationState:
         evidence=evidence,
         report=raw.get("report"),
         phase=raw.get("phase", "parse_alert"),
-        retrieved_cases=raw.get("retrieved_cases", []),
         loaded_skill_names=raw.get("loaded_skill_names", []),
         model_profile=raw.get("model_profile", ""),
         model_call_count=raw.get("model_call_count", 0),
@@ -52,6 +51,4 @@ def project_investigation_state(raw: Mapping[str, Any]) -> InvestigationState:
         conclusion_status=raw.get("conclusion_status", "not_ready"),
         conclusion_attempt_count=raw.get("conclusion_attempt_count", 0),
         last_report_rejection_reason=raw.get("last_report_rejection_reason"),
-        case_id=raw.get("case_id"),
-        case_status=raw.get("case_status"),
     )

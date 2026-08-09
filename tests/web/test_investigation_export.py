@@ -1,9 +1,10 @@
-"""Tests for investigation export API — TDD RED phase.
+"""Tests for investigation export API.
 
 Covers:
   - GET /api/investigations/{incident_id}/export returns versioned,
     redacted, downloadable JSON
   - Missing investigation returns 404
+  - Export contains no case or case_usage payload
 """
 
 from __future__ import annotations
@@ -30,3 +31,12 @@ async def test_export_missing_investigation_is_404(export_client) -> None:
     """Export for a non-existent investigation returns 404."""
     response = await export_client.get("/api/investigations/missing/export")
     assert response.status_code == 404
+
+
+async def test_export_contains_no_case_payload(export_client) -> None:
+    """Export must not include case or case_usage keys."""
+    response = await export_client.get("/api/investigations/inc-api/export")
+    assert response.status_code == 200
+    body = response.json()
+    assert "case" not in body
+    assert "case_usage" not in body

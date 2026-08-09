@@ -21,7 +21,6 @@ router = APIRouter(prefix="/api/investigations", tags=["investigations"])
 # Engine and event bus are set by main.py during app startup
 _engine: Any = None
 _event_bus: EventBus | None = None
-_case_service: Any = None
 _export_service: Any = None
 
 # Track which tool_call audit entries have already been published as SSE events
@@ -40,12 +39,6 @@ def set_event_bus(bus: EventBus) -> None:
     """Set the event bus for publishing SSE events."""
     global _event_bus
     _event_bus = bus
-
-
-def set_case_service(service: Any) -> None:
-    """Set the case service for the export endpoint."""
-    global _case_service
-    _case_service = service
 
 
 def set_export_service(service: Any) -> None:
@@ -88,8 +81,6 @@ class InvestigationStateResponse(BaseModel):
     fallback_used: bool = False
     last_error_code: str | None = None
     last_checkpoint_id: str | None = None
-    case_id: int | None = None
-    case_status: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -116,8 +107,6 @@ def _build_state_response(state, *, include_mode: str = "") -> InvestigationStat
         fallback_used=getattr(state, "fallback_used", False),
         last_error_code=getattr(state, "last_error_code", None),
         last_checkpoint_id=getattr(state, "last_checkpoint_id", None),
-        case_id=getattr(state, "case_id", None),
-        case_status=getattr(state, "case_status", None),
     )
 
 

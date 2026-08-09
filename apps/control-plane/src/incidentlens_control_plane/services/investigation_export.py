@@ -1,7 +1,7 @@
 """InvestigationExportService — versioned, redacted investigation export.
 
 Builds a JSON export payload for a completed investigation, including
-the investigation state, associated case, audit trail, and usage events.
+the investigation state and audit trail.
 Applies sensitive-data redaction and enforces a maximum payload size.
 
 The export is suitable for download as a self-contained JSON file.
@@ -42,11 +42,9 @@ class InvestigationExportService:
         *,
         engine: Any,
         audit_store: InvestigationAuditStore,
-        case_service: Any,
     ) -> None:
         self._engine = engine
         self._audit_store = audit_store
-        self._case_service = case_service
 
     async def build_export(self, incident_id: str) -> dict[str, Any]:
         """Build a redacted export payload for the given investigation.
@@ -59,23 +57,13 @@ class InvestigationExportService:
         if state is None:
             raise InvestigationExportNotFound(incident_id)
 
-        # Gather case data by incident_id
-        case = self._case_service.get_by_incident(incident_id)
-
         # Gather audit trail
         audit = self._audit_store.list_for_incident(incident_id)
-
-        # Gather usage events
-        case_usage = self._case_service.list_usage(incident_id=incident_id)
 
         payload: dict[str, Any] = {
             "schema_version": EXPORT_SCHEMA_VERSION,
             "investigation": state.model_dump(mode="json"),
             "audit": audit,
-            "case": case,
-            "case_usage": [
-                ev.model_dump(mode="json") for ev in case_usage
-            ],
         }
 
         safe = redact_sensitive_payload(payload)

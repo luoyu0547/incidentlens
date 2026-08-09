@@ -71,21 +71,6 @@ def investigation_api_app(engine):
     return create_app(engine_override=AsyncBaselineAdapter(engine))
 
 
-@pytest.fixture()
-def case_api_app(engine):
-    """Create an app with an isolated governed case service."""
-    from incidentlens_control_plane.agent.runtime import AsyncBaselineAdapter
-    from incidentlens_control_plane.main import create_app
-    from incidentlens_control_plane.memory.repository import CaseRepository
-    from incidentlens_control_plane.memory.service import CaseService
-
-    repository = CaseRepository(create_engine("sqlite:///:memory:"))
-    return create_app(
-        engine_override=AsyncBaselineAdapter(engine),
-        case_service_override=CaseService(repository),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -594,66 +579,3 @@ class TestInvestigationAPI:
                 "/api/investigations/nonexistent-id/resume",
             )
         assert response.status_code == 404
-
-
-# ===================================================================
-# API ROUTES: case endpoints
-# ===================================================================
-
-
-class TestCaseAPI:
-    """Tests for the case memory API routes."""
-
-    @pytest.mark.asyncio
-    async def test_create_and_list_case_api(self, case_api_app) -> None:
-        """POST /api/cases creates a draft that GET /api/cases lists."""
-        from httpx import ASGITransport, AsyncClient
-        transport = ASGITransport(app=case_api_app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            create_response = await client.post(
-                "/api/cases",
-                json={
-                    "symptom": "order timeout",
-                    "affected_services": ["order-service"],
-                    "actor": "local-user",
-                },
-            )
-            list_response = await client.get("/api/cases")
-        assert create_response.status_code == 201
-        assert create_response.json()["status"] == "draft"
-        assert list_response.status_code == 200
-        assert [case["id"] for case in list_response.json()["cases"]] == [
-            create_response.json()["id"]
-        ]
-
-    @pytest.mark.asyncio
-    async def test_confirm_case_api(self, case_api_app) -> None:
-        """POST /api/cases/{case_id}/confirm should confirm a case."""
-        from httpx import ASGITransport, AsyncClient
-        transport = ASGITransport(app=case_api_app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            create_response = await client.post(
-                "/api/cases",
-                json={
-                    "symptom": "payment delay",
-                    "affected_services": ["payment-service"],
-                    "actor": "local-user",
-                    "root_cause_category": "downstream-timeout",
-                    "root_cause_description": "payment latency propagated upstream",
-                    "key_evidence": [{"evidence_id": "ev-1"}],
-                    "resolution": "remove downstream delay",
-                },
-            )
-            created = create_response.json()
-
-            confirm_response = await client.post(
-                f"/api/cases/{created['id']}/confirm",
-                json={
-                    "expected_version": created["revision"],
-                    "actor": "reviewer",
-                    "reason": "evidence checked",
-                },
-            )
-        assert create_response.status_code == 201
-        assert confirm_response.status_code == 200
-        assert confirm_response.json()["status"] == "human_verified"

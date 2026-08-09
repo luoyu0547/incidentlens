@@ -347,9 +347,6 @@ _PATCH_PATHS = {
     "TelemetryRepository": (
         "incidentlens_telemetry.repository.TelemetryRepository"
     ),
-    "CaseRepository": (
-        "incidentlens_control_plane.memory.repository.CaseRepository"
-    ),
     "InvestigationAuditStore": (
         "incidentlens_control_plane.agent.state.InvestigationAuditStore"
     ),
@@ -358,12 +355,6 @@ _PATCH_PATHS = {
     ),
     "DemoResetService": (
         "incidentlens_control_plane.services.demo_reset.DemoResetService"
-    ),
-    "CaseService": (
-        "incidentlens_control_plane.memory.service.CaseService"
-    ),
-    "HybridCaseRetriever": (
-        "incidentlens_control_plane.memory.retrieval.HybridCaseRetriever"
     ),
     "InvestigationExportService": (
         "incidentlens_control_plane.services.investigation_export.InvestigationExportService"
@@ -438,12 +429,9 @@ class TestFastAPIShutdown:
                 SkillRuntime={"return_value": MagicMock()},
                 create_engine={"return_value": MagicMock()},
                 TelemetryRepository={"return_value": MagicMock()},
-                CaseRepository={"return_value": MagicMock()},
                 InvestigationAuditStore={"return_value": MagicMock()},
                 ScenarioStore={"return_value": MagicMock()},
                 DemoResetService={"return_value": MagicMock()},
-                CaseService={"return_value": MagicMock()},
-                HybridCaseRetriever={"return_value": MagicMock()},
                 InvestigationExportService={"return_value": MagicMock()},
             )
             for p in patchers:
@@ -496,12 +484,9 @@ class TestFastAPIShutdown:
             SkillRuntime={"return_value": MagicMock()},
             create_engine={"return_value": MagicMock()},
             TelemetryRepository={"return_value": MagicMock()},
-            CaseRepository={"return_value": MagicMock()},
             InvestigationAuditStore={"return_value": MagicMock()},
             ScenarioStore={"return_value": MagicMock()},
             DemoResetService={"return_value": MagicMock()},
-            CaseService={"return_value": MagicMock()},
-            HybridCaseRetriever={"return_value": MagicMock()},
             InvestigationExportService={"return_value": MagicMock()},
         )
 
@@ -563,12 +548,9 @@ class TestFastAPIShutdown:
             SkillRuntime={"return_value": MagicMock()},
             create_engine={"return_value": MagicMock()},
             TelemetryRepository={"return_value": MagicMock()},
-            CaseRepository={"return_value": MagicMock()},
             InvestigationAuditStore={"return_value": MagicMock()},
             ScenarioStore={"return_value": MagicMock()},
             DemoResetService={"return_value": MagicMock()},
-            CaseService={"return_value": MagicMock()},
-            HybridCaseRetriever={"return_value": MagicMock()},
             InvestigationExportService={"return_value": MagicMock()},
         )
 

@@ -6,9 +6,6 @@ Provides:
   - POST /api/investigations/{incident_id}/round — run one round
   - POST /api/investigations/{incident_id}/resume — resume investigation
   - GET /api/investigations/{incident_id}/export — export investigation
-  - GET /api/cases/search — search verified cases
-  - POST /api/cases — save a new case
-  - POST /api/cases/{case_id}/confirm — confirm a case
   - GET /api/scenarios — list all scenario definitions
   - POST /api/scenarios/{name}/enable — activate a scenario
   - POST /api/scenarios/{name}/disable — deactivate a scenario
@@ -31,18 +28,11 @@ from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 
 from incidentlens_control_plane.events import _global_bus
-from incidentlens_control_plane.routes.cases import router as cases_router
-from incidentlens_control_plane.routes.cases import set_case_service as set_case_service_route
-from incidentlens_control_plane.routes.cases import set_repository as set_case_repository
-from incidentlens_control_plane.routes.cases import set_retriever as set_case_retriever
 from incidentlens_control_plane.routes.evaluations import router as evaluations_router
 from incidentlens_control_plane.routes.events import router as events_router
 from incidentlens_control_plane.routes.events import set_event_bus
 from incidentlens_control_plane.routes.investigations import (
     router as investigations_router,
-)
-from incidentlens_control_plane.routes.investigations import (
-    set_case_service as set_investigation_case_service,
 )
 from incidentlens_control_plane.routes.investigations import (
     set_engine as set_investigation_engine,
@@ -71,8 +61,6 @@ async def lifespan(
     app: FastAPI,
     *,
     engine_override=None,
-    case_service_override=None,
-    retriever_override=None,
 ) -> AsyncIterator[None]:
     """Async lifespan that owns all resource creation and teardown.
 
@@ -83,37 +71,29 @@ async def lifespan(
     from incidentlens_telemetry.database import create_engine
     from incidentlens_telemetry.repository import TelemetryRepository
 
-    if engine_override is not None or case_service_override is not None:
+    if engine_override is not None:
         set_investigation_engine(engine_override)
         set_event_bus(_global_bus)
         set_investigation_event_bus(_global_bus)
 
-        if case_service_override is not None:
-            set_case_service_route(case_service_override)
-            set_investigation_case_service(case_service_override)
+        # Build and wire the export service for test path
+        from incidentlens_control_plane.agent.state import InvestigationAuditStore
+        from incidentlens_control_plane.services.investigation_export import (
+            InvestigationExportService,
+        )
 
-            # Build and wire the export service for test path
-            from incidentlens_control_plane.agent.state import InvestigationAuditStore
-            from incidentlens_control_plane.services.investigation_export import (
-                InvestigationExportService,
-            )
+        # Use the engine's audit store if available, otherwise create a minimal one
+        audit_store = getattr(engine_override, "audit_store", None)
+        if audit_store is None:
+            from incidentlens_telemetry.database import create_engine as ce
+            _eng = ce("sqlite:///:memory:")
+            audit_store = InvestigationAuditStore(_eng)
 
-            # Use the engine's audit store if available, otherwise create a minimal one
-            audit_store = getattr(engine_override, "audit_store", None)
-            if audit_store is None:
-                from incidentlens_telemetry.database import create_engine as ce
-                _eng = ce("sqlite:///:memory:")
-                audit_store = InvestigationAuditStore(_eng)
-
-            export_svc = InvestigationExportService(
-                engine=engine_override,
-                audit_store=audit_store,
-                case_service=case_service_override,
-            )
-            set_investigation_export_service(export_svc)
-
-        if retriever_override is not None:
-            set_case_retriever(retriever_override)
+        export_svc = InvestigationExportService(
+            engine=engine_override,
+            audit_store=audit_store,
+        )
+        set_investigation_export_service(export_svc)
 
         yield
         return
@@ -130,9 +110,6 @@ async def lifespan(
     from incidentlens_control_plane.tools.query import ReadOnlyToolkit
 
     toolkit = ReadOnlyToolkit(telemetry_repo)
-    from incidentlens_control_plane.memory.repository import CaseRepository
-
-    case_repository = CaseRepository(db_engine)
     from incidentlens_control_plane.agent.state import InvestigationAuditStore
 
     audit_store = InvestigationAuditStore(db_engine)
@@ -146,24 +123,10 @@ async def lifespan(
 
     # Wire shared dependencies into route modules
     set_repository(telemetry_repo)
-    set_case_repository(case_repository)
     set_scenario_store(scenario_store)
     set_demo_reset_service(demo_reset_service)
     set_event_bus(_global_bus)
     set_investigation_event_bus(_global_bus)
-
-    # Build and wire case governance services
-    from incidentlens_control_plane.memory.service import CaseService
-
-    case_svc = CaseService(case_repository)
-    set_case_service_route(case_svc)
-    set_investigation_case_service(case_svc)
-
-    # Build and wire the hybrid retriever
-    from incidentlens_control_plane.memory.retrieval import HybridCaseRetriever
-
-    retriever = HybridCaseRetriever(case_repository)
-    set_case_retriever(retriever)
 
     # Build and wire the export service
     from incidentlens_control_plane.services.investigation_export import (
@@ -173,7 +136,6 @@ async def lifespan(
     export_svc = InvestigationExportService(
         engine=None,  # will be set after engine is built
         audit_store=audit_store,
-        case_service=case_svc,
     )
     set_investigation_export_service(export_svc)
 
@@ -293,8 +255,6 @@ async def lifespan(
 def create_app(
     *,
     engine_override=None,
-    case_service_override=None,
-    retriever_override=None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -311,10 +271,6 @@ def create_app(
         set_event_bus(_global_bus)
         set_investigation_event_bus(_global_bus)
 
-    if case_service_override is not None:
-        set_case_service_route(case_service_override)
-        set_investigation_case_service(case_service_override)
-
         # Build and wire the export service eagerly for test path
         from incidentlens_control_plane.agent.state import InvestigationAuditStore
         from incidentlens_control_plane.services.investigation_export import (
@@ -330,20 +286,14 @@ def create_app(
         export_svc = InvestigationExportService(
             engine=engine_override,
             audit_store=audit_store,
-            case_service=case_service_override,
         )
         set_investigation_export_service(export_svc)
-
-    if retriever_override is not None:
-        set_case_retriever(retriever_override)
 
     @asynccontextmanager
     async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with lifespan(
             app,
             engine_override=engine_override,
-            case_service_override=case_service_override,
-            retriever_override=retriever_override,
         ):
             yield
 
@@ -378,7 +328,6 @@ def create_app(
     # Include routes
     app.include_router(telemetry_router)
     app.include_router(investigations_router)
-    app.include_router(cases_router)
     app.include_router(events_router)
     app.include_router(scenarios_router)
     app.include_router(evaluations_router)
