@@ -90,6 +90,72 @@ class CompactionError(BaseModel):
         "invalid_state",
         "persistence_failed",
         "validation_failed",
+        "summary_failed",
+        "circuit_open",
+        "prompt_too_long",
     ]
     message: str
     details: dict[str, str | int | bool] = Field(default_factory=dict)
+
+
+class CompactionException(Exception):
+    """Exception raised during compaction operations.
+
+    Wraps a CompactionError data model for use as a raisable exception.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        details: dict[str, str | int | bool] | None = None,
+    ) -> None:
+        """Initialize the exception.
+
+        Args:
+            code: Error code from CompactionError codes.
+            message: Human-readable error message.
+            details: Optional additional error details.
+        """
+        self.error = CompactionError(
+            code=code,  # type: ignore[arg-type]
+            message=message,
+            details=details or {},
+        )
+        super().__init__(message)
+
+    @property
+    def code(self) -> str:
+        """Error code."""
+        return self.error.code
+
+    @property
+    def details(self) -> dict[str, str | int | bool]:
+        """Error details."""
+        return self.error.details
+
+
+class SummaryResult(BaseModel):
+    """Result of a summary generation operation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary_text: str = Field(min_length=1)
+    objective: str = Field(default="")
+    evidence_ids: list[str] = Field(default_factory=list)
+    verified_facts: list[str] = Field(default_factory=list)
+    rejected_directions: list[str] = Field(default_factory=list)
+    completed_work: list[str] = Field(default_factory=list)
+    next_action: str = Field(default="")
+    tokens_used: int = Field(default=0, ge=0)
+
+
+class TranscriptRecord(BaseModel):
+    """Record for persisting transcript to JSONL."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: str
+    content: str
+    timestamp: str = Field(default="")
+    metadata: dict[str, str | int | bool] = Field(default_factory=dict)
