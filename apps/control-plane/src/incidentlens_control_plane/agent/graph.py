@@ -1,19 +1,19 @@
 """Bounded LangChain agent graph for incident investigation.
 
-Composes the agent with:
-  - System prompt and context builder
-  - SkillRuntime middleware (filesystem, skills, audit)
-  - AuditMiddleware for audit logging
-  - EvidenceRecordingMiddleware for evidence extraction
-  - BudgetEnforcementMiddleware for model/tool call limits
-  - ReportGateMiddleware for evidence policy gating
-  - ConclusionBoundaryMiddleware for tool restriction during conclusion
+Composes the agent with middleware in deterministic order:
+  1. Project filesystem/Skill middleware
+  2. Project Memory injection
+  3. Investigation context
+  4. Audit/evidence/conclusion gates
+  5. Compaction
+  6. Report gate
 
 Uses only public LangChain/LangGraph APIs (create_agent, middleware).
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Sequence
 
 from langchain.agents import create_agent
@@ -50,6 +50,9 @@ def build_investigation_agent(
     audit_store: InvestigationAuditStore,
     fallback_models: Sequence[BaseChatModel] = (),
     allow_fallback: bool = True,
+    project_memory_runtime: Any | None = None,
+    compaction_runtime: Any | None = None,
+    model_identity: Any | None = None,
 ) -> Any:
     """Build a bounded investigation agent graph.
 
@@ -70,34 +73,93 @@ def build_investigation_agent(
     allow_fallback:
         Whether to add fallback model middleware. When False, no fallback
         middleware is added (used in testing).
+    project_memory_runtime:
+        Optional ProjectMemoryRuntime for memory injection middleware.
+    compaction_runtime:
+        Optional compaction runtime for context management middleware.
+    model_identity:
+        Optional ModelIdentity with context_window_tokens and
+        reserved_output_tokens for compaction thresholds.
 
     Returns
     -------
     A compiled LangGraph agent graph.
     """
-    # Build middleware list
+    # Build middleware list in deterministic order
     middleware: list[Any] = []
 
-    # Skill middleware (filesystem, skills, skill_read_audit)
+    # --- 1. Project filesystem/Skill middleware ---
     fs_middleware, skills_middleware, skill_audit = skill_runtime.middleware()
     middleware.extend([fs_middleware, skills_middleware, skill_audit])
 
-    # Audit middleware
+    # --- 2. Project Memory injection ---
+    if project_memory_runtime is not None:
+        from incidentlens_control_plane.project_memory.middleware import (
+            ProjectMemoryMiddleware,
+        )
+
+        memory_base = getattr(project_memory_runtime, "base_dir", Path("."))
+        middleware.append(ProjectMemoryMiddleware(base_dir=memory_base))  # type: ignore[arg-type]
+
+    # --- 3. Investigation context ---
     middleware.append(InvestigationContextMiddleware(skill_runtime=skill_runtime))  # type: ignore[arg-type]
+
+    # --- 4. Audit/evidence/conclusion gates ---
     middleware.append(AuditMiddleware(audit_store))  # type: ignore[arg-type]
     middleware.append(IncidentToolContextMiddleware())  # type: ignore[arg-type]
     middleware.append(DuplicateToolCallMiddleware())  # type: ignore[arg-type]
-
-    # Evidence recording middleware
     middleware.append(EvidenceRecordingMiddleware())  # type: ignore[arg-type]
-
-    # Conclusion boundary middleware (restricts tools during conclusion phase)
     middleware.append(ConclusionBoundaryMiddleware())  # type: ignore[arg-type]
-
-    # Budget enforcement middleware
     middleware.append(BudgetEnforcementMiddleware(model_limit=12, tool_limit=12))  # type: ignore[arg-type]
 
-    # Report gate middleware
+    # --- 5. Compaction ---
+    if compaction_runtime is not None:
+        from incidentlens_control_plane.compaction.middleware import (
+            CompactionMiddleware,
+            TranscriptStore,
+        )
+        from incidentlens_control_plane.compaction.session import (
+            SessionMemoryStore,
+        )
+        from incidentlens_control_plane.compaction.tool_budget import (
+            ToolOutputStore,
+        )
+
+        compaction_dir = Path(
+            getattr(compaction_runtime, "session_dir", ".incidentlens/sessions")
+        )
+        transcript_dir = Path(
+            getattr(compaction_runtime, "transcript_dir", ".incidentlens/transcripts")
+        )
+        task_output_dir = Path(
+            getattr(compaction_runtime, "task_output_dir", ".incidentlens/task-outputs")
+        )
+
+        session_store = SessionMemoryStore(base_dir=compaction_dir)
+        transcript_store = TranscriptStore(base_dir=transcript_dir)
+        tool_output_store = ToolOutputStore(base_dir=task_output_dir)
+
+        # Build model profile for compaction threshold
+        model_profile = None
+        if model_identity is not None:
+            ctx_tokens = getattr(model_identity, "context_window_tokens", 128_000)
+            res_tokens = getattr(model_identity, "reserved_output_tokens", 4_096)
+
+            class _ModelProfile:
+                context_window_tokens = ctx_tokens
+                reserved_output_tokens = res_tokens
+
+            model_profile = _ModelProfile()
+
+        middleware.append(CompactionMiddleware(  # type: ignore[arg-type]
+            runtime=None,
+            model_profile=model_profile,
+            session_store=session_store,
+            tool_output_store=tool_output_store,
+            transcript_store=transcript_store,
+        ))
+
+    # --- 6. Report gate ---
     middleware.append(ReportGateMiddleware(skill_runtime, audit_store=audit_store))  # type: ignore[arg-type]
 
     # Build the agent

@@ -83,15 +83,27 @@ class LLMInvestigationEngine:
         audit_store: InvestigationAuditStore,
         model_identity: ModelIdentity,
         total_timeout_seconds: float = 1200,
+        project_memory_runtime: Any | None = None,
+        compaction_runtime: Any | None = None,
     ) -> None:
         self._graph = graph
         self._audit_store = audit_store
         self._model_identity = model_identity
         self._total_timeout_seconds = total_timeout_seconds
+        self._project_memory_runtime = project_memory_runtime
+        self._compaction_runtime = compaction_runtime
 
     @property
     def audit_store(self) -> InvestigationAuditStore:
         return self._audit_store
+
+    @property
+    def project_memory_runtime(self) -> Any | None:
+        return self._project_memory_runtime
+
+    @property
+    def compaction_runtime(self) -> Any | None:
+        return self._compaction_runtime
 
     # ------------------------------------------------------------------
     # Public API

@@ -55,9 +55,9 @@ def build_investigation_engine(
     model_registry:
         ModelRegistry (required for LLM_AGENT mode).
     project_memory_runtime:
-        Optional project-level memory runtime (reserved for future use).
+        Optional project-level memory runtime for memory injection middleware.
     compaction_runtime:
-        Optional compaction runtime (reserved for future use).
+        Optional compaction runtime for context management middleware.
 
     Returns
     -------
@@ -98,12 +98,17 @@ def build_investigation_engine(
             checkpointer=checkpointer,
             audit_store=audit_store,
             allow_fallback=False,
+            project_memory_runtime=project_memory_runtime,
+            compaction_runtime=compaction_runtime,
+            model_identity=identity,
         )
 
         return LLMInvestigationEngine(  # type: ignore[return-value]
             graph=graph,
             audit_store=audit_store,
             model_identity=identity,
+            project_memory_runtime=project_memory_runtime,
+            compaction_runtime=compaction_runtime,
         )
 
     # DETERMINISTIC_BASELINE

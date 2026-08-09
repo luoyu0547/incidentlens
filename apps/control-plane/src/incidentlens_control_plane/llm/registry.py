@@ -16,6 +16,8 @@ class ModelIdentity:
     profile: str
     model: str
     endpoint_host: str
+    context_window_tokens: int = 128_000
+    reserved_output_tokens: int = 4_096
 
 
 class ModelRegistry:
@@ -81,4 +83,6 @@ class ModelRegistry:
             profile=name,
             model=profile.model,
             endpoint_host=urlsplit(str(profile.base_url)).netloc,
+            context_window_tokens=profile.context_window_tokens,
+            reserved_output_tokens=profile.reserved_output_tokens,
         )

@@ -1,9 +1,10 @@
 """Session memory compaction and persistence.
 
 Deterministic session memory projection and persistence for incident investigations.
-No model calls required — pure projection from state and messages.
+No model calls required -- pure projection from state and messages.
 """
 
+from incidentlens_control_plane.compaction.config import CompactionRuntimeConfig
 from incidentlens_control_plane.compaction.domain import (
     CompactionConfig,
     CompactionError,
@@ -47,6 +48,7 @@ __all__ = [
     "CompactionMiddleware",
     "CompactionOutcome",
     "CompactionResult",
+    "CompactionRuntimeConfig",
     "MessageGroup",
     "SessionMemorySnapshot",
     "SessionMemoryStore",

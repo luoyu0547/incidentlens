@@ -185,8 +185,14 @@ async def lifespan(
             build_investigation_engine,
         )
         from incidentlens_control_plane.agent.skills import SkillRuntime
+        from incidentlens_control_plane.compaction.config import (
+            CompactionRuntimeConfig,
+        )
         from incidentlens_control_plane.llm.config import load_models_config
         from incidentlens_control_plane.llm.registry import ModelRegistry
+        from incidentlens_control_plane.project_memory.runtime import (
+            ProjectMemoryRuntime,
+        )
 
         checkpoint_path = Path(
             os.environ.get("INCIDENTLENS_CHECKPOINT_DB", "agent_checkpoints.db")
@@ -194,6 +200,50 @@ async def lifespan(
         config_path = Path(
             os.environ.get("INCIDENTLENS_MODELS_CONFIG", "config/models.yaml")
         )
+
+        # Resolve memory and compaction paths from environment variables.
+        # For local non-Compose, default to paths beneath .incidentlens/.
+        memory_dir = Path(
+            os.environ.get(
+                "INCIDENTLENS_MEMORY_DIR",
+                ".incidentlens/memory",
+            )
+        )
+        session_dir = Path(
+            os.environ.get(
+                "INCIDENTLENS_SESSION_DIR",
+                ".incidentlens/sessions",
+            )
+        )
+        task_output_dir = Path(
+            os.environ.get(
+                "INCIDENTLENS_TASK_OUTPUT_DIR",
+                ".incidentlens/task-outputs",
+            )
+        )
+        transcript_dir = Path(
+            os.environ.get(
+                "INCIDENTLENS_TRANSCRIPT_DIR",
+                ".incidentlens/transcripts",
+            )
+        )
+
+        # Ensure directories exist
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        task_output_dir.mkdir(parents=True, exist_ok=True)
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create runtimes
+        project_memory_runtime = ProjectMemoryRuntime(base_dir=memory_dir)
+        project_memory_runtime.start()
+
+        compaction_runtime = CompactionRuntimeConfig(
+            session_dir=session_dir,
+            transcript_dir=transcript_dir,
+            task_output_dir=task_output_dir,
+        )
+
         models = load_models_config(config_path, os.environ)
         registry = ModelRegistry(models, os.environ)
         registry.get()  # startup validation and construction; no provider request
@@ -210,11 +260,16 @@ async def lifespan(
                 model_registry=registry,
                 checkpointer=checkpoints.saver,
                 skill_runtime=skill_runtime,
+                project_memory_runtime=project_memory_runtime,
+                compaction_runtime=compaction_runtime,
             )
             set_investigation_engine(runtime)
             # Update export service with the real engine
             export_svc._engine = runtime
             yield
+
+        # Shutdown: close memory runtime after all requests complete
+        await project_memory_runtime.close()
     else:
         from incidentlens_control_plane.agent.factory import (
             build_investigation_engine,

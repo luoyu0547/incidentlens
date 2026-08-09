@@ -74,6 +74,10 @@ services:
       - INCIDENTLENS_MODELS_CONFIG=/app/config/models.yaml
       - INCIDENTLENS_LLM_ACTIVE_MODEL=${INCIDENTLENS_LLM_ACTIVE_MODEL:-xfyun-xopglm51}
       - INCIDENTLENS_CHECKPOINT_DB=/data/agent_checkpoints.db
+      - INCIDENTLENS_MEMORY_DIR=/app/.incidentlens/memory
+      - INCIDENTLENS_SESSION_DIR=/data/incidentlens/sessions
+      - INCIDENTLENS_TASK_OUTPUT_DIR=/data/incidentlens/task-outputs
+      - INCIDENTLENS_TRANSCRIPT_DIR=/data/incidentlens/transcripts
       - XFYUN_MAAS_API_KEY=${XFYUN_MAAS_API_KEY:-}
     ports:
       - "8003:8003"
@@ -81,6 +85,7 @@ services:
       - control-plane-data:/data
       - ../../config:/app/config:ro
       - ../../skills:/app/skills:ro
+      - ../../.incidentlens/memory:/app/.incidentlens/memory
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/healthz')"]
       interval: 10s
