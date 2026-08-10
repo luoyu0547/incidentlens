@@ -7,14 +7,10 @@ from typing import Any, cast
 
 from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 
+from incidentlens_control_plane.routes import get_runtime
 from incidentlens_control_plane.runtime import RuntimeServices
 
 router = APIRouter(prefix="/api/events", tags=["events"])
-
-
-def _get_runtime(request: Request) -> RuntimeServices:
-    """Extract runtime services from request state."""
-    return cast(RuntimeServices, request.app.state.runtime)
 
 
 @router.get("")
@@ -24,7 +20,7 @@ async def list_events(
     limit: int = Query(100, ge=1, le=1000),
 ) -> list[dict[str, Any]]:
     """List runtime events after a given sequence."""
-    runtime = _get_runtime(request)
+    runtime = get_runtime(request)
     events = runtime.events.list_after(after, limit=limit)
     return [event.model_dump(mode="json") for event in events]
 

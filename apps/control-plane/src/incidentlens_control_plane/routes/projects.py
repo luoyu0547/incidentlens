@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -16,14 +16,9 @@ from incidentlens_control_plane.project_registry.store import (
 from incidentlens_control_plane.project_registry.types import (
     ProjectRegistration,
 )
-from incidentlens_control_plane.runtime import RuntimeServices
+from incidentlens_control_plane.routes import get_runtime
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
-
-
-def _get_runtime(request: Request) -> RuntimeServices:
-    """Extract runtime services from request state."""
-    return cast(RuntimeServices, request.app.state.runtime)
 
 
 @router.post("", status_code=201)
@@ -32,7 +27,7 @@ async def create_project(
     registration: ProjectRegistration,
 ) -> dict[str, Any]:
     """Create a new project registration."""
-    runtime = _get_runtime(request)
+    runtime = get_runtime(request)
     now = datetime.now(UTC)
 
     try:
@@ -57,7 +52,7 @@ async def create_project(
 @router.get("")
 async def list_projects(request: Request) -> list[dict[str, Any]]:
     """List all project registrations."""
-    runtime = _get_runtime(request)
+    runtime = get_runtime(request)
     records = runtime.projects.list()
     return [record.model_dump(mode="json") for record in records]
 
@@ -68,7 +63,7 @@ async def get_project(
     project_id: str,
 ) -> dict[str, Any]:
     """Get a project registration by ID."""
-    runtime = _get_runtime(request)
+    runtime = get_runtime(request)
 
     try:
         record = runtime.projects.get(project_id)
@@ -91,7 +86,7 @@ async def update_project(
             detail="Project ID in body does not match URL",
         )
 
-    runtime = _get_runtime(request)
+    runtime = get_runtime(request)
     now = datetime.now(UTC)
 
     try:
@@ -119,7 +114,7 @@ async def delete_project(
     project_id: str,
 ) -> None:
     """Delete a project registration."""
-    runtime = _get_runtime(request)
+    runtime = get_runtime(request)
     now = datetime.now(UTC)
 
     try:

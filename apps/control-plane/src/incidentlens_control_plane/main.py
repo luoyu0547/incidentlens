@@ -9,7 +9,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from incidentlens_control_plane.config import RuntimeSettings, build_runtime
+from incidentlens_control_plane.config import RuntimeSettings
+from incidentlens_control_plane.runtime import build_runtime
 
 
 @asynccontextmanager
