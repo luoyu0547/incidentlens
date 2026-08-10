@@ -1,9 +1,0 @@
-skill_name: deployment-regression
-cause_code: bad_deployment
-required_evidence_types:
-  - deployment
-  - log
-  - trace
-minimum_independent_evidence: 2
-direct_contradictions:
-  - the same failure predates the candidate deployment

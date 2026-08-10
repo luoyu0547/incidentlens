@@ -1,68 +1,26 @@
 [project]
 name = "incidentlens"
-version = "0.1.0"
-description = "Evidence-driven microservice incident investigation agent"
+version = "0.2.0"
+description = "A safety-first cloud incident investigation control plane"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.115,<1",
-    "incidentlens-contracts",
-    "incidentlens-telemetry",
-    "incidentlens-scenarios",
-    "incidentlens-service-common",
-    "incidentlens-control-plane",
-    "incidentlens-gateway-service",
-    "incidentlens-order-service",
-    "incidentlens-payment-service",
-    "incidentlens-evaluation",
-    "incidentlens-demo",
-    "packaging>=24,<27",
     "pydantic>=2.13,<3",
-    "sqlalchemy>=2.0,<3",
-    "httpx>=0.28,<1",
-    "sse-starlette>=2.0,<3",
-    "langchain>=1.3,<2",
-    "langgraph>=1.2,<2",
-    "langchain-openai>=1.4,<2",
-    "langgraph-checkpoint-sqlite>=3.1,<4",
-    "deepagents==0.6.12",
-    "pyyaml>=6.0,<7",
-    "types-PyYAML>=6.0,<7",
+    "uvicorn>=0.30,<1",
 ]
-
-[tool.uv.workspace]
-members = [
-    "packages/contracts",
-    "packages/telemetry",
-    "packages/scenarios",
-    "apps/shared-service",
-    "apps/gateway-service",
-    "apps/order-service",
-    "apps/payment-service",
-    "apps/control-plane",
-    "packages/evaluation",
-    "packages/demo",
-]
-
-[tool.uv.sources]
-incidentlens-contracts = { workspace = true }
-incidentlens-telemetry = { workspace = true }
-incidentlens-scenarios = { workspace = true }
-incidentlens-service-common = { workspace = true }
-incidentlens-control-plane = { workspace = true }
-incidentlens-gateway-service = { workspace = true }
-incidentlens-order-service = { workspace = true }
-incidentlens-payment-service = { workspace = true }
-incidentlens-evaluation = { workspace = true }
-incidentlens-demo = { workspace = true }
 
 [dependency-groups]
 dev = [
     "pytest>=8.0,<9",
-    "pytest-asyncio>=0.24,<1",
     "ruff>=0.8,<1",
-    "mypy>=1.13,<2",
-    "pyyaml>=6.0,<7",
 ]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["apps/control-plane/src/incidentlens_control_plane"]
 
 [tool.ruff]
 target-version = "py312"
@@ -73,8 +31,3 @@ select = ["E", "F", "I", "W"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
-markers = [
-    "integration: requires Docker Compose or service processes",
-    "live_llm: performs a real configured provider request",
-]

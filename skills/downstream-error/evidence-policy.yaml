@@ -1,9 +1,0 @@
-skill_name: downstream-error
-cause_code: payment_service_degradation
-required_evidence_types:
-  - trace
-  - log
-  - metric
-minimum_independent_evidence: 2
-direct_contradictions:
-  - downstream success and error rates remain at baseline
