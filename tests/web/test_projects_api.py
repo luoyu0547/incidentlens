@@ -93,3 +93,33 @@ def test_project_api_rejects_relative_source_path(
     """Test API rejects relative source paths."""
     invalid = {**payload, "local_source_paths": ["relative/source"]}
     assert client.post("/api/projects", json=invalid).status_code == 422
+
+
+def test_project_api_put_matching_id_returns_404_when_missing(
+    client: TestClient, payload: dict[str, object]
+) -> None:
+    # Create the project first
+    assert client.post("/api/projects", json=payload).status_code == 201
+
+    # Now try to PUT a different project_id that matches URL and body
+    unknown_payload = {**payload, "project_id": "unknown"}
+    assert client.put("/api/projects/unknown", json=unknown_payload).status_code == 404
+
+
+def test_project_api_list_is_sorted_by_project_id(client: TestClient) -> None:
+    # Create projects in non-alphabetical order
+    for pid, name in [("zebra", "Zebra"), ("alpha", "Alpha"), ("middle", "Middle")]:
+        client.post(
+            "/api/projects",
+            json={
+                "project_id": pid,
+                "display_name": name,
+                "local_source_paths": [],
+                "targets": [],
+                "services": [],
+            },
+        )
+
+    projects = client.get("/api/projects").json()
+    ids = [p["project_id"] for p in projects]
+    assert ids == sorted(ids)  # Should be alpha, middle, zebra
