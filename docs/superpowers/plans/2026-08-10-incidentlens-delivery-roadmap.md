@@ -18,6 +18,8 @@ Add reusable host SSH sessions, PTY/SFTP channels, remote Read/List/Search/Stat/
 
 Exit criterion: a Docker-backed SSH test target supports persistent working-directory state and safe multi-location edits without `vi`, `sed`, one-off Python scripts, or manual `scp`; all service interruptions require approval and every recursive-force `rm` is rejected.
 
+Detailed plan: `docs/superpowers/plans/2026-08-10-persistent-ssh-safe-changes.md`
+
 ## Phase 3: Hybrid Log Collection and Evidence Store
 
 Add on-demand Docker/file log queries, opt-in streaming collectors, cursors, SQLite FTS5 indexing, severity parsing, sensitive-data redaction, normal-log signals, service correlation, and immutable evidence references.
