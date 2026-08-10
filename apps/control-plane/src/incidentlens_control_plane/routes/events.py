@@ -1,78 +1,66 @@
-"""SSE events route for streaming investigation updates.
-
-Provides:
-  - GET /api/investigations/{incident_id}/events — SSE stream of investigation events
-
-Event types: state_changed, tool_called, evidence_recorded, report_ready
-"""
+"""Event stream HTTP API routes."""
 
 from __future__ import annotations
 
 import asyncio
-import logging
-from typing import Any
+from typing import Any, cast
 
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
-from sse_starlette.sse import EventSourceResponse
+from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 
-from incidentlens_control_plane.events import EventBus
+from incidentlens_control_plane.runtime import RuntimeServices
 
-logger = logging.getLogger("incidentlens_control_plane.events")
-
-router = APIRouter(prefix="/api/investigations", tags=["events"])
-
-# Global event bus — set by main.py during app startup
-_event_bus: EventBus | None = None
+router = APIRouter(prefix="/api/events", tags=["events"])
 
 
-def set_event_bus(bus: EventBus) -> None:
-    """Set the event bus for the SSE route."""
-    global _event_bus
-    _event_bus = bus
+def _get_runtime(request: Request) -> RuntimeServices:
+    """Extract runtime services from request state."""
+    return cast(RuntimeServices, request.app.state.runtime)
 
 
-async def _event_generator(
-    incident_id: str,
+@router.get("")
+async def list_events(
     request: Request,
-    bus: EventBus,
-) -> Any:
-    """Generate SSE events for a given investigation.
+    after: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+) -> list[dict[str, Any]]:
+    """List runtime events after a given sequence."""
+    runtime = _get_runtime(request)
+    events = runtime.events.list_after(after, limit=limit)
+    return [event.model_dump(mode="json") for event in events]
 
-    Yields events from the event bus until the client disconnects.
-    Sends a heartbeat every 15 seconds to keep the connection alive.
+
+@router.websocket("/ws")
+async def websocket_events(
+    websocket: WebSocket,
+    after: int = Query(0, ge=0),
+) -> None:
+    """WebSocket endpoint for real-time event streaming.
+
+    Replays historical events from the durable store, then streams
+    live events from the broker.
     """
-    subscriber = bus.subscribe(incident_id)
+    await websocket.accept()
+    runtime = cast(RuntimeServices, websocket.app.state.runtime)
+
     try:
-        while True:
-            if await request.is_disconnected():
-                break
-            try:
-                event = await asyncio.wait_for(subscriber.__anext__(), timeout=15.0)
-                yield event
-            except asyncio.TimeoutError:
-                # Send heartbeat comment to keep connection alive
-                yield ": heartbeat\n\n"
-    except Exception as e:
-        logger.warning(f"SSE event stream error: {e}")
-    finally:
-        bus.unsubscribe(incident_id, subscriber)
+        # Subscribe to live events before replay to avoid race conditions
+        async with runtime.broker.subscribe() as queue:
+            # Replay historical events
+            historical_events = runtime.events.list_after(after, limit=1000)
+            max_sequence = after
+            for event in historical_events:
+                await websocket.send_json(event.model_dump(mode="json"))
+                max_sequence = max(max_sequence, event.sequence)
 
-
-@router.get("/{incident_id}/events", response_model=None)
-async def investigation_events(
-    incident_id: str, request: Request
-) -> EventSourceResponse | JSONResponse:
-    """Stream SSE events for a specific investigation.
-
-    Event types: state_changed, tool_called, evidence_recorded, report_ready
-    """
-    if _event_bus is None:
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "Event bus not configured"},
-        )
-
-    return EventSourceResponse(
-        _event_generator(incident_id, request, _event_bus),
-    )
+            # Stream live events
+            while True:
+                try:
+                    event = await queue.get()
+                    # Skip events already sent during replay
+                    if event.sequence > max_sequence:
+                        await websocket.send_json(event.model_dump(mode="json"))
+                        max_sequence = event.sequence
+                except asyncio.TimeoutError:
+                    continue
+    except WebSocketDisconnect:
+        pass

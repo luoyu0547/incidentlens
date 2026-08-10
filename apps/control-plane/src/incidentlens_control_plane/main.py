@@ -48,6 +48,13 @@ def create_app(settings: RuntimeSettings | None = None) -> FastAPI:
         """Return process health without claiming any target is connected."""
         return {"status": "ok", "remote_execution": "not_configured"}
 
+    # Include routers
+    from incidentlens_control_plane.routes.events import router as events_router
+    from incidentlens_control_plane.routes.projects import router as projects_router
+
+    application.include_router(events_router)
+    application.include_router(projects_router)
+
     return application
 
 
