@@ -63,18 +63,18 @@ uv run uvicorn incidentlens_control_plane.main:app --reload
 
 ```bash
 # Health check
-curl http://127.0.0.1:8000/healthz
+curl http://127.0.0.1:8765/healthz
 
 # Create a project
-curl -X POST http://127.0.0.1:8000/api/projects \
+curl -X POST http://127.0.0.1:8765/api/projects \
   -H 'content-type: application/json' \
   -d '{"project_id":"demo","display_name":"Demo","local_source_paths":[],"targets":[],"services":[]}'
 
 # List projects
-curl http://127.0.0.1:8000/api/projects
+curl http://127.0.0.1:8765/api/projects
 
 # List events
-curl 'http://127.0.0.1:8000/api/events?after=0'
+curl 'http://127.0.0.1:8765/api/events?after=0'
 ```
 
 For detailed verification instructions, see [Phase 1 Verification Guide](docs/phase-1-local-runtime-verification.md).
