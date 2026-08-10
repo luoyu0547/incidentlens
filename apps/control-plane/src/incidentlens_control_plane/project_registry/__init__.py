@@ -14,7 +14,6 @@ __all__ = [
     "ProjectAlreadyExists",
     "ProjectNotFound",
     "ProjectRecord",
-    "ProjectRecord",
     "ProjectRegistryStore",
     "ProjectRegistration",
     "ServiceRegistration",
