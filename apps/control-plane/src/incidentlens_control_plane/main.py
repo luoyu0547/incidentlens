@@ -10,13 +10,19 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from incidentlens_control_plane.config import RuntimeSettings
+from incidentlens_control_plane.remote_ops.transport import RemoteTransportFactory
 from incidentlens_control_plane.runtime import build_runtime
 
 
 @asynccontextmanager
-async def _lifespan(app: FastAPI, settings: RuntimeSettings) -> AsyncIterator[None]:
+async def _lifespan(
+    app: FastAPI,
+    settings: RuntimeSettings,
+    *,
+    transport_factory: RemoteTransportFactory | None = None,
+) -> AsyncIterator[None]:
     """Build services on startup and close sessions on shutdown."""
-    services = build_runtime(settings)
+    services = build_runtime(settings, transport_factory=transport_factory)
     app.state.runtime = services
     try:
         yield
@@ -25,7 +31,11 @@ async def _lifespan(app: FastAPI, settings: RuntimeSettings) -> AsyncIterator[No
         app.state.runtime = None  # type: ignore[assignment]
 
 
-def create_app(settings: RuntimeSettings | None = None) -> FastAPI:
+def create_app(
+    settings: RuntimeSettings | None = None,
+    *,
+    transport_factory: RemoteTransportFactory | None = None,
+) -> FastAPI:
     """Create and configure the FastAPI application.
 
     When *settings* is ``None`` a default configuration is used (suitable for
@@ -36,7 +46,7 @@ def create_app(settings: RuntimeSettings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        async with _lifespan(app, settings):
+        async with _lifespan(app, settings, transport_factory=transport_factory):
             yield
 
     application = FastAPI(
@@ -51,11 +61,19 @@ def create_app(settings: RuntimeSettings | None = None) -> FastAPI:
         return {"status": "ok", "remote_execution": "not_configured"}
 
     # Include routers
+    from incidentlens_control_plane.routes.approvals import router as approvals_router
+    from incidentlens_control_plane.routes.changes import router as changes_router
     from incidentlens_control_plane.routes.events import router as events_router
     from incidentlens_control_plane.routes.projects import router as projects_router
+    from incidentlens_control_plane.routes.remote_sessions import (
+        router as remote_sessions_router,
+    )
 
+    application.include_router(approvals_router)
+    application.include_router(changes_router)
     application.include_router(events_router)
     application.include_router(projects_router)
+    application.include_router(remote_sessions_router)
 
     return application
 

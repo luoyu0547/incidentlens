@@ -19,6 +19,7 @@ from incidentlens_control_plane.remote_ops.asyncssh_adapter import (
 )
 from incidentlens_control_plane.remote_ops.gateway import RemoteToolGateway
 from incidentlens_control_plane.remote_ops.sessions import SessionManager
+from incidentlens_control_plane.remote_ops.transport import RemoteTransportFactory
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +37,11 @@ class RuntimeServices:
     remote_tools: RemoteToolGateway
 
 
-def build_runtime(settings: RuntimeSettings) -> RuntimeServices:
+def build_runtime(
+    settings: RuntimeSettings,
+    *,
+    transport_factory: RemoteTransportFactory | None = None,
+) -> RuntimeServices:
     """Build and initialize the local runtime services.
 
     Creates the data directory, initializes SQLite databases, and runs migrations
@@ -69,7 +74,7 @@ def build_runtime(settings: RuntimeSettings) -> RuntimeServices:
         broker=broker,
     )
 
-    sessions = SessionManager(AsyncSshTransportFactory())
+    sessions = SessionManager(transport_factory or AsyncSshTransportFactory())
     backups = EncryptedBackupVault(
         settings.data_dir / "vault",
         settings.data_dir / "vault.key",

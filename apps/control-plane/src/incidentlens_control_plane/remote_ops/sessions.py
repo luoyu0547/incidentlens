@@ -118,6 +118,25 @@ class SessionManager:
         self._sessions.clear()
         self._container_sessions.clear()
 
+    # --- public lookup helpers for API routes ---
+
+    def get_host_session(self, session_id: str) -> HostSession | None:
+        """Return a host session by its session id, or ``None``."""
+        return self._find_host_by_session_id(session_id)
+
+    def get_container_session(self, session_id: str) -> ContainerSession | None:
+        """Return a container session by its session id, or ``None``."""
+        return self._container_sessions.get(session_id)
+
+    async def find_live(self, target_id: str) -> HostSession | None:
+        """Return the live session for a target, or ``None`` if absent/stale."""
+        session = self._sessions.get(target_id)
+        if session is None:
+            return None
+        if await session.transport.is_alive():
+            return session
+        return None
+
     # --- internal helpers ---
 
     def _find_host_by_session_id(self, session_id: str) -> HostSession | None:

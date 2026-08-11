@@ -12,7 +12,7 @@ from incidentlens_control_plane.approvals.store import (
     ApprovalUnavailable,
     intent_sha256,
 )
-from incidentlens_control_plane.approvals.types import ApprovalRecord
+from incidentlens_control_plane.approvals.types import ApprovalRecord, ApprovalStatus
 from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.events.types import JsonValue, RuntimeEvent, RuntimeEventType
@@ -48,6 +48,12 @@ class ApprovalService:
         self._approvals = approvals
         self._events = events
         self._broker = broker
+
+    def list(
+        self, status: ApprovalStatus | None = None
+    ) -> tuple[ApprovalRecord, ...]:
+        """List approval records, optionally filtered by status."""
+        return self._approvals.list(status)
 
     async def request(
         self,

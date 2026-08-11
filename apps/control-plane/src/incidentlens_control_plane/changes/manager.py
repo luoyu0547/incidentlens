@@ -16,7 +16,7 @@ from typing import Any
 from incidentlens_control_plane.approvals.service import ApprovalService
 from incidentlens_control_plane.changes.backup import EncryptedBackupVault
 from incidentlens_control_plane.changes.store import ChangeSetStore
-from incidentlens_control_plane.changes.types import ChangeSetStatus, FileChange
+from incidentlens_control_plane.changes.types import ChangeSet, ChangeSetStatus, FileChange
 from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.events.types import RuntimeEvent, RuntimeEventType
@@ -244,6 +244,28 @@ class ChangeManager:
                 raise ChangeRollbackError(f"rollback of {path} failed: {exc}") from exc
 
         await self._transition(changeset_id, ChangeSetStatus.ROLLED_BACK)
+
+    def interrupts_service(self, changeset: ChangeSet) -> bool:
+        """Return whether rolling back this changeset interrupts a service.
+
+        A rollback interrupts a service when any changed file is a protected
+        path (compose/environment/Dockerfile/systemd or the service's
+        explicitly protected remote paths).
+        """
+        protected: tuple[PurePosixPath, ...] = ()
+        if self._projects is not None:
+            try:
+                record = self._projects.get(changeset.project_id)
+                for svc in record.services:
+                    if svc.compose_service == changeset.service_name:
+                        protected = svc.protected_remote_paths
+                        break
+            except Exception:
+                protected = ()
+        return any(
+            self._is_protected_path(PurePosixPath(file_change.remote_path), protected)
+            for file_change in changeset.files
+        )
 
     # ------------------------------------------------------------------
     # Transaction body

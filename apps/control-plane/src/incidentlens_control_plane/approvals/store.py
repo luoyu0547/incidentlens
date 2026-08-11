@@ -125,16 +125,41 @@ class ApprovalStore:
         if row is None:
             return None
 
+        return self._record_from_row(row)
+
+    def list(
+        self, status: ApprovalStatus | None = None
+    ) -> tuple[ApprovalRecord, ...]:
+        """List approval records, optionally filtered by status, oldest first."""
+        query = (
+            "SELECT approval_id, intent_sha256, intent_json, intent_summary, "
+            "status, created_at, expires_at, decided_at, consumed_at "
+            "FROM approvals"
+        )
+        params: tuple[object, ...] = ()
+        if status is not None:
+            query += " WHERE status = ?"
+            params = (status.value,)
+        query += " ORDER BY created_at"
+
+        with self._connection_factory() as conn:
+            cursor = conn.execute(query, params)
+            rows = cursor.fetchall()
+
+        return tuple(self._record_from_row(row) for row in rows)
+
+    @staticmethod
+    def _record_from_row(row: tuple[object, ...]) -> ApprovalRecord:
         return ApprovalRecord(
-            approval_id=row[0],
-            intent_sha256=row[1],
-            intent=json.loads(row[2]),
-            intent_summary=row[3],
-            status=ApprovalStatus(row[4]),
-            created_at=datetime.fromisoformat(row[5]),
-            expires_at=datetime.fromisoformat(row[6]),
-            decided_at=datetime.fromisoformat(row[7]) if row[7] else None,
-            consumed_at=datetime.fromisoformat(row[8]) if row[8] else None,
+            approval_id=str(row[0]),
+            intent_sha256=str(row[1]),
+            intent=json.loads(str(row[2])),
+            intent_summary=str(row[3]),
+            status=ApprovalStatus(str(row[4])),
+            created_at=datetime.fromisoformat(str(row[5])),
+            expires_at=datetime.fromisoformat(str(row[6])),
+            decided_at=datetime.fromisoformat(str(row[7])) if row[7] else None,
+            consumed_at=datetime.fromisoformat(str(row[8])) if row[8] else None,
         )
 
     def approve(self, approval_id: str, now: datetime) -> ApprovalRecord:

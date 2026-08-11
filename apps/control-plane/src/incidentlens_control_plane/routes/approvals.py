@@ -1,0 +1,80 @@
+"""Approval decision HTTP API routes.
+
+Responses use a dedicated view schema so the canonical intent mapping is never
+serialized; clients receive the redacted summary and lifecycle timestamps only.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
+
+from incidentlens_control_plane.approvals.store import ApprovalNotFound
+from incidentlens_control_plane.approvals.types import ApprovalRecord, ApprovalStatus
+from incidentlens_control_plane.routes import get_runtime
+
+router = APIRouter(prefix="/api/approvals", tags=["approvals"])
+
+
+class ApprovalView(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    approval_id: str = Field(min_length=1, max_length=120)
+    intent_summary: str = Field(min_length=1, max_length=1000)
+    status: ApprovalStatus
+    created_at: datetime
+    expires_at: datetime
+    decided_at: datetime | None
+    consumed_at: datetime | None
+
+
+def _to_view(record: ApprovalRecord) -> ApprovalView:
+    return ApprovalView(
+        approval_id=record.approval_id,
+        intent_summary=record.intent_summary,
+        status=record.status,
+        created_at=record.created_at,
+        expires_at=record.expires_at,
+        decided_at=record.decided_at,
+        consumed_at=record.consumed_at,
+    )
+
+
+@router.get("")
+async def list_approvals(
+    request: Request,
+    status: ApprovalStatus | None = Query(default=None),
+) -> list[dict[str, Any]]:
+    """List approval records, optionally filtered by status."""
+    runtime = get_runtime(request)
+    records = runtime.approvals.list(status)
+    return [_to_view(record).model_dump(mode="json") for record in records]
+
+
+@router.post("/{approval_id}/approve")
+async def approve_approval(request: Request, approval_id: str) -> dict[str, Any]:
+    """Approve a pending approval request. Single-use; repeats return 409."""
+    runtime = get_runtime(request)
+    try:
+        record = await runtime.approvals.approve(approval_id)
+    except ApprovalNotFound:
+        raise HTTPException(
+            status_code=409, detail="Approval not found or already decided"
+        )
+    return _to_view(record).model_dump(mode="json")
+
+
+@router.post("/{approval_id}/reject")
+async def reject_approval(request: Request, approval_id: str) -> dict[str, Any]:
+    """Reject a pending approval request. Single-use; repeats return 409."""
+    runtime = get_runtime(request)
+    try:
+        record = await runtime.approvals.reject(approval_id)
+    except ApprovalNotFound:
+        raise HTTPException(
+            status_code=409, detail="Approval not found or already decided"
+        )
+    return _to_view(record).model_dump(mode="json")

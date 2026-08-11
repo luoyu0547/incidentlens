@@ -24,6 +24,12 @@ class RuntimeEventType(StrEnum):
     DOCKER_ACTION_COMPLETED = "docker_action.completed"
     DOCKER_ACTION_FAILED = "docker_action.failed"
 
+    REMOTE_SESSION_CONNECTED = "remote_session.connected"
+    REMOTE_SESSION_DISCONNECTED = "remote_session.disconnected"
+    REMOTE_SESSION_FAILED = "remote_session.failed"
+    REMOTE_OPERATION_STARTED = "remote_operation.started"
+    REMOTE_OPERATION_COMPLETED = "remote_operation.completed"
+
 
 # JsonValue is a union type for JSON-serializable values
 # Using Any to avoid recursion issues with Pydantic
