@@ -261,3 +261,61 @@ async def test_search_skips_dot_dotdot_and_nonzero_size_directories() -> None:
         PurePosixPath("/opt/payments/app.py"),
         PurePosixPath("/opt/payments/subdir/nested.py"),
     }
+
+
+@pytest.mark.asyncio
+async def test_search_does_not_escape_root_via_dotdot_entry() -> None:
+    """A ``..`` directory entry is never walked: the parent directory is
+    outside the authorized root and must not yield search matches."""
+
+    class DotDotEscapeTransport(FakeTransport):
+        async def list_directory(self, path: PurePosixPath) -> tuple[FileMetadata, ...]:
+            if path == PurePosixPath("/opt/payments"):
+                return (
+                    FileMetadata(
+                        path=PurePosixPath("/opt/payments/.."),
+                        size=96,
+                        mode=0o40755,
+                        uid=1000,
+                        gid=1000,
+                        modified_ns=0,
+                        is_symlink=False,
+                    ),
+                    FileMetadata(
+                        path=PurePosixPath("/opt/payments/app.py"),
+                        size=10,
+                        mode=0o100644,
+                        uid=1000,
+                        gid=1000,
+                        modified_ns=0,
+                        is_symlink=False,
+                    ),
+                )
+            if path == PurePosixPath("/opt/payments/.."):
+                # The parent directory — a file here is outside the
+                # authorized root and must never be searched.
+                return (
+                    FileMetadata(
+                        path=PurePosixPath("/opt/secret.py"),
+                        size=21,
+                        mode=0o100644,
+                        uid=1000,
+                        gid=1000,
+                        modified_ns=0,
+                        is_symlink=False,
+                    ),
+                )
+            return ()
+
+        async def read_bytes(self, path: PurePosixPath, *, max_bytes: int) -> bytes:
+            if path.name == "app.py":
+                return b"print('root')\n"[:max_bytes]
+            if path.name == "secret.py":
+                return b"print('secret')\n"[:max_bytes]
+            return b""
+
+    tools = RemoteFileTools(DotDotEscapeTransport(target=None, _files={}))  # type: ignore[arg-type]
+    matches = await tools.search(PurePosixPath("/opt/payments"), "print")
+    assert {m.path for m in matches} == {
+        PurePosixPath("/opt/payments/app.py"),
+    }
