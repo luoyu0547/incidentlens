@@ -473,6 +473,118 @@ async def test_gateway_host_stat(gateway: RemoteToolGateway) -> None:
     assert result.size == len(b"print('hello')\n")
 
 
+class _SymlinkAwareTransport(FakeTransport):
+    """FakeTransport whose ``realpath`` resolves a fixed symlink map."""
+
+    def __init__(
+        self,
+        files: dict[PurePosixPath, bytes],
+        symlinks: dict[PurePosixPath, PurePosixPath],
+    ) -> None:
+        super().__init__(target=None, _files=files)  # type: ignore[arg-type]
+        self._symlinks = symlinks
+
+    async def realpath(self, path: PurePosixPath) -> PurePosixPath:
+        # Resolve the leftmost symlink prefix, then re-resolve from the target.
+        for i in range(1, len(path.parts) + 1):
+            prefix = PurePosixPath(*path.parts[:i])
+            if prefix in self._symlinks:
+                suffix = PurePosixPath(*path.parts[i:])
+                return await self.realpath(self._symlinks[prefix] / suffix)
+        return path
+
+
+class _SymlinkTransportFactory:
+    """Factory returning a single pre-configured symlink-aware transport."""
+
+    def __init__(self, transport) -> None:
+        self._transport = transport
+
+    async def connect(self, target: TargetRegistration):
+        return self._transport
+
+
+def _make_symlink_gateway(
+    project_record: ProjectRecord,
+    transport,
+) -> RemoteToolGateway:
+    sessions = SessionManager(_SymlinkTransportFactory(transport))
+    target_reg = project_record.targets[0]
+    return RemoteToolGateway(
+        projects=_FakeProjectRegistryStore(project_record),
+        sessions=sessions,
+        targets={target_reg.target_id: target_reg},
+    )
+
+
+@pytest.mark.asyncio
+async def test_gateway_host_read_rejects_symlink_component_escape(
+    project_record: ProjectRecord,
+) -> None:
+    """A read whose intermediate component is a symlink escaping the allowed
+    root is rejected before any bytes are read (matching the write path)."""
+    from incidentlens_control_plane.remote_ops.policy import RemotePathDenied
+
+    transport = _SymlinkAwareTransport(
+        files={PurePosixPath("/etc/passwd"): b"root:x:0:0\n"},
+        symlinks={PurePosixPath("/opt/link"): PurePosixPath("/etc")},
+    )
+    gw = _make_symlink_gateway(project_record, transport)
+
+    with pytest.raises(RemotePathDenied, match="escapes allowed root"):
+        await gw.read(
+            project_id="myproj",
+            target_id="dev-host",
+            service="web",
+            path=PurePosixPath("/opt/link/passwd"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_host_search_rejects_symlink_component_escape(
+    project_record: ProjectRecord,
+) -> None:
+    """Search canonicalizes its root so a symlinked root cannot be walked."""
+    from incidentlens_control_plane.remote_ops.policy import RemotePathDenied
+
+    transport = _SymlinkAwareTransport(
+        files={PurePosixPath("/etc/shadow"): b"root:!:12345::::::\n"},
+        symlinks={PurePosixPath("/opt/link"): PurePosixPath("/etc")},
+    )
+    gw = _make_symlink_gateway(project_record, transport)
+
+    with pytest.raises(RemotePathDenied, match="escapes allowed root"):
+        await gw.search(
+            project_id="myproj",
+            target_id="dev-host",
+            service="web",
+            path=PurePosixPath("/opt/link"),
+            query="root",
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_host_read_follows_symlink_inside_root(
+    project_record: ProjectRecord,
+) -> None:
+    """A symlink whose target stays inside the authorized root is resolved to
+    the target path and read succeeds (no over-rejection)."""
+    transport = _SymlinkAwareTransport(
+        files={PurePosixPath("/opt/real/app.py"): b"print('real')\n"},
+        symlinks={PurePosixPath("/opt/link"): PurePosixPath("/opt/real")},
+    )
+    gw = _make_symlink_gateway(project_record, transport)
+
+    result = await gw.read(
+        project_id="myproj",
+        target_id="dev-host",
+        service="web",
+        path=PurePosixPath("/opt/link/app.py"),
+    )
+    assert result.content == b"print('real')\n"
+    assert result.path == PurePosixPath("/opt/real/app.py")
+
+
 @pytest.mark.asyncio
 async def test_gateway_container_scope_unsupported(
     gateway: RemoteToolGateway,

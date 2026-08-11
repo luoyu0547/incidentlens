@@ -156,8 +156,11 @@ class RemoteFileTools:
                     continue
 
                 # ``.``/``..`` are never walked: they would recurse forever and
-                # could escape the authorized root.
-                if entry.path.name in (".", ".."):
+                # could escape the authorized root.  ``PurePosixPath`` collapses
+                # a trailing ``.``/``..``, so a ``.`` entry is the directory
+                # itself and a ``..`` entry is its parent — the old
+                # ``entry.path.name`` filter could never match either.
+                if entry.path == current or entry.path == current.parent:
                     continue
 
                 if self._is_directory_entry(entry):

@@ -523,20 +523,32 @@ def test_multi_location_edit_creates_encrypted_local_and_remote_backups(
         assert "MARKER_7 = 70" in text
         assert "hey {name}" in text
 
-        # An encrypted local backup exists and decrypts to the original bytes.
-        enc_files = list(harness.vault_root.rglob("*.enc"))
-        assert enc_files, "no encrypted local backup was created"
-        backup_ref = BackupReference(
-            local_path=enc_files[0], sha256=_sha256(original)
-        )
-        assert harness.vault.load(backup_ref) == original
-
         # A timestamped same-directory remote backup exists and equals the
         # original bytes.
         changeset = harness.store.get(result.changeset_id)
         assert changeset is not None
         file_change = changeset.files[0]
+
+        # An encrypted local backup exists and decrypts to the original bytes.
+        # Resolve it via the journal, NOT ``rglob``: the earlier ``write`` also
+        # produced a backup for this same remote path (its blob basename is a
+        # hash of the remote path, so it collides with the edit's basename and
+        # ``rglob`` order across the two changeset directories is
+        # filesystem-dependent).
         assert file_change.local_backup_ref is not None
+        local_backups = list(
+            (harness.vault_root / changeset.target_id / changeset.incident_id).glob(
+                f"{changeset.changeset_id}/*.enc"
+            )
+        )
+        assert len(local_backups) == 1, (
+            "expected exactly one encrypted local backup for this changeset"
+        )
+        backup_ref = BackupReference(
+            local_path=local_backups[0], sha256=_sha256(original)
+        )
+        assert harness.vault.load(backup_ref) == original
+
         remote_backup = PurePosixPath(file_change.remote_backup_path)
         assert ".incidentlens-backup." in remote_backup.name
         assert remote_backup.parent == path.parent

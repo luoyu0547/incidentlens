@@ -33,7 +33,10 @@ from incidentlens_control_plane.remote_ops.files import (
 )
 from incidentlens_control_plane.remote_ops.policy import RemotePathPolicy
 from incidentlens_control_plane.remote_ops.sessions import SessionManager
-from incidentlens_control_plane.remote_ops.transport import FileMetadata
+from incidentlens_control_plane.remote_ops.transport import (
+    FileMetadata,
+    RemoteTransport,
+)
 from incidentlens_control_plane.remote_ops.types import (
     ChangeSetRequest,
     ContainerScope,
@@ -242,10 +245,16 @@ class RemoteToolGateway:
         return HostScope()
 
     async def _authorize_path(
-        self, svc_registration: object, scope: RemoteScope, path: PurePosixPath, *, write: bool
+        self,
+        svc_registration: object,
+        scope: RemoteScope,
+        path: PurePosixPath,
+        *,
+        write: bool,
+        transport: RemoteTransport | None = None,
     ) -> PurePosixPath:
         policy = RemotePathPolicy(svc_registration)  # type: ignore[arg-type]
-        return await policy.authorize(scope, path, write=write, transport=None)
+        return await policy.authorize(scope, path, write=write, transport=transport)
 
     async def _connect(self, target_id: str) -> Any:
         target = self._targets.get(target_id)
@@ -282,13 +291,19 @@ class RemoteToolGateway:
     ) -> FileReadResult:
         _, svc = self._resolve_project_service(project_id, target_id, service)
         resolved_scope = self._make_scope(scope)
-        canonical = await self._authorize_path(svc, resolved_scope, path, write=False)
 
         if isinstance(resolved_scope, ContainerScope):
+            canonical = await self._authorize_path(
+                svc, resolved_scope, path, write=False
+            )
             backend = await self._container_backend(target_id, resolved_scope)
             raw = await backend.read_bytes(canonical, max_bytes=offset + limit)
             content = raw[offset:]
             meta = await backend.lstat(canonical)
+            if meta.is_symlink:
+                raise ContainerFileOperationUnsupported(
+                    f"symbolic links are not supported: {canonical}"
+                )
             truncated = (offset + limit) < meta.size
             return FileReadResult(
                 path=canonical,
@@ -298,8 +313,16 @@ class RemoteToolGateway:
                 truncated=truncated,
             )
 
-        tools = RemoteFileTools(await self._connect(target_id))
-        return await tools.read(canonical, offset=offset, limit=limit)
+        # Host scope: canonicalize through the live transport so intermediate
+        # symlink components are resolved and rejected exactly like the write
+        # path (ChangeManager).
+        transport = await self._connect(target_id)
+        canonical = await self._authorize_path(
+            svc, resolved_scope, path, write=False, transport=transport
+        )
+        return await RemoteFileTools(transport).read(
+            canonical, offset=offset, limit=limit
+        )
 
     async def list_dir(
         self,
@@ -318,9 +341,11 @@ class RemoteToolGateway:
                 "container directory listing is not supported"
             )
 
-        canonical = await self._authorize_path(svc, resolved_scope, path, write=False)
-        tools = RemoteFileTools(await self._connect(target_id))
-        return await tools.list(canonical)
+        transport = await self._connect(target_id)
+        canonical = await self._authorize_path(
+            svc, resolved_scope, path, write=False, transport=transport
+        )
+        return await RemoteFileTools(transport).list(canonical)
 
     async def search(
         self,
@@ -340,9 +365,11 @@ class RemoteToolGateway:
                 "container search is not supported"
             )
 
-        canonical = await self._authorize_path(svc, resolved_scope, path, write=False)
-        tools = RemoteFileTools(await self._connect(target_id))
-        return await tools.search(canonical, query)
+        transport = await self._connect(target_id)
+        canonical = await self._authorize_path(
+            svc, resolved_scope, path, write=False, transport=transport
+        )
+        return await RemoteFileTools(transport).search(canonical, query)
 
     async def stat(
         self,
@@ -355,9 +382,11 @@ class RemoteToolGateway:
     ) -> FileMetadata:
         _, svc = self._resolve_project_service(project_id, target_id, service)
         resolved_scope = self._make_scope(scope)
-        canonical = await self._authorize_path(svc, resolved_scope, path, write=False)
 
         if isinstance(resolved_scope, ContainerScope):
+            canonical = await self._authorize_path(
+                svc, resolved_scope, path, write=False
+            )
             backend = await self._container_backend(target_id, resolved_scope)
             meta = await backend.lstat(canonical)
             if meta.is_symlink:
@@ -366,8 +395,11 @@ class RemoteToolGateway:
                 )
             return meta
 
-        tools = RemoteFileTools(await self._connect(target_id))
-        return await tools.stat(canonical)
+        transport = await self._connect(target_id)
+        canonical = await self._authorize_path(
+            svc, resolved_scope, path, write=False, transport=transport
+        )
+        return await RemoteFileTools(transport).stat(canonical)
 
     # --- mutation API ---
 
