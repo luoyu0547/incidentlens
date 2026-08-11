@@ -38,6 +38,7 @@ class FakeTransport:
     closed: bool = False
     _sftp_opened: bool = False
     _sftp_closed: bool = False
+    _files: dict[PurePosixPath, bytes] = field(default_factory=dict)
 
     async def is_alive(self) -> bool:
         return self.alive
@@ -45,7 +46,17 @@ class FakeTransport:
     async def realpath(self, path: PurePosixPath) -> PurePosixPath:
         return path
 
-    async def lstat(self, path: PurePosixPath) -> FileMetadata:  # noqa: ARG002
+    async def lstat(self, path: PurePosixPath) -> FileMetadata:
+        if path in self._files:
+            return FileMetadata(
+                path=path,
+                size=len(self._files[path]),
+                mode=0o644,
+                uid=1000,
+                gid=1000,
+                modified_ns=0,
+                is_symlink=False,
+            )
         return FileMetadata(
             path=path,
             size=0,
@@ -56,11 +67,26 @@ class FakeTransport:
             is_symlink=False,
         )
 
-    async def read_bytes(self, path: PurePosixPath, *, max_bytes: int) -> bytes:  # noqa: ARG002
-        return b""
+    async def read_bytes(self, path: PurePosixPath, *, max_bytes: int) -> bytes:
+        data = self._files.get(path, b"")
+        return data[:max_bytes]
 
-    async def list_directory(self, path: PurePosixPath) -> tuple[FileMetadata, ...]:  # noqa: ARG002
-        return ()
+    async def list_directory(self, path: PurePosixPath) -> tuple[FileMetadata, ...]:
+        entries: list[FileMetadata] = []
+        for file_path, data in self._files.items():
+            if file_path.parent == path:
+                entries.append(
+                    FileMetadata(
+                        path=file_path,
+                        size=len(data),
+                        mode=0o644,
+                        uid=1000,
+                        gid=1000,
+                        modified_ns=0,
+                        is_symlink=False,
+                    )
+                )
+        return tuple(entries)
 
     async def write_bytes(
         self, path: PurePosixPath, content: bytes, *, mode: int  # noqa: ARG002

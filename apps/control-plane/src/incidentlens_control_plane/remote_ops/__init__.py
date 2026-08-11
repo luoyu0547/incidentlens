@@ -5,7 +5,24 @@ general-purpose shell or SSH tool.
 """
 
 from incidentlens_control_plane.remote_ops.asyncssh_adapter import AsyncSshTransportFactory
-from incidentlens_control_plane.remote_ops.policy import RemoteOperationPolicy
+from incidentlens_control_plane.remote_ops.files import (
+    ContainerFileOperationUnsupported,
+    FileReadResult,
+    RemoteFileError,
+    RemoteFileTools,
+    SearchMatch,
+)
+from incidentlens_control_plane.remote_ops.gateway import (
+    CommandForbidden,
+    Gateway,
+    RemoteToolGateway,
+    ShellResult,
+)
+from incidentlens_control_plane.remote_ops.policy import (
+    RemoteOperationPolicy,
+    RemotePathDenied,
+    RemotePathPolicy,
+)
 from incidentlens_control_plane.remote_ops.sessions import (
     ContainerSession,
     HostSession,
@@ -49,7 +66,9 @@ __all__ = [
     "AsyncSshTransportFactory",
     "ChangeControls",
     "ChangeSetRequest",
+    "CommandForbidden",
     "CommandResult",
+    "ContainerFileOperationUnsupported",
     "ContainerScope",
     "ContainerSession",
     "DockerActionKind",
@@ -59,7 +78,9 @@ __all__ = [
     "FileMutationRequest",
     "FileOperationKind",
     "FileOperationRequest",
+    "FileReadResult",
     "FileWriteRequest",
+    "Gateway",
     "HostScope",
     "HostSession",
     "OperationKind",
@@ -67,17 +88,24 @@ __all__ = [
     "RemoteAction",
     "RemoteConnectionError",
     "RemoteError",
+    "RemoteFileError",
+    "RemoteFileTools",
     "RemoteOperationPolicy",
+    "RemotePathDenied",
     "RemotePathError",
+    "RemotePathPolicy",
     "RemoteProcess",
     "RemoteScope",
     "RemoteTimeoutError",
+    "RemoteToolGateway",
     "RemoteTransport",
     "RemoteTransportFactory",
     "RuntimeKind",
     "ScopeKind",
+    "SearchMatch",
     "SessionManager",
     "ShellRequest",
+    "ShellResult",
     "TargetProfile",
     "TextReplacement",
 ]

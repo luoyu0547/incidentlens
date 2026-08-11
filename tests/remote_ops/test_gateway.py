@@ -1,19 +1,33 @@
-"""Tests for the Gateway class with three-tier command routing."""
+"""Tests for Gateway and RemoteToolGateway with scoped file tools."""
 
 import asyncio
 import sqlite3
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from incidentlens_control_plane.approvals.service import ApprovalService
 from incidentlens_control_plane.approvals.store import ApprovalStore
 from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
+from incidentlens_control_plane.project_registry.types import (
+    ProjectRecord,
+    ServiceRegistration,
+    TargetRegistration,
+)
+from incidentlens_control_plane.remote_ops.fakes import FakeTransport, FakeTransportFactory
+from incidentlens_control_plane.remote_ops.files import (
+    ContainerFileOperationUnsupported,
+    FileReadResult,
+    SearchMatch,
+)
 from incidentlens_control_plane.remote_ops.gateway import (
     CommandForbidden,
     Gateway,
+    RemoteToolGateway,
 )
+from incidentlens_control_plane.remote_ops.sessions import SessionManager
+from incidentlens_control_plane.remote_ops.transport import FileMetadata
 from incidentlens_control_plane.remote_ops.types import (
     ContainerScope,
     OperationRisk,
@@ -306,3 +320,219 @@ class TestApprovalRequiredFlow:
             assert "unavailable" in result2.reason.lower()
 
         asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# RemoteToolGateway tests
+# ---------------------------------------------------------------------------
+
+_HOST_FS: dict[PurePosixPath, bytes] = {
+    PurePosixPath("/opt/app.py"): b"print('hello')\n",
+    PurePosixPath("/opt/lib.py"): b"# lib\nx = 1\n",
+}
+
+
+class _FakeProjectRegistryStore:
+    """Minimal in-memory project registry for gateway tests."""
+
+    def __init__(self, record: ProjectRecord) -> None:
+        self._record = record
+
+    def get(self, project_id: str) -> ProjectRecord:
+        if project_id != self._record.project_id:
+            from incidentlens_control_plane.project_registry.store import (
+                ProjectNotFound,
+            )
+
+            raise ProjectNotFound(f"project {project_id!r} not found")
+        return self._record
+
+
+class _FileTransportFactory(FakeTransportFactory):
+    """Factory that returns transports with preloaded files."""
+
+    def __init__(self, files: dict[PurePosixPath, bytes]) -> None:
+        super().__init__()
+        self._files = files
+
+    async def connect(self, target: TargetRegistration) -> FakeTransport:
+        transport = FakeTransport(target=target, _files=self._files)
+        self.connect_calls.append(target)
+        self.transports.append(transport)
+        return transport
+
+
+@pytest.fixture
+def project_record() -> ProjectRecord:
+    return ProjectRecord(
+        project_id="myproj",
+        display_name="My Project",
+        targets=(
+            TargetRegistration(
+                target_id="dev-host",
+                host="10.0.0.1",
+                ssh_user="deploy",
+            ),
+        ),
+        services=(
+            ServiceRegistration(
+                compose_service="web",
+                container_names=("web-1",),
+                allowed_host_paths=(PurePosixPath("/opt"),),
+                allowed_container_paths=(PurePosixPath("/app"),),
+            ),
+        ),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+
+@pytest.fixture
+def session_manager() -> SessionManager:
+    factory = _FileTransportFactory(_HOST_FS)
+    return SessionManager(factory)
+
+
+@pytest.fixture
+def gateway(
+    project_record: ProjectRecord,
+    session_manager: SessionManager,
+) -> RemoteToolGateway:
+    projects = _FakeProjectRegistryStore(project_record)
+    target_reg = project_record.targets[0]
+    return RemoteToolGateway(
+        projects=projects,
+        sessions=session_manager,
+        targets={target_reg.target_id: target_reg},
+    )
+
+
+@pytest.mark.asyncio
+async def test_gateway_host_read(gateway: RemoteToolGateway) -> None:
+    result = await gateway.read(
+        project_id="myproj",
+        target_id="dev-host",
+        service="web",
+        path=PurePosixPath("/opt/app.py"),
+    )
+    assert isinstance(result, FileReadResult)
+    assert result.content == b"print('hello')\n"
+    assert result.path == PurePosixPath("/opt/app.py")
+
+
+@pytest.mark.asyncio
+async def test_gateway_host_list(gateway: RemoteToolGateway) -> None:
+    result = await gateway.list_dir(
+        project_id="myproj",
+        target_id="dev-host",
+        service="web",
+        path=PurePosixPath("/opt"),
+    )
+    assert isinstance(result, tuple)
+    names = {m.path.name for m in result}
+    assert "app.py" in names
+    assert "lib.py" in names
+
+
+@pytest.mark.asyncio
+async def test_gateway_host_search(gateway: RemoteToolGateway) -> None:
+    result = await gateway.search(
+        project_id="myproj",
+        target_id="dev-host",
+        service="web",
+        path=PurePosixPath("/opt"),
+        query="print",
+    )
+    assert isinstance(result, tuple)
+    assert len(result) >= 1
+    assert isinstance(result[0], SearchMatch)
+    assert "print" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_gateway_host_stat(gateway: RemoteToolGateway) -> None:
+    result = await gateway.stat(
+        project_id="myproj",
+        target_id="dev-host",
+        service="web",
+        path=PurePosixPath("/opt/app.py"),
+    )
+    assert isinstance(result, FileMetadata)
+    assert result.path == PurePosixPath("/opt/app.py")
+    assert result.size == len(b"print('hello')\n")
+
+
+@pytest.mark.asyncio
+async def test_gateway_container_scope_unsupported(
+    gateway: RemoteToolGateway,
+) -> None:
+    with pytest.raises(ContainerFileOperationUnsupported):
+        await gateway.read(
+            project_id="myproj",
+            target_id="dev-host",
+            service="web",
+            path=PurePosixPath("/app/file.py"),
+            scope={"kind": "container", "container": "web-1"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_unknown_project_raises(
+    session_manager: SessionManager,
+    project_record: ProjectRecord,
+) -> None:
+    projects = _FakeProjectRegistryStore(project_record)
+    target_reg = project_record.targets[0]
+    gw = RemoteToolGateway(
+        projects=projects,
+        sessions=session_manager,
+        targets={target_reg.target_id: target_reg},
+    )
+    with pytest.raises(Exception):
+        await gw.read(
+            project_id="nonexistent",
+            target_id="dev-host",
+            service="web",
+            path=PurePosixPath("/opt/app.py"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_unknown_target_raises(
+    session_manager: SessionManager,
+    project_record: ProjectRecord,
+) -> None:
+    projects = _FakeProjectRegistryStore(project_record)
+    gw = RemoteToolGateway(
+        projects=projects,
+        sessions=session_manager,
+        targets={},
+    )
+    with pytest.raises(ValueError, match="not registered"):
+        await gw.read(
+            project_id="myproj",
+            target_id="missing-target",
+            service="web",
+            path=PurePosixPath("/opt/app.py"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_unknown_service_raises(
+    session_manager: SessionManager,
+    project_record: ProjectRecord,
+) -> None:
+    projects = _FakeProjectRegistryStore(project_record)
+    target_reg = project_record.targets[0]
+    gw = RemoteToolGateway(
+        projects=projects,
+        sessions=session_manager,
+        targets={target_reg.target_id: target_reg},
+    )
+    with pytest.raises(ValueError, match="not found"):
+        await gw.read(
+            project_id="myproj",
+            target_id="dev-host",
+            service="nonexistent",
+            path=PurePosixPath("/opt/app.py"),
+        )

@@ -13,7 +13,6 @@ from incidentlens_control_plane.approvals.service import (
 )
 from incidentlens_control_plane.approvals.store import ApprovalNotFound
 from incidentlens_control_plane.project_registry.store import (
-    ProjectNotFound,
     ProjectRegistryStore,
 )
 from incidentlens_control_plane.project_registry.types import (
@@ -206,9 +205,6 @@ class RemoteToolGateway:
     async def _authorize_host_path(
         self, svc_registration: object, path: PurePosixPath, *, write: bool
     ) -> PurePosixPath:
-        from incidentlens_control_plane.project_registry.types import (
-            ServiceRegistration,
-        )
 
         policy = RemotePathPolicy(svc_registration)  # type: ignore[arg-type]
         return await policy.authorize(HostScope(), path, write=write)
