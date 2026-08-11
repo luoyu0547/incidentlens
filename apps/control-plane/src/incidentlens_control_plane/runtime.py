@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
+from incidentlens_control_plane.approvals.store import ApprovalStore
 from incidentlens_control_plane.config import RuntimeSettings
 from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
@@ -18,6 +19,7 @@ class RuntimeServices:
     projects: ProjectRegistryStore
     events: RuntimeEventStore
     broker: RuntimeEventBroker
+    approvals: ApprovalStore
 
 
 def build_runtime(settings: RuntimeSettings) -> RuntimeServices:
@@ -37,10 +39,13 @@ def build_runtime(settings: RuntimeSettings) -> RuntimeServices:
 
     projects = ProjectRegistryStore(connect)
     events = RuntimeEventStore(connect)
+    approvals = ApprovalStore(connect)
     projects.migrate()
     events.migrate()
+    approvals.migrate()
     return RuntimeServices(
         projects=projects,
         events=events,
         broker=RuntimeEventBroker(),
+        approvals=approvals,
     )
