@@ -197,7 +197,12 @@ class ChangeManager:
         changeset_id: str,
         approval_id: str | None = None,
     ) -> None:
-        """Restore every applied file of a changeset from its verified backup."""
+        """Restore every applied file of a changeset from its verified backup.
+
+        A service-interrupting rollback requires an exact approval regardless
+        of caller.  The approval is consumed only after transport resolution
+        succeeds, so a failed lookup never burns a single-use approval.
+        """
         changeset = self._store.get(changeset_id)
         if changeset is None:
             raise ChangeRollbackError(f"changeset {changeset_id!r} not found")
@@ -205,6 +210,13 @@ class ChangeManager:
             raise ChangeRollbackError(
                 f"cannot roll back changeset in status {changeset.status.value}"
             )
+
+        if self.interrupts_service(changeset) and approval_id is None:
+            raise ChangeRollbackError(
+                "an approval is required to roll back a service-interrupting changeset"
+            )
+
+        transport = await self._resolve_transport_for(changeset.target_id)
 
         if approval_id is not None and self._approvals is not None:
             intent = {
@@ -214,8 +226,6 @@ class ChangeManager:
                 "service": changeset.service_name,
             }
             await self._approvals.consume(approval_id, intent)
-
-        transport = await self._resolve_transport_for(changeset.target_id)
 
         for file_change in reversed(changeset.files):
             if not file_change.applied:

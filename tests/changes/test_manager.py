@@ -9,14 +9,27 @@ from pathlib import Path, PurePosixPath
 from unittest.mock import patch
 
 import pytest
+from incidentlens_control_plane.approvals.service import ApprovalService
+from incidentlens_control_plane.approvals.store import ApprovalStore
+from incidentlens_control_plane.approvals.types import ApprovalStatus
 from incidentlens_control_plane.changes.backup import EncryptedBackupVault
-from incidentlens_control_plane.changes.manager import ChangeManager
+from incidentlens_control_plane.changes.manager import (
+    ChangeApplyError,
+    ChangeManager,
+    ChangeRollbackError,
+)
 from incidentlens_control_plane.changes.store import ChangeSetStore
-from incidentlens_control_plane.changes.types import ChangeSetStatus
+from incidentlens_control_plane.changes.types import ChangeSetStatus, FileChange
+from incidentlens_control_plane.events.broker import RuntimeEventBroker
+from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.project_registry.types import ServiceRegistration
-from incidentlens_control_plane.remote_ops.fakes import FakeChangeTransport
+from incidentlens_control_plane.remote_ops.fakes import (
+    FakeChangeTransport,
+    FakeTransportFactory,
+)
 from incidentlens_control_plane.remote_ops.files import ContainerFileBackend
 from incidentlens_control_plane.remote_ops.policy import RemotePathPolicy
+from incidentlens_control_plane.remote_ops.sessions import SessionManager
 from incidentlens_control_plane.remote_ops.types import (
     ChangeSetRequest,
     ContainerScope,
@@ -77,6 +90,51 @@ def two_file_edit_request() -> ChangeSetRequest:
         edit("/opt/payments/a.py", b"old-a\n", "old-a", "new-a"),
         edit("/opt/payments/b.py", b"old-b\n", "old-b", "new-b"),
     )
+
+
+def seed_applied_changeset(
+    store: ChangeSetStore,
+    *,
+    changeset_id: str = "chg-applied",
+    remote_path: str = "/opt/payments/app.py",
+) -> str:
+    """Persist an APPLIED changeset directly, without touching a transport."""
+    store.create_changeset(
+        changeset_id=changeset_id,
+        incident_id="inc-1",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        files=(
+            FileChange(
+                file_change_id="op-1",
+                scope="host",
+                remote_path=remote_path,
+                expected_sha256=None,
+                replacement_sha256="b" * 64,
+                diff_text="",
+                original_metadata={},
+                local_backup_ref="backup.enc",
+                remote_backup_path=(
+                    f"{remote_path}.incidentlens-backup.20260810T120000.000000Z"
+                ),
+                temp_path=None,
+                applied=True,
+                validation_result="validated",
+                rollback_result=None,
+            ),
+        ),
+        verification_plan="run syntax checks and compare service behavior",
+        rollback_plan="restore the verified timestamped backup",
+    )
+    for status in (
+        ChangeSetStatus.PREFLIGHTED,
+        ChangeSetStatus.LOCALLY_BACKED_UP,
+        ChangeSetStatus.REMOTELY_BACKED_UP,
+        ChangeSetStatus.APPLIED,
+    ):
+        store.transition(changeset_id, status)
+    return changeset_id
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +490,78 @@ def test_rollback_restores_applied_changeset(
 
     assert fake_transport.files[PurePosixPath("/opt/payments/app.py")] == b"old\n"
     assert change_manager._store.get("chg-1").status is ChangeSetStatus.ROLLED_BACK
+
+
+def test_rollback_protected_path_requires_approval(
+    change_manager: ChangeManager,
+) -> None:
+    """A service-interrupting rollback is gated at the domain layer."""
+    changeset_id = seed_applied_changeset(
+        change_manager._store, remote_path="/opt/payments/.env"
+    )
+
+    with pytest.raises(ChangeRollbackError, match="approval"):
+        asyncio.run(change_manager.rollback(changeset_id))
+
+    # The changeset is untouched because the gate fires before any transport call.
+    assert change_manager._store.get(changeset_id).status is ChangeSetStatus.APPLIED
+
+
+def test_rollback_transport_failure_does_not_consume_approval(tmp_path: Path) -> None:
+    """A transport-resolution failure must not burn a single-use approval."""
+    db_path = tmp_path / "rollback.db"
+
+    def connect() -> sqlite3.Connection:
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    approval_store = ApprovalStore(connect)
+    events = RuntimeEventStore(connect)
+    broker = RuntimeEventBroker()
+    approval_store.migrate()
+    events.migrate()
+
+    approvals = ApprovalService(
+        approvals=approval_store,
+        events=events,
+        broker=broker,
+    )
+    changeset_id = "chs-rollback-transport"
+    intent = {
+        "kind": "rollback",
+        "changeset_id": changeset_id,
+        "target_id": "dev-a",
+        "service": "payment-api",
+    }
+    record = asyncio.run(approvals.request(intent))
+    asyncio.run(approvals.approve(record.approval_id))
+
+    store = ChangeSetStore(connect)
+    store.migrate()
+    seed_applied_changeset(
+        store, changeset_id=changeset_id, remote_path="/opt/payments/.env"
+    )
+    vault = EncryptedBackupVault(tmp_path / "backups", tmp_path / "key.bin")
+
+    # Sessions configured but no target registered -> transport resolution fails.
+    manager = ChangeManager(
+        store=store,
+        vault=vault,
+        approvals=approvals,
+        sessions=SessionManager(FakeTransportFactory()),
+        targets={},
+    )
+
+    with pytest.raises(ChangeApplyError):
+        asyncio.run(manager.rollback(changeset_id, approval_id=record.approval_id))
+
+    # The approval is still APPROVED and unconsumed, and the changeset stays APPLIED.
+    after = approval_store.get(record.approval_id)
+    assert after is not None
+    assert after.status is ApprovalStatus.APPROVED
+    assert after.consumed_at is None
+    assert store.get(changeset_id).status is ChangeSetStatus.APPLIED
 
 
 # ---------------------------------------------------------------------------

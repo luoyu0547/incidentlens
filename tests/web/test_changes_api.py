@@ -91,6 +91,14 @@ def test_rollback_interrupting_service_requires_approval(
     assert accepted.status_code == 202
     assert accepted.json()["status"] == "rolling_back"
 
+    # The background rollback fails at transport resolution (no registered
+    # target in the runtime), so the single-use approval must not be burned.
+    after = next(
+        item for item in runtime.approvals.list() if item.approval_id == record.approval_id
+    )
+    assert after.status.value == "approved"
+    assert after.consumed_at is None
+
 
 def test_rollback_unknown_changeset_returns_404(
     client: TestClient,
