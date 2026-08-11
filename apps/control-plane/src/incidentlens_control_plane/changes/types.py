@@ -38,7 +38,7 @@ _VALID_PREDECESSORS: dict[ChangeSetStatus, set[ChangeSetStatus]] = {
         ChangeSetStatus.VALIDATED,
     },
     # rolled_back requires at least one file was applied
-    ChangeSetStatus.ROLLED_BACK: {ChangeSetStatus.APPLIED},
+    ChangeSetStatus.ROLLED_BACK: {ChangeSetStatus.APPLIED, ChangeSetStatus.VALIDATED},
 }
 
 # Terminal states that accept no further transitions

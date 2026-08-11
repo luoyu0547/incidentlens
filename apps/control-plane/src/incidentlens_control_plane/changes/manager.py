@@ -70,13 +70,37 @@ def change_intent(
     service: str,
     path: PurePosixPath,
 ) -> dict[str, Any]:
-    """Canonical intent for an approval covering a protected-path change."""
+    """Canonical intent for an approval covering a single protected-path change."""
     return {
         "kind": "change",
         "changeset_id": changeset_id,
         "target_id": target_id,
         "service": service,
         "path": str(path),
+    }
+
+
+def protected_paths_intent(
+    *,
+    changeset_id: str,
+    target_id: str,
+    service: str,
+    paths: tuple[PurePosixPath, ...],
+) -> dict[str, Any]:
+    """Canonical intent covering the full set of protected paths in a changeset.
+
+    The complete set of protected paths is sorted and hashed into a single
+    intent so a multi-path changeset consumes exactly one single-use approval.
+    """
+    sorted_paths = tuple(sorted(str(p) for p in paths))
+    paths_sha256 = hashlib.sha256("\n".join(sorted_paths).encode("utf-8")).hexdigest()
+    return {
+        "kind": "change",
+        "changeset_id": changeset_id,
+        "target_id": target_id,
+        "service": service,
+        "paths": sorted_paths,
+        "paths_sha256": paths_sha256,
     }
 
 
@@ -216,7 +240,9 @@ class ChangeManager:
                 "an approval is required to roll back a service-interrupting changeset"
             )
 
-        transport = await self._resolve_transport_for(changeset.target_id)
+        transport = await self._resolve_transport_for(
+            changeset.project_id, changeset.target_id
+        )
 
         if approval_id is not None and self._approvals is not None:
             intent = {
@@ -261,17 +287,26 @@ class ChangeManager:
         A rollback interrupts a service when any changed file is a protected
         path (compose/environment/Dockerfile/systemd or the service's
         explicitly protected remote paths).
+
+        Fails closed: if the project record cannot be loaded, the changeset is
+        treated as service-interrupting so the rollback approval gate still
+        applies.
         """
-        protected: tuple[PurePosixPath, ...] = ()
-        if self._projects is not None:
+        if self._projects is None:
+            # No project registry is configured; fall back to the hardcoded
+            # protected-path checks with no service-specific additions.
+            protected: tuple[PurePosixPath, ...] = ()
+        else:
             try:
                 record = self._projects.get(changeset.project_id)
-                for svc in record.services:
-                    if svc.compose_service == changeset.service_name:
-                        protected = svc.protected_remote_paths
-                        break
             except Exception:
-                protected = ()
+                # Lookup failure means we cannot rule out protected paths.
+                return True
+            protected = ()
+            for svc in record.services:
+                if svc.compose_service == changeset.service_name:
+                    protected = svc.protected_remote_paths
+                    break
         return any(
             self._is_protected_path(PurePosixPath(file_change.remote_path), protected)
             for file_change in changeset.files
@@ -508,14 +543,16 @@ class ChangeManager:
                     raise ChangeApplyError(
                         "an exact approval is required before changing a protected path"
                     )
-                for file_req in protected:
-                    intent = change_intent(
-                        changeset_id=request.changeset_id,
-                        target_id=file_req.target_id,
-                        service=file_req.service,
-                        path=file_req.path,
-                    )
-                    await self._approvals.consume(approval_id, intent)
+                # One combined intent covers the full set of protected paths so a
+                # multi-path changeset consumes the single-use approval exactly once.
+                first = protected[0]
+                intent = protected_paths_intent(
+                    changeset_id=request.changeset_id,
+                    target_id=first.target_id,
+                    service=first.service,
+                    paths=tuple(file_req.path for file_req in protected),
+                )
+                await self._approvals.consume(approval_id, intent)
 
             # --- Step 9: recheck each original SHA-256 immediately before the first rename ---
             # The source was read and verified during preflight, and the remote backup
@@ -800,13 +837,29 @@ class ChangeManager:
     # ------------------------------------------------------------------
 
     async def _resolve_transport(self, request: ChangeSetRequest) -> RemoteTransport:
-        return await self._resolve_transport_for(request.files[0].target_id)
+        return await self._resolve_transport_for(
+            request.files[0].project_id, request.files[0].target_id
+        )
 
-    async def _resolve_transport_for(self, target_id: str) -> RemoteTransport:
-        if self._sessions is not None and self._targets is not None:
-            target = self._targets.get(target_id)
+    async def _resolve_transport_for(
+        self, project_id: str, target_id: str
+    ) -> RemoteTransport:
+        """Resolve a target registration from the project record and connect.
+
+        The target is looked up in ``record.targets`` so the production
+        runtime (which never pre-registers a ``targets`` dict) resolves every
+        operation from the project registry at call time.
+        """
+        if self._sessions is not None and self._projects is not None:
+            record = self._projects.get(project_id)
+            target = next(
+                (t for t in record.targets if t.target_id == target_id), None
+            )
             if target is None:
-                raise ChangeApplyError(f"target {target_id!r} is not registered")
+                raise ChangeApplyError(
+                    f"target {target_id!r} is not registered for "
+                    f"project {project_id!r}"
+                )
             session = await self._sessions.connect(target)
             return session.transport
         if self._transport is not None:

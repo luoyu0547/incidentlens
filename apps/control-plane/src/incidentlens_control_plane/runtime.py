@@ -80,8 +80,8 @@ def build_runtime(
         settings.data_dir / "vault.key",
     )
 
-    # No targets are pre-registered at build time; they are resolved per request
-    # from the project registry once a project is created.
+    # No targets are pre-registered at build time; both services resolve the
+    # target from the project record's ``targets`` per request.
     changes = ChangeManager(
         store=change_store,
         vault=backups,
@@ -90,12 +90,10 @@ def build_runtime(
         broker=broker,
         projects=projects,
         sessions=sessions,
-        targets={},
     )
     remote_tools = RemoteToolGateway(
         projects=projects,
         sessions=sessions,
-        targets={},
         changes=changes,
         approvals=approvals,
         events=events,

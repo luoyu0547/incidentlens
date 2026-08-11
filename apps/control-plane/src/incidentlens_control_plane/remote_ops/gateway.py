@@ -193,7 +193,7 @@ class RemoteToolGateway:
         self,
         projects: ProjectRegistryStore,
         sessions: SessionManager,
-        targets: dict[str, TargetRegistration],
+        targets: dict[str, TargetRegistration] | None = None,
         changes: ChangeManager | None = None,
         approvals: ApprovalService | None = None,
         events: RuntimeEventStore | None = None,
@@ -201,7 +201,7 @@ class RemoteToolGateway:
     ) -> None:
         self._projects = projects
         self._sessions = sessions
-        self._targets = targets
+        self._targets = targets or {}
         self._changes = changes
         self._approvals = approvals
         self._events = events
@@ -209,19 +209,33 @@ class RemoteToolGateway:
 
     # --- internal helpers ---
 
+    def _resolve_target(
+        self, project_id: str, target_id: str
+    ) -> TargetRegistration:
+        """Return the target registration from the project record, or raise.
+
+        The target is looked up in ``record.targets`` so the production
+        runtime (which never pre-registers a ``targets`` dict) resolves every
+        operation from the project registry at call time.
+        """
+        record = self._projects.get(project_id)
+        for target in record.targets:
+            if target.target_id == target_id:
+                return target
+        raise ValueError(
+            f"target {target_id!r} is not registered for project {project_id!r}"
+        )
+
     def _resolve_project_service(
         self, project_id: str, target_id: str, service: str
-    ) -> tuple[object, object]:
-        """Return ``(project_record, service_registration)`` or raise."""
+    ) -> tuple[object, TargetRegistration, object]:
+        """Return ``(project_record, target_registration, service_registration)`` or raise."""
         from incidentlens_control_plane.project_registry.types import (
             ServiceRegistration,
         )
 
         record = self._projects.get(project_id)
-
-        target = self._targets.get(target_id)
-        if target is None:
-            raise ValueError(f"target {target_id!r} is not registered")
+        target = self._resolve_target(project_id, target_id)
 
         svc: ServiceRegistration | None = None
         for s in record.services:
@@ -232,7 +246,7 @@ class RemoteToolGateway:
             raise ValueError(
                 f"service {service!r} not found in project {project_id!r}"
             )
-        return record, svc
+        return record, target, svc
 
     def _make_scope(
         self, scope: dict[str, object] | None
@@ -256,17 +270,14 @@ class RemoteToolGateway:
         policy = RemotePathPolicy(svc_registration)  # type: ignore[arg-type]
         return await policy.authorize(scope, path, write=write, transport=transport)
 
-    async def _connect(self, target_id: str) -> Any:
-        target = self._targets.get(target_id)
-        if target is None:
-            raise ValueError(f"target {target_id!r} is not registered")
+    async def _connect(self, target: TargetRegistration) -> Any:
         session = await self._sessions.connect(target)
         return session.transport
 
     async def _container_backend(
-        self, target_id: str, scope: ContainerScope
+        self, target: TargetRegistration, scope: ContainerScope
     ) -> ContainerFileBackend:
-        transport = await self._connect(target_id)
+        transport = await self._connect(target)
         return ContainerFileBackend(transport, scope.container)
 
     def _require_changes(self) -> ChangeManager:
@@ -289,14 +300,14 @@ class RemoteToolGateway:
         limit: int = 1_048_576,
         scope: dict[str, object] | None = None,
     ) -> FileReadResult:
-        _, svc = self._resolve_project_service(project_id, target_id, service)
+        _, target, svc = self._resolve_project_service(project_id, target_id, service)
         resolved_scope = self._make_scope(scope)
 
         if isinstance(resolved_scope, ContainerScope):
             canonical = await self._authorize_path(
                 svc, resolved_scope, path, write=False
             )
-            backend = await self._container_backend(target_id, resolved_scope)
+            backend = await self._container_backend(target, resolved_scope)
             raw = await backend.read_bytes(canonical, max_bytes=offset + limit)
             content = raw[offset:]
             meta = await backend.lstat(canonical)
@@ -316,7 +327,7 @@ class RemoteToolGateway:
         # Host scope: canonicalize through the live transport so intermediate
         # symlink components are resolved and rejected exactly like the write
         # path (ChangeManager).
-        transport = await self._connect(target_id)
+        transport = await self._connect(target)
         canonical = await self._authorize_path(
             svc, resolved_scope, path, write=False, transport=transport
         )
@@ -333,7 +344,7 @@ class RemoteToolGateway:
         path: PurePosixPath,
         scope: dict[str, object] | None = None,
     ) -> tuple[FileMetadata, ...]:
-        _, svc = self._resolve_project_service(project_id, target_id, service)
+        _, target, svc = self._resolve_project_service(project_id, target_id, service)
         resolved_scope = self._make_scope(scope)
 
         if isinstance(resolved_scope, ContainerScope):
@@ -341,7 +352,7 @@ class RemoteToolGateway:
                 "container directory listing is not supported"
             )
 
-        transport = await self._connect(target_id)
+        transport = await self._connect(target)
         canonical = await self._authorize_path(
             svc, resolved_scope, path, write=False, transport=transport
         )
@@ -357,7 +368,7 @@ class RemoteToolGateway:
         query: str,
         scope: dict[str, object] | None = None,
     ) -> tuple[SearchMatch, ...]:
-        _, svc = self._resolve_project_service(project_id, target_id, service)
+        _, target, svc = self._resolve_project_service(project_id, target_id, service)
         resolved_scope = self._make_scope(scope)
 
         if isinstance(resolved_scope, ContainerScope):
@@ -365,7 +376,7 @@ class RemoteToolGateway:
                 "container search is not supported"
             )
 
-        transport = await self._connect(target_id)
+        transport = await self._connect(target)
         canonical = await self._authorize_path(
             svc, resolved_scope, path, write=False, transport=transport
         )
@@ -380,14 +391,14 @@ class RemoteToolGateway:
         path: PurePosixPath,
         scope: dict[str, object] | None = None,
     ) -> FileMetadata:
-        _, svc = self._resolve_project_service(project_id, target_id, service)
+        _, target, svc = self._resolve_project_service(project_id, target_id, service)
         resolved_scope = self._make_scope(scope)
 
         if isinstance(resolved_scope, ContainerScope):
             canonical = await self._authorize_path(
                 svc, resolved_scope, path, write=False
             )
-            backend = await self._container_backend(target_id, resolved_scope)
+            backend = await self._container_backend(target, resolved_scope)
             meta = await backend.lstat(canonical)
             if meta.is_symlink:
                 raise ContainerFileOperationUnsupported(
@@ -395,7 +406,7 @@ class RemoteToolGateway:
                 )
             return meta
 
-        transport = await self._connect(target_id)
+        transport = await self._connect(target)
         canonical = await self._authorize_path(
             svc, resolved_scope, path, write=False, transport=transport
         )
@@ -417,7 +428,7 @@ class RemoteToolGateway:
         approval_id: str | None = None,
     ) -> ChangeResult:
         """Wrap a single-file edit in a generated ``ChangeSetRequest``."""
-        _, svc = self._resolve_project_service(project_id, target_id, service)
+        _, _, svc = self._resolve_project_service(project_id, target_id, service)
         resolved_scope = self._make_scope(scope)
         file_req = FileEditRequest(
             operation_id=f"op-{uuid.uuid4().hex[:12]}",
@@ -453,7 +464,7 @@ class RemoteToolGateway:
         approval_id: str | None = None,
     ) -> ChangeResult:
         """Wrap a single-file write in a generated ``ChangeSetRequest``."""
-        _, svc = self._resolve_project_service(project_id, target_id, service)
+        _, _, svc = self._resolve_project_service(project_id, target_id, service)
         resolved_scope = self._make_scope(scope)
         file_req = FileWriteRequest(
             operation_id=f"op-{uuid.uuid4().hex[:12]}",
@@ -509,10 +520,10 @@ class RemoteToolGateway:
         <name>] <stop|restart|down|up -d>``.  None of these values are accepted from
         the model; they are resolved from the registered target/service.
         """
-        _, svc = self._resolve_project_service(
+        _, target, svc = self._resolve_project_service(
             request.project_id, request.target_id, request.service
         )
-        argv = self._docker_argv(request, svc, self._targets.get(request.target_id))  # type: ignore[arg-type]
+        argv = self._docker_argv(request, svc, target)
 
         intent = {
             "kind": "docker_action",
@@ -554,7 +565,7 @@ class RemoteToolGateway:
         await self._emit_docker_event(
             RuntimeEventType.DOCKER_ACTION_STARTED, request, "running"
         )
-        transport = await self._connect(request.target_id)
+        transport = await self._connect(target)
         try:
             result = await transport.run_argv(argv, timeout=60.0)
         except Exception as exc:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from fastapi.testclient import TestClient
+from incidentlens_control_plane.changes.types import ChangeSetStatus
 
 
 def test_changes_api_never_returns_backup_plaintext(
@@ -91,13 +92,15 @@ def test_rollback_interrupting_service_requires_approval(
     assert accepted.status_code == 202
     assert accepted.json()["status"] == "rolling_back"
 
-    # The background rollback fails at transport resolution (no registered
-    # target in the runtime), so the single-use approval must not be burned.
+    # The target is resolved from the registered project record, so the
+    # background rollback consumes the single-use approval and completes the
+    # restore before the response returns.
     after = next(
         item for item in runtime.approvals.list() if item.approval_id == record.approval_id
     )
-    assert after.status.value == "approved"
-    assert after.consumed_at is None
+    assert after.status.value == "consumed"
+    assert after.consumed_at is not None
+    assert runtime.change_store.get(applied_changeset).status is ChangeSetStatus.ROLLED_BACK
 
 
 def test_rollback_unknown_changeset_returns_404(

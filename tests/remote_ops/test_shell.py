@@ -254,7 +254,10 @@ class TestCommandPolicy:
         shell_request: ShellRequest,
         service_registration: ServiceRegistration,
     ) -> None:
-        """Recursive + force rm is always forbidden."""
+        """Recursive + force rm is always forbidden.
+
+        Covers flags in any position, including after path arguments (I1).
+        """
         commands = [
             "rm -rf /opt/app",
             "rm -fr /opt/app",
@@ -262,6 +265,10 @@ class TestCommandPolicy:
             "rm --recursive --force /opt/app",
             "sudo rm -R -f /opt/app",
             "command rm -fR /opt/app",
+            "rm /opt/payments/app.py -rf",
+            "rm /opt/payments/app.py -fr",
+            "rm /opt/app -r -f",
+            "sudo rm /opt/app --force --recursive",
         ]
         for command in commands:
             decision = CommandPolicy().evaluate(
@@ -337,6 +344,30 @@ class TestCommandPolicy:
             )
             assert decision.risk is OperationRisk.AUTO_READ, (
                 f"Expected AUTO_READ for {command!r}"
+            )
+
+    def test_ls_cat_stat_with_relative_parent_arg_requires_approval(
+        self,
+        shell_request: ShellRequest,
+        service_registration: ServiceRegistration,
+    ) -> None:
+        """A relative ``../`` argument is not authorized (I2).
+
+        In a persistent shell whose CWD is arbitrary, a relative argument can
+        read outside the registered roots, so it must not be AUTO_READ.
+        """
+        commands = [
+            "ls /opt/payments ../secret",
+            "cat /opt/payments/app.py ../../etc/passwd",
+            "stat /opt/payments ../../etc/passwd",
+        ]
+        for command in commands:
+            decision = CommandPolicy().evaluate(
+                shell_request.model_copy(update={"command": command}),
+                service_registration,
+            )
+            assert decision.risk is OperationRisk.APPROVAL_REQUIRED, (
+                f"Expected APPROVAL_REQUIRED for {command!r}"
             )
 
     def test_sed_i_is_rejected(

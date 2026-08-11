@@ -286,7 +286,10 @@ def _strip_prefixes(tokens: list[str]) -> list[str]:
 def _has_recursive_force_rm(tokens: list[str]) -> bool:
     """Check if command is a recursive + force rm.
 
-    Combines short flags so every recursive-plus-force combination is detected.
+    Scans *every* token so any ordering of paths and flags is caught, e.g.
+    ``rm /opt/app -rf`` and ``sudo rm /opt/app --force -r``.  A sequence is
+    forbidden when it contains both a recursive (``r``/``R``) and a force
+    (``f``) short flag, or the matching long flags, in any positions.
     """
     stripped = _strip_prefixes(tokens)
     if not stripped:
@@ -296,19 +299,23 @@ def _has_recursive_force_rm(tokens: list[str]) -> bool:
     if cmd != "rm":
         return False
 
-    # Collect all flags from the remaining tokens
-    flags = ""
+    has_recursive = False
+    has_force = False
     for token in stripped[1:]:
-        if token.startswith("-") and not token.startswith("--"):
-            flags += token[1:]  # Remove the leading -
-        elif token.startswith("--recursive") or token.startswith("--force"):
-            flags += "rf"  # Treat long flags as short flags
-        else:
-            break
-
-    # Check for both recursive and force flags
-    has_recursive = any(f in flags for f in ("r", "R"))
-    has_force = "f" in flags
+        if token.startswith("--"):
+            # Long flags: --recursive, --force (prefix match stays conservative
+            # for combined or abbreviated forms).
+            if token.startswith("--recursive"):
+                has_recursive = True
+            elif token.startswith("--force"):
+                has_force = True
+            continue
+        if token.startswith("-") and token != "-":
+            short_flags = token[1:]
+            if any(f in short_flags for f in ("r", "R")):
+                has_recursive = True
+            if "f" in short_flags:
+                has_force = True
 
     return has_recursive and has_force
 
@@ -461,14 +468,15 @@ class CommandPolicy:
                     canonical_operation=command,
                 )
 
-        # --- File read commands (automatic when paths are valid) ---
+        # --- File read commands (automatic when every path is authorized) ---
         if executable in ("ls", "cat", "stat"):
-            # Check all path arguments
+            # Every non-flag argument must be an authorized absolute path.  A
+            # relative argument (e.g. "../secret") cannot be authorized against
+            # the registered roots, so the command is not automatic.
             if len(stripped) > 1:
+                path_args = [arg for arg in stripped[1:] if not arg.startswith("-")]
                 all_paths_valid = all(
-                    _is_path_authorized(arg, service)
-                    for arg in stripped[1:]
-                    if arg.startswith("/")
+                    _is_path_authorized(arg, service) for arg in path_args
                 )
                 if all_paths_valid:
                     return ShellPolicyDecision(

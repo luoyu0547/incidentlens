@@ -17,6 +17,7 @@ from incidentlens_control_plane.changes.manager import (
     ChangeApplyError,
     ChangeManager,
     ChangeRollbackError,
+    protected_paths_intent,
 )
 from incidentlens_control_plane.changes.store import ChangeSetStore
 from incidentlens_control_plane.changes.types import ChangeSetStatus, FileChange
@@ -455,6 +456,114 @@ def test_protected_path_requires_approval(
     assert fake_transport.files[PurePosixPath("/opt/payments/.env")] == b"old\n"
 
 
+def test_multi_protected_path_changeset_applies_with_single_approval(
+    tmp_path: Path,
+    fake_transport: FakeChangeTransport,
+) -> None:
+    """A changeset touching two protected paths applies with one approval (I3).
+
+    The single-use approval is consumed exactly once for the combined intent,
+    not once per protected file.
+    """
+    db_path = tmp_path / "multi-protected.db"
+
+    def connect() -> sqlite3.Connection:
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    approval_store = ApprovalStore(connect)
+    events = RuntimeEventStore(connect)
+    broker = RuntimeEventBroker()
+    approval_store.migrate()
+    events.migrate()
+    approvals = ApprovalService(
+        approvals=approval_store,
+        events=events,
+        broker=broker,
+    )
+
+    store = ChangeSetStore(connect)
+    store.migrate()
+    vault = EncryptedBackupVault(tmp_path / "backups", tmp_path / "key.bin")
+    service = ServiceRegistration(
+        compose_service="payment-api",
+        container_names=("payments-api-1",),
+        allowed_host_paths=(PurePosixPath("/opt/payments"),),
+        allowed_container_paths=(PurePosixPath("/app"),),
+    )
+    manager = ChangeManager(
+        store=store,
+        vault=vault,
+        approvals=approvals,
+        policy=RemotePathPolicy(service),
+        transport=fake_transport,
+    )
+
+    fake_transport.files[PurePosixPath("/opt/payments/.env")] = b"KEY=old\n"
+    fake_transport.files[PurePosixPath("/opt/payments/compose.yaml")] = (
+        b"services:\n  web: {}\n"
+    )
+    request = changeset(
+        edit("/opt/payments/.env", b"KEY=old\n", "KEY=old", "KEY=new"),
+        edit(
+            "/opt/payments/compose.yaml",
+            b"services:\n  web: {}\n",
+            "web",
+            "api",
+        ),
+    )
+
+    intent = protected_paths_intent(
+        changeset_id="chg-1",
+        target_id="dev-a",
+        service="payment-api",
+        paths=(
+            PurePosixPath("/opt/payments/.env"),
+            PurePosixPath("/opt/payments/compose.yaml"),
+        ),
+    )
+    record = asyncio.run(approvals.request(intent))
+    asyncio.run(approvals.approve(record.approval_id))
+
+    result = asyncio.run(manager.apply(request, approval_id=record.approval_id))
+
+    assert result.status is ChangeSetStatus.APPLIED
+    assert fake_transport.files[PurePosixPath("/opt/payments/.env")] == b"KEY=new\n"
+    assert fake_transport.files[PurePosixPath("/opt/payments/compose.yaml")] == (
+        b"services:\n  api: {}\n"
+    )
+
+    # The single-use approval was consumed exactly once for the combined intent.
+    after = approval_store.get(record.approval_id)
+    assert after is not None
+    assert after.status is ApprovalStatus.CONSUMED
+    assert after.consumed_at is not None
+
+
+def test_interrupts_service_fails_closed_when_project_lookup_fails(
+    change_manager: ChangeManager,
+) -> None:
+    """A project-lookup failure treats the changeset as service-interrupting (I4)."""
+    class _BrokenProjects:
+        def get(self, project_id: str):  # noqa: ARG002
+            raise RuntimeError("registry unavailable")
+
+    manager = ChangeManager(
+        store=change_manager._store,
+        vault=change_manager._vault,
+        projects=_BrokenProjects(),
+        policy=change_manager._policy,
+        transport=change_manager._transport,
+    )
+    changeset_id = seed_applied_changeset(
+        manager._store, remote_path="/opt/payments/app.py"
+    )
+    seeded = manager._store.get(changeset_id)
+    assert seeded is not None
+    assert manager.interrupts_service(seeded) is True
+
+
 # ---------------------------------------------------------------------------
 # verify() and rollback()
 # ---------------------------------------------------------------------------
@@ -490,6 +599,19 @@ def test_rollback_restores_applied_changeset(
 
     assert fake_transport.files[PurePosixPath("/opt/payments/app.py")] == b"old\n"
     assert change_manager._store.get("chg-1").status is ChangeSetStatus.ROLLED_BACK
+
+
+def test_rollback_validated_changeset_transitions_to_rolled_back(
+    change_manager: ChangeManager,
+) -> None:
+    """Rolling back a VALIDATED changeset records ROLLED_BACK (I5)."""
+    changeset_id = seed_applied_changeset(change_manager._store)
+    change_manager._store.transition(changeset_id, ChangeSetStatus.VALIDATED)
+    assert change_manager._store.get(changeset_id).status is ChangeSetStatus.VALIDATED
+
+    asyncio.run(change_manager.rollback(changeset_id))
+
+    assert change_manager._store.get(changeset_id).status is ChangeSetStatus.ROLLED_BACK
 
 
 def test_rollback_protected_path_requires_approval(

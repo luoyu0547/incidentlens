@@ -192,6 +192,23 @@ class TestChangeSetTransitions:
         )
         assert result.status == ChangeSetStatus.ROLLED_BACK
 
+    def test_rolled_back_after_validated(self, store, draft_change):
+        """A VALIDATED changeset can roll back to ROLLED_BACK (I5)."""
+        changeset = store.create(draft_change)
+        store.transition(changeset.changeset_id, ChangeSetStatus.PREFLIGHTED)
+        store.transition(
+            changeset.changeset_id, ChangeSetStatus.LOCALLY_BACKED_UP
+        )
+        store.transition(
+            changeset.changeset_id, ChangeSetStatus.REMOTELY_BACKED_UP
+        )
+        store.transition(changeset.changeset_id, ChangeSetStatus.APPLIED)
+        store.transition(changeset.changeset_id, ChangeSetStatus.VALIDATED)
+        result = store.transition(
+            changeset.changeset_id, ChangeSetStatus.ROLLED_BACK
+        )
+        assert result.status == ChangeSetStatus.ROLLED_BACK
+
     def test_cannot_transition_terminal_verified(self, store, draft_change):
         changeset = store.create(draft_change)
         store.transition(changeset.changeset_id, ChangeSetStatus.PREFLIGHTED)
