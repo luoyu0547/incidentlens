@@ -127,6 +127,7 @@ class ChangeSetRequest(BaseModel):
 
 
 class ShellRequest(OperationContext):
+    risk: OperationRisk = OperationRisk.APPROVAL_REQUIRED
     command: str = Field(min_length=1, max_length=8_000)
     reason: str = Field(min_length=1, max_length=1_000)
 

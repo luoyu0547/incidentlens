@@ -7,6 +7,7 @@ from incidentlens_control_plane.approvals.service import (
     ApprovalService,
     ApprovalUnavailable,
 )
+from incidentlens_control_plane.approvals.store import ApprovalNotFound
 
 INTENT = {
     "kind": "docker.restart",
@@ -54,6 +55,39 @@ def test_expired_approval_cannot_be_consumed(approval_service: ApprovalService) 
                 request.approval_id,
                 INTENT,
                 now=created + timedelta(minutes=16),
+            )
+
+    asyncio.run(scenario())
+
+
+def test_rejected_approval_cannot_be_consumed(approval_service: ApprovalService) -> None:
+    """A rejected approval can never be consumed."""
+    async def scenario() -> None:
+        now = datetime(2026, 8, 10, tzinfo=UTC)
+        request = await approval_service.request(INTENT, now=now)
+        await approval_service.reject(request.approval_id, now=now)
+
+        with pytest.raises(ApprovalUnavailable):
+            await approval_service.consume(
+                request.approval_id,
+                INTENT,
+                now=now,
+            )
+
+    asyncio.run(scenario())
+
+
+def test_consume_nonexistent_approval_raises_not_found(
+    approval_service: ApprovalService,
+) -> None:
+    """Consuming a nonexistent approval ID raises ApprovalNotFound."""
+    async def scenario() -> None:
+        now = datetime(2026, 8, 10, tzinfo=UTC)
+        with pytest.raises(ApprovalNotFound):
+            await approval_service.consume(
+                "apr-nonexistent",
+                INTENT,
+                now=now,
             )
 
     asyncio.run(scenario())
