@@ -15,6 +15,10 @@ class RuntimeEventType(StrEnum):
     APPROVAL_REJECTED = "approval.rejected"
     APPROVAL_CONSUMED = "approval.consumed"
 
+    CHANGESET_CREATED = "changeset.created"
+    CHANGESET_STATUS_CHANGED = "changeset.status_changed"
+    CHANGESET_ROLLED_BACK = "changeset.rolled_back"
+
 
 # JsonValue is a union type for JSON-serializable values
 # Using Any to avoid recursion issues with Pydantic
