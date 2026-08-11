@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 from incidentlens_control_plane.approvals.service import ApprovalService
 from incidentlens_control_plane.approvals.store import ApprovalStore
+from incidentlens_control_plane.changes.manager import ChangeManager
 from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.project_registry.types import (
@@ -362,6 +363,16 @@ class _FileTransportFactory(FakeTransportFactory):
         return transport
 
 
+class _RecordingTransportFactory:
+    """Factory that always returns a single recording transport."""
+
+    def __init__(self, transport) -> None:
+        self._transport = transport
+
+    async def connect(self, target: TargetRegistration):
+        return self._transport
+
+
 @pytest.fixture
 def project_record() -> ProjectRecord:
     return ProjectRecord(
@@ -536,3 +547,294 @@ async def test_gateway_unknown_service_raises(
             service="nonexistent",
             path=PurePosixPath("/opt/app.py"),
         )
+
+
+# ---------------------------------------------------------------------------
+# Docker action and change-manager gateway tests
+# ---------------------------------------------------------------------------
+
+
+def _make_change_manager(tmp_path: Path, transport) -> ChangeManager:
+    """Create a ChangeManager backed by a real store/vault and a fake transport."""
+    from incidentlens_control_plane.changes.backup import EncryptedBackupVault
+    from incidentlens_control_plane.changes.store import ChangeSetStore
+    from incidentlens_control_plane.remote_ops.policy import RemotePathPolicy
+
+    db_path = tmp_path / "changes.db"
+
+    def connect() -> sqlite3.Connection:
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    store = ChangeSetStore(connect)
+    store.migrate()
+    vault = EncryptedBackupVault(tmp_path / "backups", tmp_path / "key.bin")
+    service = ServiceRegistration(
+        compose_service="web",
+        container_names=("web-1",),
+        allowed_host_paths=(PurePosixPath("/opt"),),
+        allowed_container_paths=(PurePosixPath("/app"),),
+    )
+    return ChangeManager(
+        store=store,
+        vault=vault,
+        policy=RemotePathPolicy(service),
+        transport=transport,
+    )
+
+
+@pytest.fixture
+def docker_gateway(
+    tmp_path: Path,
+    project_record: ProjectRecord,
+) -> RemoteToolGateway:
+    """RemoteToolGateway with approvals and a change manager wired in."""
+    from incidentlens_control_plane.remote_ops.fakes import FakeChangeTransport
+
+    transport = FakeChangeTransport()
+    transport.files[PurePosixPath("/opt/app.py")] = b"print('hello')\n"
+    projects = _FakeProjectRegistryStore(project_record)
+    target_reg = project_record.targets[0]
+    sessions = SessionManager(_FileTransportFactory(_HOST_FS))
+    approvals = _make_approval_service(tmp_path)
+    changes = _make_change_manager(tmp_path, transport)
+    return RemoteToolGateway(
+        projects=projects,
+        sessions=sessions,
+        targets={target_reg.target_id: target_reg},
+        changes=changes,
+        approvals=approvals,
+    )
+
+
+def test_docker_action_requests_approval_when_no_id(
+    docker_gateway: RemoteToolGateway,
+) -> None:
+    """Without an approval ID a docker action returns a pending request."""
+    from incidentlens_control_plane.remote_ops.types import (
+        DockerActionKind,
+        DockerActionRequest,
+        HostScope,
+    )
+
+    request = DockerActionRequest(
+        operation_id="op-dk",
+        incident_id="inc-1",
+        project_id="myproj",
+        target_id="dev-host",
+        service="web",
+        scope=HostScope(),
+        action=DockerActionKind.RESTART,
+        container="web-1",
+        reason="restart the web service",
+    )
+
+    async def scenario() -> None:
+        result = await docker_gateway.docker_action(request)
+        assert result.approved is False
+        assert result.approval_id is not None
+        assert result.approval_id.startswith("apr-")
+
+    asyncio.run(scenario())
+
+
+def test_docker_action_consumes_approval_and_executes(
+    docker_gateway: RemoteToolGateway,
+    tmp_path: Path,
+) -> None:
+    """With an approved ID the docker action consumes it and runs a fixed argv."""
+    from incidentlens_control_plane.remote_ops.types import (
+        DockerActionKind,
+        DockerActionRequest,
+        HostScope,
+    )
+
+    request = DockerActionRequest(
+        operation_id="op-dk",
+        incident_id="inc-1",
+        project_id="myproj",
+        target_id="dev-host",
+        service="web",
+        scope=HostScope(),
+        action=DockerActionKind.RESTART,
+        container="web-1",
+        reason="restart the web service",
+    )
+    intent = {
+        "kind": "docker_action",
+        "target_id": request.target_id,
+        "service": request.service,
+        "action": request.action.value,
+        "container": request.container,
+    }
+
+    async def scenario() -> None:
+        now = datetime.now(UTC)
+        approval = await docker_gateway._approvals.request(intent, now=now)
+        await docker_gateway._approvals.approve(approval.approval_id, now=now)
+
+        result = await docker_gateway.docker_action(
+            request, approval_id=approval.approval_id
+        )
+        assert result.approved is True
+        assert result.exit_status == 0
+
+    asyncio.run(scenario())
+
+
+def test_docker_action_rejects_unregistered_container(
+    docker_gateway: RemoteToolGateway,
+) -> None:
+    """A container outside the service registration is rejected."""
+    from incidentlens_control_plane.remote_ops.gateway import DockerActionError
+    from incidentlens_control_plane.remote_ops.types import (
+        DockerActionKind,
+        DockerActionRequest,
+        HostScope,
+    )
+
+    request = DockerActionRequest(
+        operation_id="op-dk",
+        incident_id="inc-1",
+        project_id="myproj",
+        target_id="dev-host",
+        service="web",
+        scope=HostScope(),
+        action=DockerActionKind.STOP,
+        container="unknown-container",
+        reason="stop an unregistered container",
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(DockerActionError, match="not registered"):
+            await docker_gateway.docker_action(request)
+
+    asyncio.run(scenario())
+
+
+def test_docker_action_compose_builds_fixed_argv(
+    tmp_path: Path,
+    project_record: ProjectRecord,
+) -> None:
+    """Compose actions use the registered project directory, never model input."""
+    from incidentlens_control_plane.remote_ops.fakes import FakeChangeTransport
+    from incidentlens_control_plane.remote_ops.types import (
+        DockerActionKind,
+        DockerActionRequest,
+        HostScope,
+    )
+
+    target_with_dir = TargetRegistration(
+        target_id="compose-host",
+        host="10.0.0.9",
+        ssh_user="deploy",
+        compose_working_directory=PurePosixPath("/srv/web"),
+        compose_project_name="webapp",
+    )
+    record = ProjectRecord(
+        project_id="myproj",
+        display_name="My Project",
+        targets=(target_with_dir,),
+        services=(
+            ServiceRegistration(
+                compose_service="web",
+                container_names=("web-1",),
+                allowed_host_paths=(PurePosixPath("/opt"),),
+                allowed_container_paths=(PurePosixPath("/app"),),
+            ),
+        ),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    transport = FakeChangeTransport()
+    projects = _FakeProjectRegistryStore(record)
+    sessions = SessionManager(_RecordingTransportFactory(transport))
+    approvals = _make_approval_service(tmp_path)
+    changes = _make_change_manager(tmp_path, transport)
+    gw = RemoteToolGateway(
+        projects=projects,
+        sessions=sessions,
+        targets={target_with_dir.target_id: target_with_dir},
+        changes=changes,
+        approvals=approvals,
+    )
+
+    request = DockerActionRequest(
+        operation_id="op-dk",
+        incident_id="inc-1",
+        project_id="myproj",
+        target_id="compose-host",
+        service="web",
+        scope=HostScope(),
+        action=DockerActionKind.COMPOSE_UP,
+        container=None,
+        reason="bring the stack up",
+    )
+
+    async def scenario() -> None:
+        now = datetime.now(UTC)
+        approval = await gw._approvals.request(
+            {
+                "kind": "docker_action",
+                "target_id": request.target_id,
+                "service": request.service,
+                "action": request.action.value,
+                "container": request.container,
+            },
+            now=now,
+        )
+        await gw._approvals.approve(approval.approval_id, now=now)
+        result = await gw.docker_action(request, approval_id=approval.approval_id)
+        assert result.approved is True
+        expected_argv = (
+            "docker",
+            "compose",
+            "--project-directory",
+            "/srv/web",
+            "--project-name",
+            "webapp",
+            "up",
+            "-d",
+        )
+        assert expected_argv in transport.run_argv_calls
+
+    asyncio.run(scenario())
+
+
+def test_gateway_edit_applies_single_file(
+    tmp_path: Path,
+    project_record: ProjectRecord,
+) -> None:
+    """gateway.edit wraps a single-file changeset and applies it."""
+    import hashlib
+
+    from incidentlens_control_plane.remote_ops.fakes import FakeChangeTransport
+    from incidentlens_control_plane.remote_ops.types import TextReplacement
+
+    transport = FakeChangeTransport()
+    transport.files[PurePosixPath("/opt/app.py")] = b"print('hello')\n"
+    projects = _FakeProjectRegistryStore(project_record)
+    target_reg = project_record.targets[0]
+    sessions = SessionManager(_FileTransportFactory(_HOST_FS))
+    changes = _make_change_manager(tmp_path, transport)
+    gw = RemoteToolGateway(
+        projects=projects,
+        sessions=sessions,
+        targets={target_reg.target_id: target_reg},
+        changes=changes,
+    )
+
+    async def scenario() -> None:
+        result = await gw.edit(
+            project_id="myproj",
+            target_id="dev-host",
+            service="web",
+            path=PurePosixPath("/opt/app.py"),
+            expected_sha256=hashlib.sha256(b"print('hello')\n").hexdigest(),
+            replacements=(TextReplacement(old_text="hello", new_text="world"),),
+        )
+        assert result.status.value == "applied"
+        assert transport.files[PurePosixPath("/opt/app.py")] == b"print('world')\n"
+
+    asyncio.run(scenario())

@@ -19,6 +19,11 @@ class RuntimeEventType(StrEnum):
     CHANGESET_STATUS_CHANGED = "changeset.status_changed"
     CHANGESET_ROLLED_BACK = "changeset.rolled_back"
 
+    DOCKER_ACTION_REQUESTED = "docker_action.requested"
+    DOCKER_ACTION_STARTED = "docker_action.started"
+    DOCKER_ACTION_COMPLETED = "docker_action.completed"
+    DOCKER_ACTION_FAILED = "docker_action.failed"
+
 
 # JsonValue is a union type for JSON-serializable values
 # Using Any to avoid recursion issues with Pydantic

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
+from typing import TYPE_CHECKING, Any
 
 from incidentlens_control_plane.approvals.service import (
     ApprovalMismatch,
@@ -12,6 +15,9 @@ from incidentlens_control_plane.approvals.service import (
     ApprovalUnavailable,
 )
 from incidentlens_control_plane.approvals.store import ApprovalNotFound
+from incidentlens_control_plane.events.broker import RuntimeEventBroker
+from incidentlens_control_plane.events.store import RuntimeEventStore
+from incidentlens_control_plane.events.types import RuntimeEvent, RuntimeEventType
 from incidentlens_control_plane.project_registry.store import (
     ProjectRegistryStore,
 )
@@ -19,6 +25,7 @@ from incidentlens_control_plane.project_registry.types import (
     TargetRegistration,
 )
 from incidentlens_control_plane.remote_ops.files import (
+    ContainerFileBackend,
     ContainerFileOperationUnsupported,
     FileReadResult,
     RemoteFileTools,
@@ -28,12 +35,24 @@ from incidentlens_control_plane.remote_ops.policy import RemotePathPolicy
 from incidentlens_control_plane.remote_ops.sessions import SessionManager
 from incidentlens_control_plane.remote_ops.transport import FileMetadata
 from incidentlens_control_plane.remote_ops.types import (
+    ChangeSetRequest,
     ContainerScope,
+    DockerActionKind,
+    DockerActionRequest,
+    FileEditRequest,
+    FileWriteRequest,
     HostScope,
     OperationRisk,
     RemoteScope,
     ShellRequest,
+    TextReplacement,
 )
+
+if TYPE_CHECKING:
+    from incidentlens_control_plane.changes.manager import (
+        ChangeManager,
+        ChangeResult,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,8 +65,23 @@ class ShellResult:
     reason: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class DockerActionResult:
+    """Result of a docker_action request."""
+
+    action: DockerActionKind
+    approved: bool
+    approval_id: str | None = None
+    exit_status: int | None = None
+    reason: str = ""
+
+
 class CommandForbidden(Exception):
     """Raised when a command is classified as forbidden."""
+
+
+class DockerActionError(Exception):
+    """Raised when a docker action fails or is rejected."""
 
 
 class Gateway:
@@ -147,12 +181,9 @@ class Gateway:
 
 
 class RemoteToolGateway:
-    """Read-only gateway that resolves project/target/service policy and
-    delegates to :class:`RemoteFileTools`.
-
-    Host scope is fully executable.  Container scope validates the path
-    policy but returns :class:`ContainerFileOperationUnsupported` until
-    Task 7 installs the fixed Docker file backend.
+    """Gateway that resolves project/target/service policy and delegates to
+    :class:`RemoteFileTools` (host scope) or :class:`ContainerFileBackend`
+    (container scope), and to the :class:`ChangeManager` for mutations.
     """
 
     def __init__(
@@ -160,10 +191,18 @@ class RemoteToolGateway:
         projects: ProjectRegistryStore,
         sessions: SessionManager,
         targets: dict[str, TargetRegistration],
+        changes: ChangeManager | None = None,
+        approvals: ApprovalService | None = None,
+        events: RuntimeEventStore | None = None,
+        broker: RuntimeEventBroker | None = None,
     ) -> None:
         self._projects = projects
         self._sessions = sessions
         self._targets = targets
+        self._changes = changes
+        self._approvals = approvals
+        self._events = events
+        self._broker = broker
 
     # --- internal helpers ---
 
@@ -202,14 +241,33 @@ class RemoteToolGateway:
             return ContainerScope(container=str(scope["container"]))
         return HostScope()
 
-    async def _authorize_host_path(
-        self, svc_registration: object, path: PurePosixPath, *, write: bool
+    async def _authorize_path(
+        self, svc_registration: object, scope: RemoteScope, path: PurePosixPath, *, write: bool
     ) -> PurePosixPath:
-
         policy = RemotePathPolicy(svc_registration)  # type: ignore[arg-type]
-        return await policy.authorize(HostScope(), path, write=write)
+        return await policy.authorize(scope, path, write=write, transport=None)
 
-    # --- public API ---
+    async def _connect(self, target_id: str) -> Any:
+        target = self._targets.get(target_id)
+        if target is None:
+            raise ValueError(f"target {target_id!r} is not registered")
+        session = await self._sessions.connect(target)
+        return session.transport
+
+    async def _container_backend(
+        self, target_id: str, scope: ContainerScope
+    ) -> ContainerFileBackend:
+        transport = await self._connect(target_id)
+        return ContainerFileBackend(transport, scope.container)
+
+    def _require_changes(self) -> ChangeManager:
+        if self._changes is None:
+            raise ContainerFileOperationUnsupported(
+                "change management is not configured"
+            )
+        return self._changes
+
+    # --- public read-only API ---
 
     async def read(
         self,
@@ -224,15 +282,23 @@ class RemoteToolGateway:
     ) -> FileReadResult:
         _, svc = self._resolve_project_service(project_id, target_id, service)
         resolved_scope = self._make_scope(scope)
+        canonical = await self._authorize_path(svc, resolved_scope, path, write=False)
 
         if isinstance(resolved_scope, ContainerScope):
-            raise ContainerFileOperationUnsupported(
-                "container file operations are not supported until Task 7"
+            backend = await self._container_backend(target_id, resolved_scope)
+            raw = await backend.read_bytes(canonical, max_bytes=offset + limit)
+            content = raw[offset:]
+            meta = await backend.lstat(canonical)
+            truncated = (offset + limit) < meta.size
+            return FileReadResult(
+                path=canonical,
+                content=content,
+                sha256=hashlib.sha256(content).hexdigest(),
+                metadata=meta,
+                truncated=truncated,
             )
 
-        canonical = await self._authorize_host_path(svc, path, write=False)
-        session = await self._sessions.connect(self._targets[target_id])
-        tools = RemoteFileTools(session.transport)
+        tools = RemoteFileTools(await self._connect(target_id))
         return await tools.read(canonical, offset=offset, limit=limit)
 
     async def list_dir(
@@ -249,12 +315,11 @@ class RemoteToolGateway:
 
         if isinstance(resolved_scope, ContainerScope):
             raise ContainerFileOperationUnsupported(
-                "container file operations are not supported until Task 7"
+                "container directory listing is not supported"
             )
 
-        canonical = await self._authorize_host_path(svc, path, write=False)
-        session = await self._sessions.connect(self._targets[target_id])
-        tools = RemoteFileTools(session.transport)
+        canonical = await self._authorize_path(svc, resolved_scope, path, write=False)
+        tools = RemoteFileTools(await self._connect(target_id))
         return await tools.list(canonical)
 
     async def search(
@@ -272,12 +337,11 @@ class RemoteToolGateway:
 
         if isinstance(resolved_scope, ContainerScope):
             raise ContainerFileOperationUnsupported(
-                "container file operations are not supported until Task 7"
+                "container search is not supported"
             )
 
-        canonical = await self._authorize_host_path(svc, path, write=False)
-        session = await self._sessions.connect(self._targets[target_id])
-        tools = RemoteFileTools(session.transport)
+        canonical = await self._authorize_path(svc, resolved_scope, path, write=False)
+        tools = RemoteFileTools(await self._connect(target_id))
         return await tools.search(canonical, query)
 
     async def stat(
@@ -291,13 +355,284 @@ class RemoteToolGateway:
     ) -> FileMetadata:
         _, svc = self._resolve_project_service(project_id, target_id, service)
         resolved_scope = self._make_scope(scope)
+        canonical = await self._authorize_path(svc, resolved_scope, path, write=False)
 
         if isinstance(resolved_scope, ContainerScope):
-            raise ContainerFileOperationUnsupported(
-                "container file operations are not supported until Task 7"
+            backend = await self._container_backend(target_id, resolved_scope)
+            meta = await backend.lstat(canonical)
+            if meta.is_symlink:
+                raise ContainerFileOperationUnsupported(
+                    f"symbolic links are not supported: {canonical}"
+                )
+            return meta
+
+        tools = RemoteFileTools(await self._connect(target_id))
+        return await tools.stat(canonical)
+
+    # --- mutation API ---
+
+    async def edit(
+        self,
+        *,
+        project_id: str,
+        target_id: str,
+        service: str,
+        path: PurePosixPath,
+        expected_sha256: str,
+        replacements: tuple[TextReplacement, ...],
+        scope: dict[str, object] | None = None,
+        incident_id: str = "unknown",
+        approval_id: str | None = None,
+    ) -> ChangeResult:
+        """Wrap a single-file edit in a generated ``ChangeSetRequest``."""
+        _, svc = self._resolve_project_service(project_id, target_id, service)
+        resolved_scope = self._make_scope(scope)
+        file_req = FileEditRequest(
+            operation_id=f"op-{uuid.uuid4().hex[:12]}",
+            incident_id=incident_id,
+            project_id=project_id,
+            target_id=target_id,
+            service=service,
+            scope=resolved_scope,
+            path=path,
+            expected_sha256=expected_sha256,
+            replacements=replacements,
+        )
+        request = ChangeSetRequest(
+            changeset_id=f"chs-{uuid.uuid4().hex[:12]}",
+            files=(file_req,),
+            verification_plan="run syntax checks and compare service behavior",
+            rollback_plan="restore the verified timestamped backup",
+        )
+        return await self.apply_changeset(request, approval_id=approval_id)
+
+    async def write(
+        self,
+        *,
+        project_id: str,
+        target_id: str,
+        service: str,
+        path: PurePosixPath,
+        content: bytes,
+        mode: int | None = None,
+        expected_sha256: str | None = None,
+        scope: dict[str, object] | None = None,
+        incident_id: str = "unknown",
+        approval_id: str | None = None,
+    ) -> ChangeResult:
+        """Wrap a single-file write in a generated ``ChangeSetRequest``."""
+        _, svc = self._resolve_project_service(project_id, target_id, service)
+        resolved_scope = self._make_scope(scope)
+        file_req = FileWriteRequest(
+            operation_id=f"op-{uuid.uuid4().hex[:12]}",
+            incident_id=incident_id,
+            project_id=project_id,
+            target_id=target_id,
+            service=service,
+            scope=resolved_scope,
+            path=path,
+            content=content,
+            mode=mode,
+            expected_sha256=expected_sha256,
+        )
+        request = ChangeSetRequest(
+            changeset_id=f"chs-{uuid.uuid4().hex[:12]}",
+            files=(file_req,),
+            verification_plan="run syntax checks and compare service behavior",
+            rollback_plan="remove the file if the change fails",
+        )
+        return await self.apply_changeset(request, approval_id=approval_id)
+
+    async def apply_changeset(
+        self,
+        request: ChangeSetRequest,
+        *,
+        approval_id: str | None = None,
+    ) -> ChangeResult:
+        """Apply an explicit multi-file changeset."""
+        changes = self._require_changes()
+        return await changes.apply(request, approval_id=approval_id)
+
+    async def restore(
+        self,
+        *,
+        changeset_id: str,
+        approval_id: str | None = None,
+    ) -> None:
+        """Restore an applied changeset from its verified backups."""
+        changes = self._require_changes()
+        await changes.rollback(changeset_id, approval_id)
+
+    # --- docker action ---
+
+    async def docker_action(
+        self,
+        request: DockerActionRequest,
+        approval_id: str | None = None,
+    ) -> DockerActionResult:
+        """Execute a fixed, typed docker/compose action with exact approval.
+
+        Container actions use ``docker <stop|restart|kill|rm> -- <container>``.
+        Compose actions use ``docker compose --project-directory <dir> [--project-name
+        <name>] <stop|restart|down|up -d>``.  None of these values are accepted from
+        the model; they are resolved from the registered target/service.
+        """
+        _, svc = self._resolve_project_service(
+            request.project_id, request.target_id, request.service
+        )
+        argv = self._docker_argv(request, svc, self._targets.get(request.target_id))  # type: ignore[arg-type]
+
+        intent = {
+            "kind": "docker_action",
+            "target_id": request.target_id,
+            "service": request.service,
+            "action": request.action.value,
+            "container": request.container,
+        }
+
+        if approval_id is None:
+            if self._approvals is None:
+                raise DockerActionError("approval service is not configured")
+            record = await self._approvals.request(intent)
+            await self._emit_docker_event(
+                RuntimeEventType.DOCKER_ACTION_REQUESTED,
+                request,
+                "pending",
+                approval_id=record.approval_id,
+            )
+            return DockerActionResult(
+                action=request.action,
+                approved=False,
+                approval_id=record.approval_id,
+                reason="Approval required",
             )
 
-        canonical = await self._authorize_host_path(svc, path, write=False)
-        session = await self._sessions.connect(self._targets[target_id])
-        tools = RemoteFileTools(session.transport)
-        return await tools.stat(canonical)
+        if self._approvals is None:
+            raise DockerActionError("approval service is not configured")
+        try:
+            await self._approvals.consume(approval_id, intent)
+        except (ApprovalNotFound, ApprovalUnavailable, ApprovalMismatch) as exc:
+            return DockerActionResult(
+                action=request.action,
+                approved=False,
+                approval_id=approval_id,
+                reason=str(exc),
+            )
+
+        await self._emit_docker_event(
+            RuntimeEventType.DOCKER_ACTION_STARTED, request, "running"
+        )
+        transport = await self._connect(request.target_id)
+        try:
+            result = await transport.run_argv(argv, timeout=60.0)
+        except Exception as exc:
+            await self._emit_docker_event(
+                RuntimeEventType.DOCKER_ACTION_FAILED,
+                request,
+                "failed",
+                error=str(exc),
+            )
+            raise DockerActionError(str(exc)) from exc
+
+        if result.exit_status != 0:
+            detail = result.stderr.decode(errors="replace")
+            await self._emit_docker_event(
+                RuntimeEventType.DOCKER_ACTION_FAILED,
+                request,
+                "failed",
+                error=detail,
+            )
+            raise DockerActionError(
+                f"docker action {request.action.value} failed: {detail}"
+            )
+
+        await self._emit_docker_event(
+            RuntimeEventType.DOCKER_ACTION_COMPLETED, request, "completed"
+        )
+        return DockerActionResult(
+            action=request.action,
+            approved=True,
+            approval_id=approval_id,
+            exit_status=result.exit_status,
+            reason="completed",
+        )
+
+    def _docker_argv(
+        self,
+        request: DockerActionRequest,
+        svc: object,
+        target: TargetRegistration | None,
+    ) -> tuple[str, ...]:
+        registration = svc  # type: ignore[assignment]
+        container_commands = {
+            DockerActionKind.STOP: "stop",
+            DockerActionKind.RESTART: "restart",
+            DockerActionKind.KILL: "kill",
+            DockerActionKind.REMOVE: "rm",
+        }
+        compose_commands = {
+            DockerActionKind.COMPOSE_STOP: ("stop",),
+            DockerActionKind.COMPOSE_RESTART: ("restart",),
+            DockerActionKind.COMPOSE_DOWN: ("down",),
+            DockerActionKind.COMPOSE_UP: ("up", "-d"),
+        }
+
+        if request.action in container_commands:
+            if request.container not in registration.container_names:
+                raise DockerActionError(
+                    f"container {request.container!r} is not registered for "
+                    f"service {request.service!r}"
+                )
+            return (
+                "docker",
+                container_commands[request.action],
+                "--",
+                request.container,  # type: ignore[arg-type]
+            )
+
+        if target is None or target.compose_working_directory is None:
+            raise DockerActionError(
+                f"target {request.target_id!r} has no compose_working_directory"
+            )
+        argv = [
+            "docker",
+            "compose",
+            "--project-directory",
+            str(target.compose_working_directory),
+        ]
+        if target.compose_project_name:
+            argv += ["--project-name", target.compose_project_name]
+        argv += list(compose_commands[request.action])
+        return tuple(argv)
+
+    async def _emit_docker_event(
+        self,
+        event_type: RuntimeEventType,
+        request: DockerActionRequest,
+        status: str,
+        *,
+        approval_id: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        if self._events is None or self._broker is None:
+            return
+        payload: dict[str, Any] = {
+            "target_id": request.target_id,
+            "service": request.service,
+            "action": request.action.value,
+            "container": request.container,
+            "status": status,
+        }
+        if approval_id is not None:
+            payload["approval_id"] = approval_id
+        if error is not None:
+            payload["error"] = error[:500]
+        event = RuntimeEvent(
+            event_id=uuid.uuid4().hex,
+            sequence=0,
+            event_type=event_type,
+            occurred_at=datetime.now(UTC),
+            payload=payload,
+        )
+        stored_event = self._events.append(event)
+        await self._broker.publish(stored_event)

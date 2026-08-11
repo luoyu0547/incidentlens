@@ -15,12 +15,13 @@ from incidentlens_control_plane.runtime import build_runtime
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI, settings: RuntimeSettings) -> AsyncIterator[None]:
-    """Build services on startup and clear them on shutdown."""
+    """Build services on startup and close sessions on shutdown."""
     services = build_runtime(settings)
     app.state.runtime = services
     try:
         yield
     finally:
+        await services.sessions.close_all()
         app.state.runtime = None  # type: ignore[assignment]
 
 

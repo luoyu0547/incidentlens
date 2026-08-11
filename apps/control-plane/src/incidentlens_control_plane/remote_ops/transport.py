@@ -56,7 +56,14 @@ class RemoteTransport(Protocol):
     async def list_directory(self, path: PurePosixPath) -> tuple[FileMetadata, ...]:
         raise NotImplementedError
 
-    async def write_bytes(self, path: PurePosixPath, content: bytes, *, mode: int) -> None:
+    async def write_bytes(
+        self,
+        path: PurePosixPath,
+        content: bytes,
+        *,
+        mode: int,
+        exclusive: bool = False,
+    ) -> None:
         raise NotImplementedError
 
     async def rename(self, source: PurePosixPath, target: PurePosixPath) -> None:
@@ -65,7 +72,13 @@ class RemoteTransport(Protocol):
     async def remove_file(self, path: PurePosixPath) -> None:
         raise NotImplementedError
 
-    async def copy_file(self, source: PurePosixPath, target: PurePosixPath) -> None:
+    async def copy_file(
+        self,
+        source: PurePosixPath,
+        target: PurePosixPath,
+        *,
+        preserve: bool = True,
+    ) -> None:
         raise NotImplementedError
 
     async def run_argv(self, argv: tuple[str, ...], *, timeout: float) -> CommandResult:

@@ -144,6 +144,143 @@ class ChangeSetStore:
 
         return changeset
 
+    def create_changeset(
+        self,
+        *,
+        changeset_id: str,
+        incident_id: str,
+        project_id: str,
+        target_id: str,
+        service_name: str,
+        files: tuple[FileChange, ...],
+        verification_plan: str = "",
+        rollback_plan: str = "",
+        approval_id: str | None = None,
+    ) -> ChangeSet:
+        """Create a ChangeSet with an explicit ID and multiple file changes."""
+        now = datetime.now(UTC)
+        changeset = ChangeSet(
+            changeset_id=changeset_id,
+            incident_id=incident_id,
+            project_id=project_id,
+            target_id=target_id,
+            service_name=service_name,
+            files=files,
+            status=ChangeSetStatus.DRAFT,
+            created_at=now,
+            updated_at=now,
+            verification_plan=verification_plan,
+            rollback_plan=rollback_plan,
+            approval_id=approval_id,
+        )
+
+        with self._connection_factory() as conn:
+            conn.execute(
+                """
+                INSERT INTO changesets
+                    (changeset_id, incident_id, project_id, target_id, service_name,
+                     status, verification_plan, rollback_plan, approval_id,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    changeset_id,
+                    incident_id,
+                    project_id,
+                    target_id,
+                    service_name,
+                    ChangeSetStatus.DRAFT.value,
+                    verification_plan,
+                    rollback_plan,
+                    approval_id,
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            for file_change in files:
+                conn.execute(
+                    """
+                    INSERT INTO file_changes
+                        (file_change_id, changeset_id, scope, remote_path,
+                         expected_sha256, replacement_sha256, diff_text,
+                         original_metadata, local_backup_ref, remote_backup_path,
+                         temp_path, applied, validation_result, rollback_result)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        file_change.file_change_id,
+                        changeset_id,
+                        file_change.scope,
+                        file_change.remote_path,
+                        file_change.expected_sha256,
+                        file_change.replacement_sha256,
+                        file_change.diff_text,
+                        json.dumps(file_change.original_metadata),
+                        file_change.local_backup_ref,
+                        file_change.remote_backup_path,
+                        file_change.temp_path,
+                        int(file_change.applied),
+                        file_change.validation_result,
+                        file_change.rollback_result,
+                    ),
+                )
+            conn.commit()
+
+        return changeset
+
+    def update_file_change(
+        self,
+        changeset_id: str,
+        file_change_id: str,
+        *,
+        local_backup_ref: str | None = None,
+        remote_backup_path: str | None = None,
+        temp_path: str | None = None,
+        applied: bool | None = None,
+        validation_result: str | None = None,
+        rollback_result: str | None = None,
+    ) -> FileChange:
+        """Update mutable fields on a single file change record."""
+        updates: list[str] = []
+        params: list[object] = []
+        for column, value in (
+            ("local_backup_ref", local_backup_ref),
+            ("remote_backup_path", remote_backup_path),
+            ("temp_path", temp_path),
+            ("applied", applied),
+            ("validation_result", validation_result),
+            ("rollback_result", rollback_result),
+        ):
+            if value is not None:
+                updates.append(f"{column} = ?")
+                params.append(int(value) if column == "applied" else value)
+
+        if not updates:
+            raise ValueError("no fields to update")
+
+        params.extend([changeset_id, file_change_id])
+        with self._connection_factory() as conn:
+            cursor = conn.execute(
+                f"UPDATE file_changes SET {', '.join(updates)} "
+                "WHERE changeset_id = ? AND file_change_id = ?",
+                params,
+            )
+            conn.commit()
+            if cursor.rowcount == 0:
+                raise ChangeSetNotFound(
+                    f"file change '{file_change_id}' not found in '{changeset_id}'"
+                )
+
+        changeset = self.get(changeset_id)
+        if changeset is None:
+            raise ChangeSetNotFound(f"ChangeSet '{changeset_id}' not found")
+        for file_change in changeset.files:
+            if file_change.file_change_id == file_change_id:
+                return file_change
+        raise ChangeSetNotFound(
+            f"file change '{file_change_id}' not found in '{changeset_id}'"
+        )
+
     def get(self, changeset_id: str) -> ChangeSet | None:
         """Retrieve a ChangeSet by ID, including its file changes."""
         with self._connection_factory() as conn:

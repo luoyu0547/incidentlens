@@ -122,6 +122,16 @@ class RemotePathPolicy:
 
     # --- helpers ---
 
+    def contains(self, path: PurePosixPath, scope: RemoteScope) -> bool:
+        """Return whether a (canonicalized) path stays within an allowed root."""
+        if isinstance(scope, ContainerScope):
+            roots = self._container_roots
+        elif isinstance(scope, HostScope):
+            roots = self._host_roots
+        else:
+            return False
+        return any(path.is_relative_to(root) for root in roots)
+
     @staticmethod
     def _find_root(
         path: PurePosixPath,

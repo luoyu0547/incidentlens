@@ -15,10 +15,13 @@ from incidentlens_control_plane.changes.store import ChangeSetStore
 from incidentlens_control_plane.changes.types import ChangeSetStatus
 from incidentlens_control_plane.project_registry.types import ServiceRegistration
 from incidentlens_control_plane.remote_ops.fakes import FakeChangeTransport
+from incidentlens_control_plane.remote_ops.files import ContainerFileBackend
 from incidentlens_control_plane.remote_ops.policy import RemotePathPolicy
 from incidentlens_control_plane.remote_ops.types import (
     ChangeSetRequest,
+    ContainerScope,
     FileEditRequest,
+    FileWriteRequest,
     HostScope,
     TextReplacement,
 )
@@ -42,7 +45,21 @@ def edit(path: str, original: bytes, old: str, new: str) -> FileEditRequest:
     )
 
 
-def changeset(*files: FileEditRequest) -> ChangeSetRequest:
+def write(path: str, content: bytes) -> FileWriteRequest:
+    return FileWriteRequest(
+        operation_id=f"op-{PurePosixPath(path).name}",
+        incident_id="inc-1",
+        project_id="payments",
+        target_id="dev-a",
+        service="payment-api",
+        scope=HostScope(),
+        path=PurePosixPath(path),
+        expected_sha256=None,
+        content=content,
+    )
+
+
+def changeset(*files: FileEditRequest | FileWriteRequest) -> ChangeSetRequest:
     return ChangeSetRequest(
         changeset_id="chg-1",
         files=files,
@@ -109,7 +126,7 @@ def change_manager(fake_transport: FakeChangeTransport, tmp_path: Path) -> Chang
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Step 1: Two-backup ordering and failure modes
 # ---------------------------------------------------------------------------
 
 
@@ -128,17 +145,136 @@ def test_edit_backs_up_locally_and_remotely_before_replace(
         )
 
     assert fake_transport.calls == [
+        "lstat:/opt/payments/app.py",
         "realpath:/opt/payments/app.py",
-        "lstat:/opt/payments/app.py",
         "read:/opt/payments/app.py",
-        "lstat:/opt/payments/app.py",
         "copy:/opt/payments/app.py:/opt/payments/app.py.incidentlens-backup.20260810T120000.000000Z",
         "read:/opt/payments/app.py.incidentlens-backup.20260810T120000.000000Z",
-        "write:/opt/payments/.app.py.incidentlens-tmp-chg-chg-1",
-        "read:/opt/payments/app.py",
-        "rename:/opt/payments/.app.py.incidentlens-tmp-chg-chg-1:/opt/payments/app.py",
+        "write:/opt/payments/.app.py.incidentlens-tmp-chg-1",
+        "rename:/opt/payments/.app.py.incidentlens-tmp-chg-1:/opt/payments/app.py",
     ]
     assert result.status is ChangeSetStatus.APPLIED
+
+
+def test_local_backup_failure_prevents_write(
+    change_manager: ChangeManager, fake_transport: FakeChangeTransport
+) -> None:
+    """When the encrypted local backup fails, no remote write happens."""
+    with patch.object(
+        change_manager._vault,
+        "store",
+        side_effect=RuntimeError("vault unavailable"),
+    ):
+        result = asyncio.run(
+            change_manager.apply(single_file_changeset("/opt/payments/app.py"))
+        )
+
+    assert result.status is ChangeSetStatus.FAILED
+    assert not any(call.startswith("write:") for call in fake_transport.calls)
+    assert fake_transport.files[PurePosixPath("/opt/payments/app.py")] == b"old\n"
+
+
+def test_remote_cp_failure_prevents_write(
+    fake_transport: FakeChangeTransport, change_manager: ChangeManager
+) -> None:
+    """When remote ``cp --preserve`` fails, no write happens."""
+    fake_transport.fail_copy_for(PurePosixPath("/opt/payments/app.py"))
+
+    result = asyncio.run(
+        change_manager.apply(single_file_changeset("/opt/payments/app.py"))
+    )
+
+    assert result.status is ChangeSetStatus.FAILED
+    assert not any(call.startswith("write:") for call in fake_transport.calls)
+    assert fake_transport.files[PurePosixPath("/opt/payments/app.py")] == b"old\n"
+
+
+def test_backup_hash_mismatch_prevents_write(
+    change_manager: ChangeManager, fake_transport: FakeChangeTransport
+) -> None:
+    """When the local backup does not round-trip, no write happens."""
+    real_load = change_manager._vault.load
+
+    def tampered(ref):
+        return real_load(ref) + b"tampered"
+
+    with patch.object(change_manager._vault, "load", side_effect=tampered):
+        result = asyncio.run(
+            change_manager.apply(single_file_changeset("/opt/payments/app.py"))
+        )
+
+    assert result.status is ChangeSetStatus.FAILED
+    assert not any(call.startswith("write:") for call in fake_transport.calls)
+    assert fake_transport.files[PurePosixPath("/opt/payments/app.py")] == b"old\n"
+
+
+def test_stale_source_hash_prevents_write(
+    fake_transport: FakeChangeTransport, change_manager: ChangeManager
+) -> None:
+    """When the source hash is stale, no backup or write happens."""
+    fake_transport.files[PurePosixPath("/opt/payments/app.py")] = b"changed\n"
+
+    result = asyncio.run(
+        change_manager.apply(single_file_changeset("/opt/payments/app.py"))
+    )
+
+    assert result.status is ChangeSetStatus.FAILED
+    assert not any(call.startswith("write:") for call in fake_transport.calls)
+    assert not any(call.startswith("copy:") for call in fake_transport.calls)
+
+
+def test_symlink_target_prevents_write(
+    fake_transport: FakeChangeTransport, change_manager: ChangeManager
+) -> None:
+    """A symlink target is rejected before any backup or write."""
+    fake_transport.symlinks.add(PurePosixPath("/opt/payments/app.py"))
+
+    result = asyncio.run(
+        change_manager.apply(single_file_changeset("/opt/payments/app.py"))
+    )
+
+    assert result.status is ChangeSetStatus.FAILED
+    assert not any(call.startswith("write:") for call in fake_transport.calls)
+    assert fake_transport.files[PurePosixPath("/opt/payments/app.py")] == b"old\n"
+
+
+def test_existing_temp_filename_prevents_write(
+    fake_transport: FakeChangeTransport, change_manager: ChangeManager
+) -> None:
+    """A pre-existing temp filename is never silently overwritten."""
+    fake_transport.files[
+        PurePosixPath("/opt/payments/.app.py.incidentlens-tmp-chg-1")
+    ] = b"attacker-controlled"
+
+    result = asyncio.run(
+        change_manager.apply(single_file_changeset("/opt/payments/app.py"))
+    )
+
+    assert result.status is ChangeSetStatus.FAILED
+    assert fake_transport.files[PurePosixPath("/opt/payments/app.py")] == b"old\n"
+    assert (
+        fake_transport.files[
+            PurePosixPath("/opt/payments/.app.py.incidentlens-tmp-chg-1")
+        ]
+        == b"attacker-controlled"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Multi-file failure and rollback
+# ---------------------------------------------------------------------------
+
+
+def test_two_file_edit_applies_both_files(
+    fake_transport: FakeChangeTransport, change_manager: ChangeManager
+) -> None:
+    """A clean multi-file changeset edits every file (regression for the
+    leaked-loop-variable bug)."""
+    result = asyncio.run(change_manager.apply(two_file_edit_request()))
+
+    assert result.status is ChangeSetStatus.APPLIED
+    assert fake_transport.files[PurePosixPath("/opt/payments/a.py")] == b"new-a\n"
+    assert fake_transport.files[PurePosixPath("/opt/payments/b.py")] == b"new-b\n"
 
 
 def test_second_rename_failure_restores_first_file(
@@ -155,3 +291,217 @@ def test_second_rename_failure_restores_first_file(
     assert all(
         "rm -r" not in call and "rm -fR" not in call for call in fake_transport.calls
     )
+
+
+def test_new_file_rollback_removes_only_via_remove_file(
+    change_manager: ChangeManager, fake_transport: FakeChangeTransport
+) -> None:
+    """A newly created file is rolled back with the typed single-file remove_file."""
+    fake_transport.fail_rename_for(PurePosixPath("/opt/payments/b.py"))
+    new_path = PurePosixPath("/opt/payments/a-new.txt")
+    request = changeset(
+        write("/opt/payments/a-new.txt", b"new content\n"),
+        edit("/opt/payments/b.py", b"old-b\n", "old-b", "new-b"),
+    )
+
+    result = asyncio.run(change_manager.apply(request))
+
+    assert result.status is ChangeSetStatus.ROLLED_BACK
+    assert new_path not in fake_transport.files
+    assert fake_transport.files[PurePosixPath("/opt/payments/b.py")] == b"old-b\n"
+    assert f"remove:{new_path}" in fake_transport.calls
+    assert all(
+        "rm -r" not in call and "rm -fR" not in call for call in fake_transport.calls
+    )
+
+
+# ---------------------------------------------------------------------------
+# FileWriteRequest semantics
+# ---------------------------------------------------------------------------
+
+
+def test_new_file_write_applies(
+    fake_transport: FakeChangeTransport, change_manager: ChangeManager
+) -> None:
+    """A write to an absent target creates the file with no remote backup."""
+    target = PurePosixPath("/opt/payments/generated.py")
+    result = asyncio.run(change_manager.apply(changeset(write(str(target), b"x = 1\n"))))
+
+    assert result.status is ChangeSetStatus.APPLIED
+    assert fake_transport.files[target] == b"x = 1\n"
+
+
+def test_new_file_write_rejects_existing_target(
+    fake_transport: FakeChangeTransport, change_manager: ChangeManager
+) -> None:
+    """A write with ``expected_sha256=None`` rejects an existing target."""
+    target = PurePosixPath("/opt/payments/generated.py")
+    fake_transport.files[target] = b"x = 1\n"
+
+    result = asyncio.run(
+        change_manager.apply(changeset(write(str(target), b"y = 2\n")))
+    )
+
+    assert result.status is ChangeSetStatus.FAILED
+    assert fake_transport.files[target] == b"x = 1\n"
+
+
+# ---------------------------------------------------------------------------
+# Replacement semantics
+# ---------------------------------------------------------------------------
+
+
+def test_overlapping_replacements_are_rejected(
+    change_manager: ChangeManager, fake_transport: FakeChangeTransport
+) -> None:
+    """Overlapping replacement ranges are rejected before any write."""
+    request = changeset(
+        FileEditRequest(
+            operation_id="op-overlap",
+            incident_id="inc-1",
+            project_id="payments",
+            target_id="dev-a",
+            service="payment-api",
+            scope=HostScope(),
+            path=PurePosixPath("/opt/payments/app.py"),
+            expected_sha256=hashlib.sha256(b"old\n").hexdigest(),
+            replacements=(
+                TextReplacement(old_text="ol", new_text="x"),
+                TextReplacement(old_text="ld\n", new_text="y\n"),
+            ),
+        )
+    )
+
+    result = asyncio.run(change_manager.apply(request))
+
+    assert result.status is ChangeSetStatus.FAILED
+    assert not any(call.startswith("write:") for call in fake_transport.calls)
+
+
+# ---------------------------------------------------------------------------
+# Protected paths and approvals
+# ---------------------------------------------------------------------------
+
+
+def test_protected_path_requires_approval(
+    change_manager: ChangeManager, fake_transport: FakeChangeTransport
+) -> None:
+    """A .env change requires an approval and is rejected without one."""
+    fake_transport.files[PurePosixPath("/opt/payments/.env")] = b"old\n"
+
+    result = asyncio.run(
+        change_manager.apply(changeset(edit("/opt/payments/.env", b"old\n", "old", "new")))
+    )
+
+    assert result.status is ChangeSetStatus.FAILED
+    assert fake_transport.files[PurePosixPath("/opt/payments/.env")] == b"old\n"
+
+
+# ---------------------------------------------------------------------------
+# verify() and rollback()
+# ---------------------------------------------------------------------------
+
+
+def test_verify_transitions_applied_to_verified(
+    change_manager: ChangeManager, fake_transport: FakeChangeTransport
+) -> None:
+    asyncio.run(change_manager.apply(single_file_changeset("/opt/payments/app.py")))
+
+    asyncio.run(change_manager.verify("chg-1", "verified"))
+
+    assert change_manager._store.get("chg-1").status is ChangeSetStatus.VERIFIED
+
+
+def test_verify_failure_transitions_to_failed(
+    change_manager: ChangeManager, fake_transport: FakeChangeTransport
+) -> None:
+    asyncio.run(change_manager.apply(single_file_changeset("/opt/payments/app.py")))
+
+    asyncio.run(change_manager.verify("chg-1", "failed"))
+
+    assert change_manager._store.get("chg-1").status is ChangeSetStatus.FAILED
+
+
+def test_rollback_restores_applied_changeset(
+    change_manager: ChangeManager, fake_transport: FakeChangeTransport
+) -> None:
+    asyncio.run(change_manager.apply(single_file_changeset("/opt/payments/app.py")))
+    assert fake_transport.files[PurePosixPath("/opt/payments/app.py")] == b"new\n"
+
+    asyncio.run(change_manager.rollback("chg-1"))
+
+    assert fake_transport.files[PurePosixPath("/opt/payments/app.py")] == b"old\n"
+    assert change_manager._store.get("chg-1").status is ChangeSetStatus.ROLLED_BACK
+
+
+# ---------------------------------------------------------------------------
+# Container backend
+# ---------------------------------------------------------------------------
+
+
+def test_container_backend_uses_fixed_docker_argv(
+    fake_transport: FakeChangeTransport,
+) -> None:
+    """Container file operations use fixed docker exec argv templates."""
+    backend = ContainerFileBackend(fake_transport, "payments-api-1")
+
+    asyncio.run(backend.read_bytes(PurePosixPath("/app/app.py"), max_bytes=1024))
+    asyncio.run(backend.copy_file(PurePosixPath("/app/a"), PurePosixPath("/app/b")))
+
+    argv = fake_transport.run_argv_calls
+    assert ("docker", "exec", "payments-api-1", "cat", "--", "/app/app.py") in argv
+    assert (
+        "docker",
+        "exec",
+        "payments-api-1",
+        "cp",
+        "--preserve",
+        "--",
+        "/app/a",
+        "/app/b",
+    ) in argv
+
+
+def test_container_scope_changeset_applies(
+    change_manager: ChangeManager,
+) -> None:
+    """A container-scope changeset applies via the fixed docker backend."""
+    transport = FakeChangeTransport()
+    transport.container_files[PurePosixPath("/app/app.py")] = b"old\n"
+    container_req = ChangeSetRequest(
+        changeset_id="chg-c",
+        files=(
+            FileEditRequest(
+                operation_id="op-app.py",
+                incident_id="inc-1",
+                project_id="payments",
+                target_id="dev-a",
+                service="payment-api",
+                scope=ContainerScope(container="payments-api-1"),
+                path=PurePosixPath("/app/app.py"),
+                expected_sha256=hashlib.sha256(b"old\n").hexdigest(),
+                replacements=(TextReplacement(old_text="old", new_text="new"),),
+            ),
+        ),
+        verification_plan="verify service behavior",
+        rollback_plan="restore the backup",
+    )
+
+    manager = ChangeManager(
+        store=change_manager._store,
+        vault=change_manager._vault,
+        policy=RemotePathPolicy(
+            ServiceRegistration(
+                compose_service="payment-api",
+                container_names=("payments-api-1",),
+                allowed_host_paths=(PurePosixPath("/opt/payments"),),
+                allowed_container_paths=(PurePosixPath("/app"),),
+            )
+        ),
+        transport=transport,
+    )
+
+    result = asyncio.run(manager.apply(container_req))
+
+    assert result.status is ChangeSetStatus.APPLIED
+    assert transport.container_files[PurePosixPath("/app/app.py")] == b"new\n"

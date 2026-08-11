@@ -7,12 +7,14 @@ underlying :class:`~incidentlens_control_plane.remote_ops.transport.RemoteTransp
 from __future__ import annotations
 
 import hashlib
+import secrets
 from pathlib import PurePosixPath
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from incidentlens_control_plane.remote_ops.transport import (
     FileMetadata,
+    RemotePathError,
     RemoteTransport,
 )
 
@@ -193,3 +195,143 @@ class RemoteFileTools:
                 f"symbolic links are not supported: {path}"
             )
         return meta
+
+
+# ---------------------------------------------------------------------------
+# Container-scope file backend
+# ---------------------------------------------------------------------------
+
+
+class ContainerFileBackend:
+    """Container-scope file operations built from fixed ``docker exec`` argv.
+
+    Every operation is a fixed argv tuple — ``cat``, ``stat``, ``cp --preserve``,
+    ``chmod``, ``mv``, ``rm`` — executed through the host transport.  New content
+    is streamed to a randomized host temporary file via SFTP, copied into the
+    container with fixed ``docker cp``, then that exact host file is removed.
+    A missing utility surfaces as :class:`ContainerFileOperationUnsupported`;
+    the backend never falls back to generated Python or shell scripts.
+    """
+
+    def __init__(self, transport: RemoteTransport, container: str) -> None:
+        self._transport = transport
+        self._container = container
+
+    async def read_bytes(self, path: PurePosixPath, *, max_bytes: int) -> bytes:
+        result = await self._run(
+            ("docker", "exec", self._container, "cat", "--", str(path)),
+            timeout=30.0,
+        )
+        return result.stdout[:max_bytes]
+
+    async def lstat(self, path: PurePosixPath) -> FileMetadata:
+        result = await self._run(
+            (
+                "docker",
+                "exec",
+                self._container,
+                "stat",
+                "-c",
+                "%F|%s|%a|%u|%g|%Y",
+                "--",
+                str(path),
+            ),
+            timeout=30.0,
+        )
+        try:
+            fields = result.stdout.decode("utf-8", errors="replace").strip().split("|")
+            file_type, size_s, mode_s, uid_s, gid_s, mtime_s = fields
+            return FileMetadata(
+                path=path,
+                size=int(size_s),
+                mode=int(mode_s, 8),
+                uid=int(uid_s),
+                gid=int(gid_s),
+                modified_ns=int(mtime_s),
+                is_symlink="symbolic link" in file_type,
+            )
+        except (ValueError, IndexError) as exc:
+            raise ContainerFileOperationUnsupported(
+                f"unparseable stat output for {path}: "
+                f"{result.stdout.decode(errors='replace')}"
+            ) from exc
+
+    async def write_bytes(
+        self,
+        path: PurePosixPath,
+        content: bytes,
+        *,
+        mode: int = 0o644,
+        exclusive: bool = True,
+    ) -> None:
+        host_temp = PurePosixPath("/tmp") / f"incidentlens-{secrets.token_hex(8)}"
+        try:
+            await self._transport.write_bytes(
+                host_temp, content, mode=0o600, exclusive=exclusive
+            )
+            cp_result = await self._transport.run_argv(
+                ("docker", "cp", str(host_temp), f"{self._container}:{path}"),
+                timeout=30.0,
+            )
+            if cp_result.exit_status != 0:
+                raise ContainerFileOperationUnsupported(
+                    f"docker cp failed for {path}: "
+                    f"{cp_result.stderr.decode(errors='replace')}"
+                )
+            chmod_result = await self._transport.run_argv(
+                (
+                    "docker",
+                    "exec",
+                    self._container,
+                    "chmod",
+                    f"{mode:o}",
+                    "--",
+                    str(path),
+                ),
+                timeout=30.0,
+            )
+            if chmod_result.exit_status != 0:
+                raise ContainerFileOperationUnsupported(
+                    f"docker chmod failed for {path}: "
+                    f"{chmod_result.stderr.decode(errors='replace')}"
+                )
+        finally:
+            try:
+                await self._transport.remove_file(host_temp)
+            except RemotePathError:
+                pass
+
+    async def rename(self, source: PurePosixPath, target: PurePosixPath) -> None:
+        await self._run(
+            ("docker", "exec", self._container, "mv", "--", str(source), str(target)),
+            timeout=30.0,
+        )
+
+    async def remove_file(self, path: PurePosixPath) -> None:
+        await self._run(
+            ("docker", "exec", self._container, "rm", "--", str(path)),
+            timeout=30.0,
+        )
+
+    async def copy_file(
+        self,
+        source: PurePosixPath,
+        target: PurePosixPath,
+        *,
+        preserve: bool = True,
+    ) -> None:
+        argv = ["docker", "exec", self._container, "cp", "--", str(source), str(target)]
+        if preserve:
+            argv.insert(4, "--preserve")
+        await self._run(tuple(argv), timeout=30.0)
+
+    async def _run(
+        self, argv: tuple[str, ...], *, timeout: float
+    ) -> "object":
+        result = await self._transport.run_argv(argv, timeout=timeout)
+        if result.exit_status != 0:
+            raise ContainerFileOperationUnsupported(
+                f"container operation failed ({' '.join(argv[2:4])}): "
+                f"{result.stderr.decode(errors='replace')}"
+            )
+        return result

@@ -128,10 +128,16 @@ class AsyncSshTransport(RemoteTransport):
             raise _map_error(exc) from exc
 
     async def write_bytes(
-        self, path: PurePosixPath, content: bytes, *, mode: int
+        self,
+        path: PurePosixPath,
+        content: bytes,
+        *,
+        mode: int,
+        exclusive: bool = False,
     ) -> None:
         try:
-            async with self._sftp.open(str(path), "wb") as f:
+            mode_flag = "xb" if exclusive else "wb"
+            async with self._sftp.open(str(path), mode_flag) as f:
                 await f.write(content)
             await self._sftp.chmod(str(path), mode)
         except Exception as exc:
@@ -149,12 +155,18 @@ class AsyncSshTransport(RemoteTransport):
         except Exception as exc:
             raise _map_error(exc) from exc
 
-    async def copy_file(self, source: PurePosixPath, target: PurePosixPath) -> None:
+    async def copy_file(
+        self,
+        source: PurePosixPath,
+        target: PurePosixPath,
+        *,
+        preserve: bool = True,
+    ) -> None:
+        argv = ["cp", "--", str(source), str(target)]
+        if preserve:
+            argv.insert(1, "--preserve")
         try:
-            result = await self.run_argv(
-                ("cp", "--preserve", "--", str(source), str(target)),
-                timeout=30.0,
-            )
+            result = await self.run_argv(tuple(argv), timeout=30.0)
             if result.exit_status != 0:
                 raise RemotePathError(
                     f"copy failed: {result.stderr.decode(errors='replace')}"
