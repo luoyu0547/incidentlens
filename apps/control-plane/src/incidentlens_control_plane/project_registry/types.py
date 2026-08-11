@@ -1,5 +1,5 @@
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -10,6 +10,21 @@ class TargetRegistration(BaseModel):
     host: str = Field(min_length=1, max_length=255)
     ssh_user: str = Field(min_length=1, max_length=80)
     ssh_config_alias: str | None = Field(default=None, min_length=1, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    compose_working_directory: PurePosixPath | None = None
+    compose_project_name: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("compose_working_directory")
+    @classmethod
+    def compose_working_directory_must_be_absolute(
+        cls, value: PurePosixPath | None
+    ) -> PurePosixPath | None:
+        if value is not None:
+            if not value.is_absolute():
+                raise ValueError("compose_working_directory must be absolute")
+            if ".." in value.parts:
+                raise ValueError("compose_working_directory must not contain '..'")
+        return value
 
 
 class ServiceRegistration(BaseModel):
@@ -19,6 +34,9 @@ class ServiceRegistration(BaseModel):
     local_source_path: Path | None = None
     container_path_hints: tuple[str, ...] = ()
     allowed_log_paths: tuple[str, ...] = ()
+    allowed_host_paths: tuple[PurePosixPath, ...] = ()
+    allowed_container_paths: tuple[PurePosixPath, ...] = ()
+    protected_remote_paths: tuple[PurePosixPath, ...] = ()
 
     @field_validator("local_source_path")
     @classmethod
@@ -26,6 +44,18 @@ class ServiceRegistration(BaseModel):
         if value is not None and not value.is_absolute():
             raise ValueError("local_source_path must be absolute")
         return value
+
+    @field_validator("allowed_host_paths", "allowed_container_paths", "protected_remote_paths")
+    @classmethod
+    def remote_paths_must_be_absolute(
+        cls, values: tuple[PurePosixPath, ...]
+    ) -> tuple[PurePosixPath, ...]:
+        for value in values:
+            if not value.is_absolute():
+                raise ValueError("absolute")
+            if ".." in value.parts:
+                raise ValueError("remote paths must not contain '..'")
+        return values
 
 
 class ProjectRegistration(BaseModel):

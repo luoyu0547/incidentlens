@@ -1,5 +1,5 @@
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from incidentlens_control_plane.project_registry.types import (
@@ -68,4 +68,22 @@ def test_registration_rejects_duplicate_service_names(tmp_path: Path) -> None:
             local_source_paths=(tmp_path.resolve(),),
             targets=(),
             services=(service, service),
+        )
+
+
+def test_service_registration_accepts_absolute_remote_roots() -> None:
+    service = ServiceRegistration(
+        compose_service="payment-api",
+        allowed_host_paths=(PurePosixPath("/opt/payments"),),
+        allowed_container_paths=(PurePosixPath("/app"),),
+        protected_remote_paths=(PurePosixPath("/opt/payments/.env"),),
+    )
+    assert service.allowed_container_paths == (PurePosixPath("/app"),)
+
+
+def test_service_registration_rejects_relative_remote_root() -> None:
+    with pytest.raises(ValidationError, match="absolute"):
+        ServiceRegistration(
+            compose_service="payment-api",
+            allowed_host_paths=(PurePosixPath("opt/payments"),),
         )
