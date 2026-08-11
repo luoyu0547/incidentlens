@@ -65,6 +65,9 @@ class RemoteTransport(Protocol):
     async def remove_file(self, path: PurePosixPath) -> None:
         raise NotImplementedError
 
+    async def copy_file(self, source: PurePosixPath, target: PurePosixPath) -> None:
+        raise NotImplementedError
+
     async def run_argv(self, argv: tuple[str, ...], *, timeout: float) -> CommandResult:
         raise NotImplementedError
 

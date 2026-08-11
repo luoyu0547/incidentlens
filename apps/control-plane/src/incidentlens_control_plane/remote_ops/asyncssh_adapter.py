@@ -149,6 +149,19 @@ class AsyncSshTransport(RemoteTransport):
         except Exception as exc:
             raise _map_error(exc) from exc
 
+    async def copy_file(self, source: PurePosixPath, target: PurePosixPath) -> None:
+        try:
+            result = await self.run_argv(
+                ("cp", "--preserve", "--", str(source), str(target)),
+                timeout=30.0,
+            )
+            if result.exit_status != 0:
+                raise RemotePathError(
+                    f"copy failed: {result.stderr.decode(errors='replace')}"
+                )
+        except Exception as exc:
+            raise _map_error(exc) from exc
+
     # --- command execution ---
 
     async def run_argv(self, argv: tuple[str, ...], *, timeout: float) -> CommandResult:
