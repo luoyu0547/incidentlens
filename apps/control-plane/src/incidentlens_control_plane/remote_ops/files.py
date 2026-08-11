@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import stat
 from pathlib import PurePosixPath
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -142,7 +143,10 @@ class RemoteFileTools:
 
         while dirs and files_visited < _MAX_SEARCH_FILES:
             current = dirs.pop(0)
-            entries = await self._transport.list_directory(current)
+            try:
+                entries = await self._transport.list_directory(current)
+            except RemotePathError:
+                continue
 
             for entry in entries:
                 if len(matches) >= _MAX_SEARCH_MATCHES:
@@ -151,18 +155,24 @@ class RemoteFileTools:
                 if entry.is_symlink:
                     continue
 
-                if entry.size == 0:
-                    # Likely a directory; try listing it.
-                    sub_entries = await self._transport.list_directory(entry.path)
-                    if sub_entries or entry.size == 0:
-                        # Heuristic: if lstat says 0 bytes, treat as directory.
-                        dirs.append(entry.path)
+                # ``.``/``..`` are never walked: they would recurse forever and
+                # could escape the authorized root.
+                if entry.path.name in (".", ".."):
+                    continue
+
+                if self._is_directory_entry(entry):
+                    dirs.append(entry.path)
                     continue
 
                 files_visited += 1
-                data = await self._transport.read_bytes(
-                    entry.path, max_bytes=_MAX_SEARCH_FILE_BYTES
-                )
+                try:
+                    data = await self._transport.read_bytes(
+                        entry.path, max_bytes=_MAX_SEARCH_FILE_BYTES
+                    )
+                except RemotePathError:
+                    # Not a readable regular file (a server may report a
+                    # directory with a non-zero size); skip it.
+                    continue
                 for line_no, line in enumerate(data.split(b"\n"), start=1):
                     if len(matches) >= _MAX_SEARCH_MATCHES:
                         return tuple(matches)
@@ -180,6 +190,19 @@ class RemoteFileTools:
                         )
 
         return tuple(matches)
+
+    @staticmethod
+    def _is_directory_entry(entry: FileMetadata) -> bool:
+        """Return whether an entry is a directory.
+
+        Real SFTP servers populate the POSIX file-type bits in ``mode``;
+        that is the reliable signal because a directory's ``size`` may be 0
+        or a non-zero block count.  Test doubles often omit the type bits,
+        so fall back to the ``size == 0`` heuristic for them.
+        """
+        if entry.mode & 0o170000:
+            return stat.S_ISDIR(entry.mode)
+        return entry.size == 0
 
     # --- stat ---
 

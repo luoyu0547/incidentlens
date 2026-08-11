@@ -80,19 +80,20 @@ class FakePTYProcess:
         return ""
 
     def _build_response(self, output: str, exit_status: int, marker: bytes) -> bytes:
-        """Build a framed response."""
-        # The response format is:
-        # <echoed command lines>
-        # <command output>
-        # __incidentlens_status=<status>
-        # __INCIDENTLENS_END_<marker>__:<status>
-        lines = [
-            f"echo {output}".encode(),
-            output.encode(),
-            f"__incidentlens_status={exit_status}".encode(),
-            f"__INCIDENTLENS_END_{marker.decode()}__:{exit_status}".encode(),
-        ]
-        return b"\n".join(lines) + b"\n"
+        """Build a framed response that mirrors a non-PTY channel (no echo).
+
+        A real non-PTY shell does not echo the command or the framing lines;
+        the stream is exactly the command output followed by the marker line::
+
+            <command output>
+            __INCIDENTLENS_END_<marker>__:<status>
+        """
+        return (
+            output.encode()
+            + b"\n"
+            + f"__INCIDENTLENS_END_{marker.decode()}__:{exit_status}".encode()
+            + b"\n"
+        )
 
     async def read(self, max_bytes: int) -> bytes:
         """Read from the buffer."""

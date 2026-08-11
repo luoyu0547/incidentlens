@@ -2,12 +2,49 @@
 
 IncidentLens is being rebuilt as a safety-first control plane for diagnosing
 services across registered cloud servers. It is not a local fault-injection
-demo and it does not expose a general shell to an AI model.
+demo and it does not expose a general shell to an AI model. **No server-side
+IncidentLens agent is installed on remote hosts.**
+
+## Phase 2: Persistent Safe Remote Tools
+
+Phase 2 adds a safety boundary for real remote infrastructure. It never gives
+the model a general-purpose shell or SSH tool; instead it exposes typed remote
+operations behind policy, approval, and backup gates.
+
+### Features
+
+- **One persistent SSH connection** per registered target, with SFTP, command,
+  and shell channels (`SessionManager` + `AsyncSshTransport`)
+- **Persistent shell state** — `cd` and environment survive across commands
+- **Scoped read/list/search/stat** file tools bounded to allowed roots
+- **Large multi-location Edit/Write** with mandatory two-backup ordering:
+  an encrypted local backup plus a timestamped same-directory remote backup
+- **Stale-write detection and atomic replace** with multi-file rollback
+- **Permanent `rm -rf` denial** and a three-tier command policy
+  (automatic / approval-required / forbidden)
+- **Exact, single-use approvals** for Docker/service-impacting operations
+- **Durable audit events** and encrypted local backup vault
+
+### Quick Start (live verification)
+
+The live acceptance test is opt-in and requires Docker plus `ssh-keygen`. It
+starts a disposable OpenSSH container (`infra/test-ssh`), exercises all eight
+acceptance points, and tears the container down:
+
+```bash
+uv run pytest -q                                          # unit tests
+INCIDENTLENS_RUN_LIVE_SSH=1 uv run pytest tests/integration/test_live_ssh_tools.py -q
+```
+
+The fixture skips with a clear reason when the variable is absent or Docker is
+unavailable. See [Phase 2 Verification Guide](docs/phase-2-remote-tools-verification.md)
+for registration JSON, manual connection/read/edit examples, backup locations,
+the approval flow, rollback, and cleanup.
 
 ## Phase 1: Local Runtime and Project Registry
 
-The current implementation provides a **local-only runtime** that does not yet
-open SSH sessions to remote servers. It manages project metadata, events, and
+Phase 1 provides a **local-only runtime** and the **project registry** that
+Phase 2's remote tools build on. It manages project metadata, events, and
 local Docker Compose configurations.
 
 ### Features

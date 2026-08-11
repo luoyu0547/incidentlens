@@ -119,11 +119,16 @@ class PersistentShell:
     def _parse_output(self, output: bytes, marker: bytes) -> tuple[bytes, int]:
         """Parse the framed output to extract stdout and exit status.
 
-        The output format is:
-        <command echo>
-        <command output>
-        __incidentlens_status=<status>
-        <marker>:<status>
+        The channel is a non-PTY session (``open_shell``/``open_process``
+        allocate no terminal), so the shell never echoes the command or the
+        framing lines back.  The stream is exactly the command's stdout
+        followed by the marker line::
+
+            <command output>
+            __INCIDENTLENS_END_<marker>__:<status>
+
+        Everything before the marker line is treated as command stdout, and
+        the trailing separator newline is dropped.
         """
         # Find the marker line
         marker_idx = output.find(marker)
@@ -147,29 +152,11 @@ class PersistentShell:
             self._closed = True
             return output, -1
 
-        # Extract stdout (everything before the framing lines)
-        # Remove the echoed command and framing
-        lines = output.split(b"\n")
-        stdout_lines = []
-        skip_next = False
-        for line in lines:
-            # Skip the echoed command
-            if skip_next:
-                skip_next = False
-                continue
-            # Skip framing lines
-            if line.strip().startswith(b"__incidentlens_status="):
-                continue
-            if marker in line:
-                continue
-            stdout_lines.append(line)
-
-        # Remove the first line (echoed command)
-        if stdout_lines:
-            stdout_lines = stdout_lines[1:]
-
-        stdout = b"\n".join(stdout_lines)
-        # Remove trailing newline if present
+        # Everything before the marker line is command stdout.  The printf
+        # format emits a leading newline before the marker line; drop that
+        # separator so multi-line output is preserved exactly.
+        header_end = output.rfind(b"\n", 0, marker_idx)
+        stdout = output[:header_end] if header_end != -1 else b""
         if stdout.endswith(b"\n"):
             stdout = stdout[:-1]
 

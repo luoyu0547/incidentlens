@@ -1,0 +1,18 @@
+# Disposable SSH target used by the opt-in live integration test
+# (tests/integration/test_live_ssh_tools.py).
+#
+# The container publishes its SSH port to 127.0.0.1 on an ephemeral host port
+# and authenticates only with the public key supplied through
+# TEST_AUTHORIZED_KEYS (required when starting the project).  Never commit a
+# private key; the fixture generates a fresh ed25519 keypair under tmp_path
+# before every run and tears the project down afterwards.
+services:
+  test-ssh:
+    build: .
+    image: incidentlens/test-ssh:latest
+    ports:
+      - "127.0.0.1::22"
+    volumes:
+      - ${TEST_AUTHORIZED_KEYS}:/home/incidentlens/.ssh/authorized_keys:ro
+    environment:
+      - DEBIAN_FRONTEND=noninteractive

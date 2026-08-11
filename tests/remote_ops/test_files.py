@@ -185,3 +185,79 @@ async def test_search_matches_contain_path_line_text(
     assert m.line_number >= 1
     assert isinstance(m.text, str)
     assert "print" in m.text
+
+
+@pytest.mark.asyncio
+async def test_search_skips_dot_dotdot_and_nonzero_size_directories() -> None:
+    """Search never recurses through ``.``/``..`` and treats directories with a
+    non-zero size as directories (real SFTP servers report a directory block
+    count in ``size``)."""
+
+    class DirAwareTransport(FakeTransport):
+        async def list_directory(self, path: PurePosixPath) -> tuple[FileMetadata, ...]:
+            if path == PurePosixPath("/opt/payments"):
+                return (
+                    FileMetadata(
+                        path=PurePosixPath("/opt/payments/."),
+                        size=96,
+                        mode=0o40755,
+                        uid=1000,
+                        gid=1000,
+                        modified_ns=0,
+                        is_symlink=False,
+                    ),
+                    FileMetadata(
+                        path=PurePosixPath("/opt/payments/.."),
+                        size=96,
+                        mode=0o40755,
+                        uid=1000,
+                        gid=1000,
+                        modified_ns=0,
+                        is_symlink=False,
+                    ),
+                    FileMetadata(
+                        path=PurePosixPath("/opt/payments/subdir"),
+                        size=96,
+                        mode=0o40755,
+                        uid=1000,
+                        gid=1000,
+                        modified_ns=0,
+                        is_symlink=False,
+                    ),
+                    FileMetadata(
+                        path=PurePosixPath("/opt/payments/app.py"),
+                        size=10,
+                        mode=0o100644,
+                        uid=1000,
+                        gid=1000,
+                        modified_ns=0,
+                        is_symlink=False,
+                    ),
+                )
+            if path == PurePosixPath("/opt/payments/subdir"):
+                return (
+                    FileMetadata(
+                        path=PurePosixPath("/opt/payments/subdir/nested.py"),
+                        size=9,
+                        mode=0o100644,
+                        uid=1000,
+                        gid=1000,
+                        modified_ns=0,
+                        is_symlink=False,
+                    ),
+                )
+            return ()
+
+        async def read_bytes(self, path: PurePosixPath, *, max_bytes: int) -> bytes:
+            if path.name == "app.py":
+                return b"print('root')\n"[:max_bytes]
+            if path.name == "nested.py":
+                return b"print('nested')\n"[:max_bytes]
+            return b""
+
+    tools = RemoteFileTools(DirAwareTransport(target=None, _files={}))  # type: ignore[arg-type]
+    matches = await tools.search(PurePosixPath("/opt/payments"), "print")
+    assert {m.path for m in matches} == {
+        PurePosixPath("/opt/payments/app.py"),
+        PurePosixPath("/opt/payments/subdir/nested.py"),
+    }
