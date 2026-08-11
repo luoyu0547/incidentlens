@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import re
+import shlex
 from collections.abc import Mapping
 from pathlib import PurePosixPath
+
+from pydantic import BaseModel, ConfigDict
 
 from incidentlens_control_plane.project_registry.types import ServiceRegistration
 from incidentlens_control_plane.remote_ops.transport import FileMetadata, RemoteTransport
@@ -12,9 +16,11 @@ from incidentlens_control_plane.remote_ops.types import (
     ContainerScope,
     HostScope,
     OperationKind,
+    OperationRisk,
     PolicyDecision,
     RemoteAction,
     RemoteScope,
+    ShellRequest,
     TargetProfile,
 )
 
@@ -177,3 +183,313 @@ class RemoteOperationPolicy:
             )
 
         return PolicyDecision(allowed=False, reason="operation is not supported")
+
+
+# ---------------------------------------------------------------------------
+# Shell command policy
+# ---------------------------------------------------------------------------
+
+
+class ShellPolicyDecision(BaseModel):
+    """Machine- and UI-readable decision for shell command classification."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    risk: OperationRisk
+    reason: str
+    approval_can_override: bool
+    canonical_operation: str
+
+
+# Patterns that indicate dangerous command features
+_NUL_RE = re.compile(r"\x00")
+_NEWLINE_RE = re.compile(r"\n")
+_CMD_SUBSTITUTION_RE = re.compile(r"\$\(|`")
+_EVAL_RE = re.compile(r"\beval\b")
+_XARGS_RM_RE = re.compile(r"\bxargs\b.*\brm\b")
+_FIND_DELETE_RE = re.compile(r"\bfind\b.*-delete")
+
+
+def _parse_command(command: str) -> list[str] | None:
+    """Parse a command string into tokens, returning None if dangerous features detected.
+
+    Rejects:
+    - NUL bytes
+    - Newlines (command injection)
+    - Malformed quoting (ValueError from shlex)
+    - Command substitution ($() or backticks)
+    - eval
+    - xargs rm
+    - find -delete
+    """
+    # Check for NUL bytes
+    if _NUL_RE.search(command):
+        return None
+
+    # Check for newlines (command injection)
+    if _NEWLINE_RE.search(command):
+        return None
+
+    # Check for command substitution
+    if _CMD_SUBSTITUTION_RE.search(command):
+        return None
+
+    # Check for eval
+    if _EVAL_RE.search(command):
+        return None
+
+    # Check for xargs rm
+    if _XARGS_RM_RE.search(command):
+        return None
+
+    # Check for find -delete
+    if _FIND_DELETE_RE.search(command):
+        return None
+
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+
+    return tokens
+
+
+def _strip_prefixes(tokens: list[str]) -> list[str]:
+    """Strip leading sudo, env NAME=value, and command prefixes."""
+    result = list(tokens)
+    while result:
+        token = result[0]
+        if token == "sudo":
+            result = result[1:]
+        elif token == "command":
+            result = result[1:]
+        elif token == "env":
+            # Skip env and any NAME=value pairs
+            result = result[1:]
+            while result and "=" in result[0]:
+                result = result[1:]
+        else:
+            break
+    return result
+
+
+def _has_recursive_force_rm(tokens: list[str]) -> bool:
+    """Check if command is a recursive + force rm.
+
+    Combines short flags so every recursive-plus-force combination is detected.
+    """
+    stripped = _strip_prefixes(tokens)
+    if not stripped:
+        return False
+
+    cmd = stripped[0]
+    if cmd != "rm":
+        return False
+
+    # Collect all flags from the remaining tokens
+    flags = ""
+    for token in stripped[1:]:
+        if token.startswith("-") and not token.startswith("--"):
+            flags += token[1:]  # Remove the leading -
+        elif token.startswith("--recursive") or token.startswith("--force"):
+            flags += "rf"  # Treat long flags as short flags
+        else:
+            break
+
+    # Check for both recursive and force flags
+    has_recursive = any(f in flags for f in ("r", "R"))
+    has_force = "f" in flags
+
+    return has_recursive and has_force
+
+
+def _is_path_authorized(
+    path: str,
+    service: ServiceRegistration,
+) -> bool:
+    """Check if a path is within allowed roots for the service."""
+    try:
+        pp = PurePosixPath(path)
+        if not pp.is_absolute():
+            return False
+        if ".." in pp.parts:
+            return False
+
+        # Check against host roots
+        for root in service.allowed_host_paths:
+            if pp.is_relative_to(root):
+                return True
+
+        # Check against container roots
+        for root in service.allowed_container_paths:
+            if pp.is_relative_to(root):
+                return True
+
+        return False
+    except Exception:
+        return False
+
+
+class CommandPolicy:
+    """Conservative command classifier for shell execution.
+
+    The policy is deliberately conservative: parsing uncertainty becomes
+    APPROVAL_REQUIRED, never automatic execution.
+    """
+
+    def evaluate(
+        self,
+        request: ShellRequest,
+        service: ServiceRegistration,
+    ) -> ShellPolicyDecision:
+        """Classify a shell command and return a policy decision."""
+        command = request.command
+
+        # Parse the command
+        tokens = _parse_command(command)
+        if tokens is None:
+            return ShellPolicyDecision(
+                risk=OperationRisk.FORBIDDEN,
+                reason="command contains dangerous features "
+                "(NUL, newlines, command substitution, eval, or malformed syntax)",
+                approval_can_override=False,
+                canonical_operation=command,
+            )
+
+        # Check for recursive + force rm (always forbidden)
+        if _has_recursive_force_rm(tokens):
+            return ShellPolicyDecision(
+                risk=OperationRisk.FORBIDDEN,
+                reason="recursive force rm is permanently forbidden",
+                approval_can_override=False,
+                canonical_operation=command,
+            )
+
+        # Strip prefixes to identify the executable
+        stripped = _strip_prefixes(tokens)
+        if not stripped:
+            return ShellPolicyDecision(
+                risk=OperationRisk.APPROVAL_REQUIRED,
+                reason="empty command after stripping prefixes",
+                approval_can_override=True,
+                canonical_operation=command,
+            )
+
+        executable = stripped[0]
+
+        # --- Automatic reads ---
+        if executable == "pwd":
+            return ShellPolicyDecision(
+                risk=OperationRisk.AUTO_READ,
+                reason="pwd is a safe read-only command",
+                approval_can_override=True,
+                canonical_operation=command,
+            )
+
+        if executable == "docker" and len(stripped) > 1:
+            docker_subcmd = stripped[1]
+
+            # docker ps is automatic
+            if docker_subcmd == "ps":
+                return ShellPolicyDecision(
+                    risk=OperationRisk.AUTO_READ,
+                    reason="docker ps is a safe read-only command",
+                    approval_can_override=True,
+                    canonical_operation=command,
+                )
+
+            # docker inspect is automatic for registered containers
+            if docker_subcmd == "inspect" and len(stripped) > 2:
+                target_container = stripped[2]
+                if target_container in service.container_names:
+                    return ShellPolicyDecision(
+                        risk=OperationRisk.AUTO_READ,
+                        reason=f"docker inspect {target_container} is a registered container",
+                        approval_can_override=True,
+                        canonical_operation=command,
+                    )
+
+            # docker logs is automatic for registered containers
+            if docker_subcmd == "logs" and len(stripped) > 2:
+                target_container = stripped[2]
+                if target_container in service.container_names:
+                    return ShellPolicyDecision(
+                        risk=OperationRisk.AUTO_READ,
+                        reason=f"docker logs {target_container} is a registered container",
+                        approval_can_override=True,
+                        canonical_operation=command,
+                    )
+
+            # docker compose ps/logs/config are automatic for registered services
+            if docker_subcmd == "compose" and len(stripped) > 2:
+                compose_subcmd = stripped[2]
+                if compose_subcmd in ("ps", "logs", "config"):
+                    return ShellPolicyDecision(
+                        risk=OperationRisk.AUTO_READ,
+                        reason=f"docker compose {compose_subcmd} is a safe read-only command",
+                        approval_can_override=True,
+                        canonical_operation=command,
+                    )
+
+            # docker compose up/down need approval
+            if docker_subcmd == "compose" and len(stripped) > 2:
+                compose_subcmd = stripped[2]
+                if compose_subcmd in ("up", "down"):
+                    return ShellPolicyDecision(
+                        risk=OperationRisk.APPROVAL_REQUIRED,
+                        reason=f"docker compose {compose_subcmd} modifies system state",
+                        approval_can_override=True,
+                        canonical_operation=command,
+                    )
+
+            # docker restart/rm need approval
+            if docker_subcmd in ("restart", "rm"):
+                return ShellPolicyDecision(
+                    risk=OperationRisk.APPROVAL_REQUIRED,
+                    reason=f"docker {docker_subcmd} modifies container state",
+                    approval_can_override=True,
+                    canonical_operation=command,
+                )
+
+        # --- File read commands (automatic when paths are valid) ---
+        if executable in ("ls", "cat", "stat"):
+            # Check all path arguments
+            if len(stripped) > 1:
+                all_paths_valid = all(
+                    _is_path_authorized(arg, service)
+                    for arg in stripped[1:]
+                    if arg.startswith("/")
+                )
+                if all_paths_valid:
+                    return ShellPolicyDecision(
+                        risk=OperationRisk.AUTO_READ,
+                        reason=f"{executable} with valid paths",
+                        approval_can_override=True,
+                        canonical_operation=command,
+                    )
+
+        # --- sed -i is forbidden (must use remote_edit) ---
+        if executable == "sed" and "-i" in stripped:
+            return ShellPolicyDecision(
+                risk=OperationRisk.FORBIDDEN,
+                reason="use remote_edit so mandatory backups cannot be bypassed",
+                approval_can_override=False,
+                canonical_operation=command,
+            )
+
+        # --- Package managers need approval ---
+        if executable in ("apt-get", "apt", "yum", "dnf", "pip", "npm"):
+            return ShellPolicyDecision(
+                risk=OperationRisk.APPROVAL_REQUIRED,
+                reason=f"{executable} modifies system packages",
+                approval_can_override=True,
+                canonical_operation=command,
+            )
+
+        # --- Unclassified commands require approval ---
+        return ShellPolicyDecision(
+            risk=OperationRisk.APPROVAL_REQUIRED,
+            reason=f"unclassified command {executable!r} requires approval",
+            approval_can_override=True,
+            canonical_operation=command,
+        )

@@ -19,14 +19,22 @@ from incidentlens_control_plane.remote_ops.gateway import (
     ShellResult,
 )
 from incidentlens_control_plane.remote_ops.policy import (
+    CommandPolicy,
     RemoteOperationPolicy,
     RemotePathDenied,
     RemotePathPolicy,
+    ShellPolicyDecision,
 )
 from incidentlens_control_plane.remote_ops.sessions import (
     ContainerSession,
     HostSession,
     SessionManager,
+)
+from incidentlens_control_plane.remote_ops.shell import (
+    PersistentShell,
+)
+from incidentlens_control_plane.remote_ops.shell import (
+    ShellResult as PersistentShellResult,
 )
 from incidentlens_control_plane.remote_ops.transport import (
     CommandResult,
@@ -67,6 +75,7 @@ __all__ = [
     "ChangeControls",
     "ChangeSetRequest",
     "CommandForbidden",
+    "CommandPolicy",
     "CommandResult",
     "ContainerFileOperationUnsupported",
     "ContainerScope",
@@ -85,6 +94,8 @@ __all__ = [
     "HostSession",
     "OperationKind",
     "OperationRisk",
+    "PersistentShell",
+    "PersistentShellResult",
     "RemoteAction",
     "RemoteConnectionError",
     "RemoteError",
@@ -104,6 +115,7 @@ __all__ = [
     "ScopeKind",
     "SearchMatch",
     "SessionManager",
+    "ShellPolicyDecision",
     "ShellRequest",
     "ShellResult",
     "TargetProfile",
