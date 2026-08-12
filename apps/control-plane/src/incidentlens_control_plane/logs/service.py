@@ -32,6 +32,7 @@ from incidentlens_control_plane.logs.types import (
     LogSourceKind,
     ProcessedLogLine,
     RawLogLine,
+    UnregisteredLogContainer,
 )
 from incidentlens_control_plane.project_registry.store import ProjectRegistryStore
 from incidentlens_control_plane.project_registry.types import (
@@ -119,7 +120,7 @@ class LogService:
     ) -> tuple[RawLogLine, ...]:
         if request.source_kind == LogSourceKind.DOCKER:
             if request.source_ref not in svc.container_names:
-                raise ValueError(
+                raise UnregisteredLogContainer(
                     f"container {request.source_ref!r} is not a registered container"
                 )
             session = await self._sessions.connect(target)

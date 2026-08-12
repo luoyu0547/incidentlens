@@ -4,6 +4,10 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class UnregisteredLogContainer(Exception):
+    """Raised when a docker/container-scope query names an unregistered container."""
+
+
 class LogSeverity(StrEnum):
     TRACE = "trace"
     DEBUG = "debug"

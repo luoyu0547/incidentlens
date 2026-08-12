@@ -64,6 +64,13 @@ def create_app(
     from incidentlens_control_plane.routes.approvals import router as approvals_router
     from incidentlens_control_plane.routes.changes import router as changes_router
     from incidentlens_control_plane.routes.events import router as events_router
+    from incidentlens_control_plane.routes.evidence import (
+        incidents_router,
+    )
+    from incidentlens_control_plane.routes.evidence import (
+        router as evidence_router,
+    )
+    from incidentlens_control_plane.routes.logs import router as logs_router
     from incidentlens_control_plane.routes.projects import router as projects_router
     from incidentlens_control_plane.routes.remote_sessions import (
         router as remote_sessions_router,
@@ -74,6 +81,9 @@ def create_app(
     application.include_router(events_router)
     application.include_router(projects_router)
     application.include_router(remote_sessions_router)
+    application.include_router(logs_router)
+    application.include_router(evidence_router)
+    application.include_router(incidents_router)
 
     return application
 

@@ -13,6 +13,9 @@ from incidentlens_control_plane.changes.store import ChangeSetStore
 from incidentlens_control_plane.config import RuntimeSettings
 from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
+from incidentlens_control_plane.evidence.store import EvidenceStore
+from incidentlens_control_plane.logs.service import LogService
+from incidentlens_control_plane.logs.store import LogStore
 from incidentlens_control_plane.project_registry.store import ProjectRegistryStore
 from incidentlens_control_plane.remote_ops.asyncssh_adapter import (
     AsyncSshTransportFactory,
@@ -35,6 +38,9 @@ class RuntimeServices:
     backups: EncryptedBackupVault
     changes: ChangeManager
     remote_tools: RemoteToolGateway
+    log_store: LogStore
+    evidence: EvidenceStore
+    logs: LogService
 
 
 def build_runtime(
@@ -62,10 +68,14 @@ def build_runtime(
     events = RuntimeEventStore(connect)
     approval_store = ApprovalStore(connect)
     change_store = ChangeSetStore(connect)
+    log_store = LogStore(connect)
+    evidence = EvidenceStore(connect)
     projects.migrate()
     events.migrate()
     approval_store.migrate()
     change_store.migrate()
+    log_store.migrate()
+    evidence.migrate()
 
     broker = RuntimeEventBroker()
     approvals = ApprovalService(
@@ -99,6 +109,12 @@ def build_runtime(
         events=events,
         broker=broker,
     )
+    logs = LogService(
+        projects=projects,
+        store=log_store,
+        sessions=sessions,
+        evidence=evidence,
+    )
 
     return RuntimeServices(
         projects=projects,
@@ -110,4 +126,7 @@ def build_runtime(
         backups=backups,
         changes=changes,
         remote_tools=remote_tools,
+        log_store=log_store,
+        evidence=evidence,
+        logs=logs,
     )

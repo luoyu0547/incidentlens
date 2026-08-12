@@ -9,14 +9,58 @@ an open host session, a pending approval, and an applied ChangeSet.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from incidentlens_control_plane.changes.types import ChangeSetStatus, FileChange
 from incidentlens_control_plane.config import RuntimeSettings
+from incidentlens_control_plane.logs.types import (
+    LogRecord,
+    LogScope,
+    LogSeverity,
+    LogSourceKind,
+)
 from incidentlens_control_plane.main import create_app
 from incidentlens_control_plane.remote_ops.fakes import FakeTransportFactory
+
+
+def make_web_log_record(
+    message_redacted: str,
+    *,
+    now: datetime,
+) -> LogRecord:
+    """Build a redacted LogRecord for the web-api fixtures' payments project."""
+    severity = (
+        LogSeverity.ERROR
+        if message_redacted.startswith("ERROR")
+        else LogSeverity.WARN
+        if message_redacted.startswith("WARN")
+        else LogSeverity.INFO
+    )
+    return LogRecord(
+        log_id="log-web-1",
+        subscription_id=None,
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.FILE,
+        scope=LogScope.HOST,
+        source_ref="/var/log/payment/app.log",
+        cursor="offset:1",
+        dedupe_key=hashlib.sha256(message_redacted.encode("utf-8")).hexdigest(),
+        observed_at=now,
+        event_time=None,
+        severity=severity,
+        message_redacted=message_redacted,
+        redaction_summary={},
+        normal_signal=None,
+        correlation_key=None,
+        evidence_ref_id=None,
+        created_at=now,
+    )
 
 
 @pytest.fixture

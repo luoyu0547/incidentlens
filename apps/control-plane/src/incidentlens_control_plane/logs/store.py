@@ -283,6 +283,19 @@ class LogStore:
         found = {record.dedupe_key: record for record in map(_record_from_row, rows)}
         return tuple(found[key] for key in keys)
 
+    def get_record(self, log_id: str) -> LogRecord | None:
+        """Return the stored record with the given ``log_id``, or None."""
+        with self._connection_factory() as conn:
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(_RECORD_COLUMNS)}
+                FROM log_records
+                WHERE log_id = ?
+                """,
+                (log_id,),
+            ).fetchone()
+        return _record_from_row(row) if row is not None else None
+
     def search(self, filters: LogSearchFilters, limit: int = 100) -> tuple[LogRecord, ...]:
         """Search log records, optionally restricting by filters and an FTS text match."""
         if not (1 <= limit <= 1000):
