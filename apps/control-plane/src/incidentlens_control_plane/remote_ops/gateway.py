@@ -348,9 +348,9 @@ class RemoteToolGateway:
         resolved_scope = self._make_scope(scope)
 
         if isinstance(resolved_scope, ContainerScope):
-            raise ContainerFileOperationUnsupported(
-                "container directory listing is not supported"
-            )
+            canonical = await self._authorize_path(svc, resolved_scope, path, write=False)
+            backend = await self._container_backend(target, resolved_scope)
+            return await backend.list_directory(canonical)
 
         transport = await self._connect(target)
         canonical = await self._authorize_path(
@@ -372,9 +372,9 @@ class RemoteToolGateway:
         resolved_scope = self._make_scope(scope)
 
         if isinstance(resolved_scope, ContainerScope):
-            raise ContainerFileOperationUnsupported(
-                "container search is not supported"
-            )
+            canonical = await self._authorize_path(svc, resolved_scope, path, write=False)
+            backend = await self._container_backend(target, resolved_scope)
+            return await backend.search(canonical, query)
 
         transport = await self._connect(target)
         canonical = await self._authorize_path(

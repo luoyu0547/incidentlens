@@ -161,6 +161,7 @@ class FakeChangeTransport:
     calls: list[str] = field(default_factory=list)
     symlinks: set[PurePosixPath] = field(default_factory=set)
     container_files: dict[PurePosixPath, bytes] = field(default_factory=dict)
+    container_symlinks: set[PurePosixPath] = field(default_factory=set)
     run_argv_calls: list[tuple[str, ...]] = field(default_factory=list)
     _fail_renames: set[PurePosixPath] = field(default_factory=set)
     _fail_copies: set[PurePosixPath] = field(default_factory=set)
@@ -301,6 +302,13 @@ class FakeChangeTransport:
                 data = self.container_files.get(path, b"")
                 stdout = f"regular file|{len(data)}|644|1000|1000|0".encode()
                 return CommandResult(exit_status=0, stdout=stdout, stderr=b"")
+            if (
+                cmd == "find"
+                and len(argv) >= 8
+                and argv[5] == "-maxdepth"
+                and argv[7] == "-mindepth"
+            ):
+                return self._container_find_result(PurePosixPath(argv[4]))
             if cmd == "cp" and "--" in argv:
                 args = [PurePosixPath(p) for p in argv[argv.index("--") + 1 :]]
                 if len(args) == 2 and args[0] in self.container_files:
@@ -331,6 +339,23 @@ class FakeChangeTransport:
                     self.container_files[PurePosixPath(dst)] = self.files.pop(host_temp)
                 return CommandResult(exit_status=0, stdout=b"", stderr=b"")
         return None
+
+    def _container_find_result(self, root: PurePosixPath) -> CommandResult:
+        """Simulate ``find <root> -maxdepth 1 -mindepth 1 -printf ...``."""
+        lines: list[str] = []
+        paths = sorted(set(self.container_files) | self.container_symlinks)
+        for path in paths:
+            if path.parent != root:
+                continue
+            if path in self.container_symlinks:
+                lines.append(f"{path}|l|0|777|1000|1000|0")
+            else:
+                lines.append(f"{path}|f|{len(self.container_files[path])}|644|1000|1000|0")
+        return CommandResult(
+            exit_status=0,
+            stdout=("\n".join(lines) + "\n").encode(),
+            stderr=b"",
+        )
 
     async def open_shell(self) -> RemoteProcess:
         return FakeProcess()

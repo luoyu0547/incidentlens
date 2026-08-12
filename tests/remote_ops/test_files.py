@@ -319,3 +319,61 @@ async def test_search_does_not_escape_root_via_dotdot_entry() -> None:
     assert {m.path for m in matches} == {
         PurePosixPath("/opt/payments/app.py"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Container-scope backend tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_container_backend_lists_directory_with_fixed_argv() -> None:
+    from incidentlens_control_plane.remote_ops.fakes import FakeChangeTransport
+    from incidentlens_control_plane.remote_ops.files import ContainerFileBackend
+
+    transport = FakeChangeTransport()
+    transport.container_files[PurePosixPath("/app/app.py")] = b"print('ok')\n"
+    transport.container_files[PurePosixPath("/app/secret.log")] = b"token=abc\n"
+
+    backend = ContainerFileBackend(transport, "payments-api-1")
+    entries = await backend.list_directory(PurePosixPath("/app"))
+
+    assert {entry.path for entry in entries} == {
+        PurePosixPath("/app/app.py"),
+        PurePosixPath("/app/secret.log"),
+    }
+    assert transport.run_argv_calls == [
+        (
+            "docker",
+            "exec",
+            "payments-api-1",
+            "find",
+            "/app",
+            "-maxdepth",
+            "1",
+            "-mindepth",
+            "1",
+            "-printf",
+            "%p|%y|%s|%m|%u|%g|%T@\n",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_container_backend_search_skips_symlinks_and_caps_matches() -> None:
+    from incidentlens_control_plane.remote_ops.fakes import FakeChangeTransport
+    from incidentlens_control_plane.remote_ops.files import ContainerFileBackend
+
+    transport = FakeChangeTransport()
+    for index in range(250):
+        transport.container_files[PurePosixPath(f"/app/file-{index}.log")] = (
+            f"line {index} token=abc\n".encode()
+        )
+    transport.container_symlinks.add(PurePosixPath("/app/link.log"))
+
+    backend = ContainerFileBackend(transport, "payments-api-1")
+    matches = await backend.search(PurePosixPath("/app"), "token")
+
+    assert len(matches) == 200
+    assert all(match.path.name != "link.log" for match in matches)
+    assert all(match.text.endswith("token=abc") for match in matches)

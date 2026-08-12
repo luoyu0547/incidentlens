@@ -950,3 +950,75 @@ def test_gateway_edit_applies_single_file(
         assert transport.files[PurePosixPath("/opt/app.py")] == b"print('world')\n"
 
     asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Container-scope gateway authorization tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_gateway_container_list_requires_registered_container(
+    project_store, target_registration, service_registration
+) -> None:
+    from incidentlens_control_plane.project_registry.types import ProjectRegistration
+    from incidentlens_control_plane.remote_ops.fakes import FakeTransportFactory
+    from incidentlens_control_plane.remote_ops.gateway import RemoteToolGateway
+    from incidentlens_control_plane.remote_ops.sessions import SessionManager
+
+    project_store.create(
+        ProjectRegistration(
+            project_id="payments",
+            display_name="Payments",
+            targets=(target_registration,),
+            services=(service_registration,),
+        ),
+        now=datetime(2026, 8, 12, tzinfo=UTC),
+    )
+    gateway = RemoteToolGateway(
+        projects=project_store,
+        sessions=SessionManager(FakeTransportFactory()),
+    )
+
+    with pytest.raises(Exception, match="unknown container|not registered"):
+        await gateway.list_dir(
+            project_id="payments",
+            target_id="dev-a",
+            service="payment-api",
+            path=PurePosixPath("/app"),
+            scope={"kind": "container", "container": "attacker"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_container_search_rejects_path_outside_allowed_root(
+    project_store, target_registration, service_registration
+) -> None:
+    from incidentlens_control_plane.project_registry.types import ProjectRegistration
+    from incidentlens_control_plane.remote_ops.fakes import FakeTransportFactory
+    from incidentlens_control_plane.remote_ops.gateway import RemoteToolGateway
+    from incidentlens_control_plane.remote_ops.sessions import SessionManager
+
+    project_store.create(
+        ProjectRegistration(
+            project_id="payments",
+            display_name="Payments",
+            targets=(target_registration,),
+            services=(service_registration,),
+        ),
+        now=datetime(2026, 8, 12, tzinfo=UTC),
+    )
+    gateway = RemoteToolGateway(
+        projects=project_store,
+        sessions=SessionManager(FakeTransportFactory()),
+    )
+
+    with pytest.raises(Exception, match="outside allowed roots"):
+        await gateway.search(
+            project_id="payments",
+            target_id="dev-a",
+            service="payment-api",
+            path=PurePosixPath("/etc"),
+            query="token",
+            scope={"kind": "container", "container": "payments-api-1"},
+        )

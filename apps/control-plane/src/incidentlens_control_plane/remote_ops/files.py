@@ -282,6 +282,51 @@ class ContainerFileBackend:
                 f"{result.stdout.decode(errors='replace')}"
             ) from exc
 
+    async def list_directory(
+        self, path: PurePosixPath
+    ) -> tuple[FileMetadata, ...]:
+        result = await self._run(
+            (
+                "docker",
+                "exec",
+                self._container,
+                "find",
+                str(path),
+                "-maxdepth",
+                "1",
+                "-mindepth",
+                "1",
+                "-printf",
+                "%p|%y|%s|%m|%u|%g|%T@\n",
+            ),
+            timeout=30.0,
+        )
+        entries: list[FileMetadata] = []
+        for line in result.stdout.decode("utf-8", errors="replace").splitlines():
+            fields = line.split("|")
+            if len(fields) != 7:
+                raise ContainerFileOperationUnsupported("unparseable find output")
+            entry_path, file_type, size_s, mode_s, uid_s, gid_s, mtime_s = fields
+            entries.append(
+                FileMetadata(
+                    path=PurePosixPath(entry_path),
+                    size=int(size_s),
+                    mode=int(mode_s, 8),
+                    uid=int(uid_s) if uid_s.isdigit() else 0,
+                    gid=int(gid_s) if gid_s.isdigit() else 0,
+                    modified_ns=int(float(mtime_s) * 1_000_000_000),
+                    is_symlink=file_type == "l",
+                )
+            )
+        return tuple(entries)
+
+    async def search(
+        self,
+        path: PurePosixPath,
+        query: str,
+    ) -> tuple[SearchMatch, ...]:
+        return await RemoteFileTools(self).search(path, query)
+
     async def write_bytes(
         self,
         path: PurePosixPath,

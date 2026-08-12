@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import PurePosixPath
 
 import pytest
+from incidentlens_control_plane.project_registry.store import ProjectRegistryStore
 from incidentlens_control_plane.project_registry.types import (
     ServiceRegistration,
     TargetRegistration,
 )
+
+
+@pytest.fixture
+def project_store(tmp_path) -> ProjectRegistryStore:
+    """A real SQLite-backed project registry with an empty test database."""
+    store = ProjectRegistryStore(lambda: sqlite3.connect(tmp_path / "projects.db"))
+    store.migrate()
+    return store
 
 
 @pytest.fixture
