@@ -3,7 +3,8 @@
 Only redacted content is ever returned: the pipeline stores redacted
 ``LogRecord`` rows and the API serializes those rows, never raw log text.
 Query bodies never accept connection parameters such as ``host`` or
-``ssh_user`` (they are resolved only from the project registry).
+``ssh_user`` (they are resolved only from the project registry), and error
+details are fixed safe strings that never echo credentials or raw log text.
 """
 
 from __future__ import annotations
@@ -20,10 +21,17 @@ from incidentlens_control_plane.logs.types import (
     LogScope,
     LogSeverity,
     LogSourceKind,
+    ServiceNotFound,
+    TargetNotFound,
     UnregisteredLogContainer,
 )
 from incidentlens_control_plane.project_registry.store import ProjectNotFound
 from incidentlens_control_plane.remote_ops.policy import RemotePathDenied
+from incidentlens_control_plane.remote_ops.transport import (
+    RemoteConnectionError,
+    RemotePathError,
+    RemoteTimeoutError,
+)
 from incidentlens_control_plane.routes import get_runtime
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
@@ -63,6 +71,10 @@ async def query_logs(
         )
     except ProjectNotFound:
         raise HTTPException(status_code=404, detail="Project not found")
+    except TargetNotFound:
+        raise HTTPException(status_code=404, detail="Target not found")
+    except ServiceNotFound:
+        raise HTTPException(status_code=404, detail="Service not found")
     except UnregisteredLogContainer:
         raise HTTPException(
             status_code=409, detail="Container is not registered for the service"
@@ -71,8 +83,12 @@ async def query_logs(
         raise HTTPException(status_code=422, detail="Log path is not authorized")
     except LogSourceUnavailable:
         raise HTTPException(status_code=502, detail="Log source unavailable")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RemoteTimeoutError:
+        raise HTTPException(status_code=504, detail="Log source timed out")
+    except (RemoteConnectionError, RemotePathError):
+        raise HTTPException(status_code=502, detail="Log source unavailable")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid log query")
     return [record.model_dump(mode="json") for record in records]
 
 
@@ -90,11 +106,7 @@ async def search_logs(
     end_time: datetime | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
 ) -> list[dict[str, object]]:
-    """Search persisted redacted log records by filters and full-text match.
-
-    ``start_time``/``end_time`` are accepted for interface compatibility; the
-    current store does not yet filter on a time range.
-    """
+    """Search persisted redacted log records by filters and full-text match."""
     runtime = get_runtime(request)
     filters = LogSearchFilters(
         project_id=project_id,
@@ -104,9 +116,11 @@ async def search_logs(
         scope=scope,
         severity=severity,
         text=text,
+        start_time=start_time,
+        end_time=end_time,
     )
     try:
         records = runtime.log_store.search(filters, limit=limit)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid search text")
     return [record.model_dump(mode="json") for record in records]

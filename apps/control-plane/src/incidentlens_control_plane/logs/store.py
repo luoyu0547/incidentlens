@@ -29,6 +29,8 @@ class LogSearchFilters(BaseModel):
     scope: LogScope | None = None
     severity: LogSeverity | None = None
     text: str | None = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
 
 
 _RECORD_COLUMNS = (
@@ -322,6 +324,12 @@ class LogStore:
         if filters.severity is not None:
             clauses.append("severity = ?")
             params.append(filters.severity.value)
+        if filters.start_time is not None:
+            clauses.append("observed_at >= ?")
+            params.append(filters.start_time.isoformat())
+        if filters.end_time is not None:
+            clauses.append("observed_at <= ?")
+            params.append(filters.end_time.isoformat())
         if filters.text is not None and filters.text.strip():
             clauses.append(
                 "log_id IN (SELECT log_id FROM log_records_fts WHERE log_records_fts MATCH ?)"

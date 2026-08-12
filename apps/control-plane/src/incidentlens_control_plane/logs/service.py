@@ -32,6 +32,8 @@ from incidentlens_control_plane.logs.types import (
     LogSourceKind,
     ProcessedLogLine,
     RawLogLine,
+    ServiceNotFound,
+    TargetNotFound,
     UnregisteredLogContainer,
 )
 from incidentlens_control_plane.project_registry.store import ProjectRegistryStore
@@ -257,7 +259,7 @@ class LogService:
         for target in project.targets:
             if target.target_id == target_id:
                 return target
-        raise ValueError(
+        raise TargetNotFound(
             f"target {target_id!r} is not registered for project {project.project_id!r}"
         )
 
@@ -268,6 +270,6 @@ class LogService:
         for svc in project.services:
             if svc.compose_service == service_name:
                 return svc
-        raise ValueError(
+        raise ServiceNotFound(
             f"service {service_name!r} not found in project {project.project_id!r}"
         )

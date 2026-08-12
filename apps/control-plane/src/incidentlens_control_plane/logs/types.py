@@ -8,6 +8,14 @@ class UnregisteredLogContainer(Exception):
     """Raised when a docker/container-scope query names an unregistered container."""
 
 
+class TargetNotFound(Exception):
+    """Raised when a query names a target that is not registered for the project."""
+
+
+class ServiceNotFound(Exception):
+    """Raised when a query names a service that is not registered for the project."""
+
+
 class LogSeverity(StrEnum):
     TRACE = "trace"
     DEBUG = "debug"

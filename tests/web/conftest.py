@@ -31,6 +31,7 @@ def make_web_log_record(
     message_redacted: str,
     *,
     now: datetime,
+    log_id: str = "log-web-1",
 ) -> LogRecord:
     """Build a redacted LogRecord for the web-api fixtures' payments project."""
     severity = (
@@ -41,7 +42,7 @@ def make_web_log_record(
         else LogSeverity.INFO
     )
     return LogRecord(
-        log_id="log-web-1",
+        log_id=log_id,
         subscription_id=None,
         project_id="payments",
         target_id="dev-a",
