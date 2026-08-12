@@ -29,6 +29,7 @@ from incidentlens_control_plane.logs.subscriptions import (
     TooManyActiveSubscriptions,
 )
 from incidentlens_control_plane.logs.types import (
+    InvalidSubscription,
     InvalidSubscriptionTransition,
     LogQueryRequest,
     LogRecord,
@@ -236,10 +237,24 @@ async def create_subscription(
             status_code=400,
             detail="opt_in_streaming=true is required for streaming",
         )
+    except InvalidSubscription:
+        raise HTTPException(status_code=400, detail="Invalid subscription")
     except TooManyActiveSubscriptions:
         raise HTTPException(
             status_code=429, detail="Active log subscription limit reached"
         )
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="Project not found")
+    except TargetNotFound:
+        raise HTTPException(status_code=404, detail="Target not found")
+    except ServiceNotFound:
+        raise HTTPException(status_code=404, detail="Service not found")
+    except UnregisteredLogContainer:
+        raise HTTPException(
+            status_code=409, detail="Container is not registered for the service"
+        )
+    except RemotePathDenied:
+        raise HTTPException(status_code=422, detail="Log path is not authorized")
     return _subscription_view(subscription)
 
 

@@ -63,6 +63,28 @@ def test_create_subscription_requires_opt_in_true(client, registered_project) ->
     assert "opt_in_streaming=true" in response.text
 
 
+def test_create_subscription_rejects_unregistered_container(
+    client, registered_project
+) -> None:
+    payload = _subscription_payload()
+    payload["source_ref"] = "not-registered"
+
+    response = client.post("/api/logs/subscriptions", json=payload)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Container is not registered for the service"
+
+
+def test_create_subscription_rejects_unknown_service(client, registered_project) -> None:
+    payload = _subscription_payload()
+    payload["service_name"] = "not-a-service"
+
+    response = client.post("/api/logs/subscriptions", json=payload)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Service not found"
+
+
 def test_pause_resume_delete_subscription_state_machine(
     client, registered_project
 ) -> None:

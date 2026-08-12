@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
@@ -11,11 +12,13 @@ from incidentlens_control_plane.logs.store import LogSearchFilters
 from incidentlens_control_plane.logs.subscriptions import (
     LogSubscriptionManager,
     TooManyActiveSubscriptions,
+    _QueuedLine,
 )
 from incidentlens_control_plane.logs.types import (
     InvalidSubscriptionTransition,
     LogScope,
     LogSourceKind,
+    RawLogLine,
 )
 
 _APP_LOG = PurePosixPath("/var/log/payment/app.log")
@@ -439,3 +442,114 @@ async def test_resume_rejects_active_subscription(
 
     with pytest.raises(InvalidSubscriptionTransition):
         await manager.resume(subscription.subscription_id)
+
+
+@pytest.mark.asyncio
+async def test_subscription_runs_are_audited_start_and_stop(
+    manager: LogSubscriptionManager, tmp_path
+) -> None:
+    subscription = await manager.create(
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.FILE,
+        scope=LogScope.HOST,
+        source_ref="/var/log/payment/app.log",
+        opt_in_streaming=True,
+        created_by="alice",
+    )
+    await manager.pause(subscription.subscription_id)
+
+    with sqlite3.connect(tmp_path / "runtime.db") as conn:
+        rows = conn.execute(
+            "SELECT subscription_id, status, stopped_at FROM log_subscription_runs"
+        ).fetchall()
+
+    assert len(rows) == 1
+    assert rows[0][0] == subscription.subscription_id
+    assert rows[0][1] == "completed"
+    assert rows[0][2] is not None
+
+
+@pytest.mark.asyncio
+async def test_error_run_audits_redacted_summary(
+    manager: LogSubscriptionManager, tmp_path
+) -> None:
+    subscription = await manager.create(
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.FILE,
+        scope=LogScope.HOST,
+        source_ref="/var/log/payment/app.log",
+        opt_in_streaming=True,
+        created_by="alice",
+    )
+    manager.max_failures = 1
+    await manager.record_failure_for_test(
+        subscription.subscription_id,
+        RuntimeError("token=abc123 host dev-a.example.test"),
+    )
+
+    with sqlite3.connect(tmp_path / "runtime.db") as conn:
+        rows = conn.execute(
+            "SELECT status, error FROM log_subscription_runs"
+        ).fetchall()
+
+    assert len(rows) == 1
+    assert rows[0][0] == "error"
+    assert "abc123" not in rows[0][1]
+    assert "dev-a.example.test" not in rows[0][1]
+
+
+@pytest.mark.asyncio
+async def test_docker_backpressure_reconnect_has_exponential_backoff(
+    manager: LogSubscriptionManager,
+    store,
+    target_registration,
+    monkeypatch,
+) -> None:
+    subscription = await manager.create(
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.DOCKER,
+        scope=LogScope.CONTAINER,
+        source_ref="payments-api-1",
+        opt_in_streaming=True,
+        created_by="alice",
+    )
+    # Stop the manager's own reader/writer and drive _stream_docker directly
+    # with a queue that stays full so the writer can never drain it.
+    await manager._stop(subscription.subscription_id)
+    session = await manager._service._sessions.connect(target_registration)
+    session.transport.process_chunks = [
+        b"line one\n",
+        b"line two\n",
+        b"line three\n",
+    ]
+    manager._queue_put_timeout = 0.01
+    queue: asyncio.Queue[_QueuedLine] = asyncio.Queue(maxsize=1)
+    raw = RawLogLine(
+        source_ref="payments-api-1",
+        cursor="docker:time=2026-08-12T10:00:00Z:seq=1",
+        observed_at=datetime(2026, 8, 12, 10, 0, tzinfo=UTC),
+        text="occupied",
+    )
+    await queue.put(_QueuedLine(raw=raw, generation="g"))
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(
+            manager._stream_docker(subscription, queue), timeout=0.2
+        )
+
+    assert len(sleeps) >= 2
+    assert sleeps[0] == 1.0
+    assert sleeps[1] == 2.0

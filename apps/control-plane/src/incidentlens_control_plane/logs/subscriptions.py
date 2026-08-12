@@ -111,6 +111,8 @@ class LogSubscriptionManager:
         self._max_backoff_seconds: float = 60.0
         self._queue_put_timeout: float = 5.0
         self._failures: dict[str, int] = {}
+        # Active audit run id per subscription (see ``log_subscription_runs``).
+        self._run_ids: dict[str, int] = {}
         self._queue_size: int = settings.log_subscription_queue_size
         self._batch_size: int = settings.log_subscription_batch_size
         self._poll_interval: float = settings.log_file_poll_interval_seconds
@@ -154,6 +156,18 @@ class LogSubscriptionManager:
                 f"active log subscriptions exceed max_active={self.max_active}"
             )
         now = now or datetime.now(UTC)
+        # Validate the source against the project registry BEFORE persisting,
+        # mirroring the on-demand query path, so a subscription can never be
+        # created for an unregistered project/target/service/container (which
+        # would 201 then fail in a background error loop).
+        await self._service.validate_subscription_source(
+            project_id=project_id,
+            target_id=target_id,
+            service_name=service_name,
+            source_kind=source_kind,
+            scope=scope,
+            source_ref=source_ref,
+        )
         subscription = self._store.create_subscription(
             project_id=project_id,
             target_id=target_id,
@@ -245,6 +259,10 @@ class LogSubscriptionManager:
         # A restart (create/resume/recovery) resets retry state so the failure
         # counter and backoff do not carry over from a prior errored run.
         self._failures.pop(subscription_id, None)
+        # Audit the run start so recovery/error behavior is traceable.
+        self._run_ids[subscription_id] = self._store.record_run_start(
+            subscription_id, started_at=datetime.now(UTC)
+        )
         queue: asyncio.Queue[_QueuedLine] = asyncio.Queue(maxsize=self._queue_size)
         reader = asyncio.create_task(self._reader_loop(subscription, queue))
         writer = asyncio.create_task(self._writer_loop(subscription, queue))
@@ -260,6 +278,30 @@ class LogSubscriptionManager:
         tasks.reader.cancel()
         tasks.writer.cancel()
         await asyncio.gather(tasks.reader, tasks.writer, return_exceptions=True)
+        await self._record_run_stop(subscription_id)
+
+    async def _record_run_stop(
+        self,
+        subscription_id: str,
+        *,
+        status: str = "completed",
+        error: str | None = None,
+    ) -> None:
+        """Audit the end of the subscription's current run, if any.
+
+        Only the redacted ``error`` summary is persisted; the raw error text
+        never reaches the audit table.  A no-op when no run is tracked (e.g. a
+        subscription that was never started).
+        """
+        run_id = self._run_ids.pop(subscription_id, None)
+        if run_id is None:
+            return
+        self._store.record_run_stop(
+            run_id,
+            stopped_at=datetime.now(UTC),
+            status=status,
+            error=error,
+        )
 
     # --- reader ---
 
@@ -285,9 +327,10 @@ class LogSubscriptionManager:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    logger.exception(
-                        "log subscription reader error for %s; retrying",
+                    logger.error(
+                        "log subscription reader error for %s; retrying: %s",
                         subscription.subscription_id,
+                        _summarize_error(exc),
                     )
                     reached = await self._record_failure(
                         subscription.subscription_id, exc
@@ -335,6 +378,7 @@ class LogSubscriptionManager:
         target = self._resolve_target(subscription)
         session = await self._service._sessions.connect(target)
         source = DockerLogSource(lambda _target: session.transport)
+        backoff = 1.0
         while True:
             cursor = self._store.get_cursor(subscription.subscription_id)
             try:
@@ -350,7 +394,16 @@ class LogSubscriptionManager:
                             subscription,
                             reason="queue full",
                         )
+                        # A persistently slow writer must not reopen the
+                        # ``--follow`` stream every few seconds: back off before
+                        # reconnecting (capped exponential, like the reader).
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2, self._max_backoff_seconds)
                         break
+                    else:
+                        # The writer drained the queue; reset the reconnect
+                        # backoff so a recovered writer is polled promptly.
+                        backoff = 1.0
                 else:
                     return
             except asyncio.CancelledError:
@@ -384,12 +437,13 @@ class LogSubscriptionManager:
                     await self._write_batch(subscription, batch)
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as exc:
                     # A transient persistence error leaves the cursor unadvanced,
                     # so the reader re-reads the same lines on the next poll.
-                    logger.exception(
-                        "log subscription writer error for %s; retrying",
+                    logger.error(
+                        "log subscription writer error for %s; retrying: %s",
                         subscription.subscription_id,
+                        _summarize_error(exc),
                     )
         except asyncio.CancelledError:
             pass
@@ -579,9 +633,10 @@ class LogSubscriptionManager:
         if count < self.max_failures:
             return False
         now = datetime.now(UTC)
+        error_summary = _summarize_error(error)
         subscription = self._store.mark_subscription_error(
             subscription_id,
-            last_error_redacted=_summarize_error(error),
+            last_error_redacted=error_summary,
             now=now,
         )
         if subscription is None:
@@ -592,10 +647,12 @@ class LogSubscriptionManager:
             subscription,
             failure_count=count,
         )
-        await self._teardown_running(subscription_id)
+        await self._teardown_running(subscription_id, error=error_summary)
         return True
 
-    async def _teardown_running(self, subscription_id: str) -> None:
+    async def _teardown_running(
+        self, subscription_id: str, *, error: str | None = None
+    ) -> None:
         """Drop the running entry and stop its tasks after an error transition.
 
         Called when a subscription moves to status ``error`` so the entry does
@@ -603,7 +660,8 @@ class LogSubscriptionManager:
         ``queue.get()`` and the id would keep counting toward ``max_active``),
         letting ``resume`` restart it cleanly.  The reader is cancelled too,
         unless it is the current caller (the reader loop observes the error and
-        returns on its own).
+        returns on its own).  The audit run is closed with the redacted error
+        summary.
         """
         tasks = self._running.pop(subscription_id, None)
         if tasks is None:
@@ -613,3 +671,6 @@ class LogSubscriptionManager:
         if tasks.reader is not asyncio.current_task():
             tasks.reader.cancel()
             await asyncio.gather(tasks.reader, return_exceptions=True)
+        await self._record_run_stop(
+            subscription_id, status="error" if error else "completed", error=error
+        )
