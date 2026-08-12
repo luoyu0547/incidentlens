@@ -127,6 +127,9 @@ class EvidenceStore:
         The evidence ref id is derived from the source identity plus a hash of
         the redacted content, so re-creating evidence for the same
         source/cursor/content yields the same ref and never duplicates rows.
+        When the insert is suppressed because the row already exists, the
+        STORED row wins and is returned (the persisted incident_id/created_at
+        are authoritative, never the caller's new values).
         """
         content_sha256 = hashlib.sha256(
             record.message_redacted.encode("utf-8")
@@ -190,7 +193,7 @@ class EvidenceStore:
                 ),
             )
             conn.commit()
-        return evidence
+        return self.get(evidence_ref_id)
 
     def get(self, evidence_ref_id: str) -> EvidenceRef:
         """Return the evidence ref with the given id, or raise KeyError."""

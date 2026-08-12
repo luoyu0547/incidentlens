@@ -70,6 +70,37 @@ def test_create_evidence_is_idempotent_for_same_source_cursor_hash(tmp_path: Pat
     assert store.list_for_incident("inc-1", limit=10) == (first,)
 
 
+def test_create_evidence_second_incident_returns_stored_row(tmp_path: Path) -> None:
+    """A suppressed idempotent insert must return the persisted row.
+
+    The UNIQUE key and ref-id derivation exclude incident_id, so citing the
+    same source/cursor/content under a second incident does not insert. The
+    returned ref must therefore reflect the STORED row (inc-1), never the
+    caller's new incident_id.
+    """
+    store = EvidenceStore(lambda: sqlite3.connect(tmp_path / "runtime.db"))
+    store.migrate()
+    record = make_log_record()
+
+    first = store.create_from_log_record(
+        record,
+        incident_id="inc-1",
+        created_by="alice",
+        now=datetime(2026, 8, 12, tzinfo=UTC),
+    )
+    second = store.create_from_log_record(
+        record,
+        incident_id="inc-2",
+        created_by="bob",
+        now=datetime(2026, 8, 12, 1, 0, tzinfo=UTC),
+    )
+
+    assert second.evidence_ref_id == first.evidence_ref_id
+    assert second.incident_id == "inc-1"
+    assert store.list_for_incident("inc-1", limit=10) == (first,)
+    assert store.list_for_incident("inc-2", limit=10) == ()
+
+
 def test_evidence_schema_has_no_raw_content_column(tmp_path: Path) -> None:
     store = EvidenceStore(lambda: sqlite3.connect(tmp_path / "runtime.db"))
     store.migrate()

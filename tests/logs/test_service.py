@@ -195,3 +195,41 @@ async def test_query_create_evidence_requires_incident_id(
             ),
             now=datetime(2026, 8, 12, tzinfo=UTC),
         )
+
+
+@pytest.mark.asyncio
+async def test_query_create_evidence_persists_and_propagates_ref_id(
+    tmp_path, target_registration
+) -> None:
+    service = build_test_log_service(tmp_path, target_registration)
+    session = await service._sessions.connect(target_registration)
+    session.transport._files[PurePosixPath("/var/log/payment/app.log")] = (
+        b"ERROR token=abc123\n"
+    )
+
+    records = await service.query(
+        LogQueryRequest(
+            project_id="payments",
+            target_id="dev-a",
+            service_name="payment-api",
+            source_kind=LogSourceKind.FILE,
+            scope=LogScope.HOST,
+            source_ref="/var/log/payment/app.log",
+            tail_lines=10,
+            persist=True,
+            create_evidence=True,
+            incident_id="inc-1",
+        ),
+        now=datetime(2026, 8, 12, 10, 0, tzinfo=UTC),
+    )
+
+    assert len(records) == 1
+    assert records[0].evidence_ref_id is not None
+    assert records[0].evidence_ref_id.startswith("ev-")
+
+    evidence = service._evidence.get(records[0].evidence_ref_id)
+    assert evidence.incident_id == "inc-1"
+    assert evidence.content_redacted == records[0].message_redacted
+    assert "abc123" not in evidence.content_redacted
+    assert service._evidence.list_for_incident("inc-1", limit=10) == (evidence,)
+
