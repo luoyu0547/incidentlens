@@ -5,11 +5,14 @@ updated or deleted. Content hashes are computed exclusively over the already
 redacted (and, where over-limit, truncated) content so raw content never
 reaches this store.  Log-specific columns are nullable and populated only for
 ``log_record`` refs; ``dedupe_key`` is the non-null idempotency identity shared
-by the source identity plus the content hash.
+by the source identity, the typed metadata and the content hash.
 
-``migrate()`` upgrades a legacy pre-Phase-4 schema in place: the old table is
-renamed, the unified schema is created, and existing log rows are copied over
-with a derived ``dedupe_key`` and defaults for the new columns.
+``migrate()`` upgrades a legacy pre-Phase-4 schema in place inside a single
+explicit transaction: the old table is renamed, the unified schema is created,
+and existing log rows are copied over with a derived ``dedupe_key`` and
+defaults for the new columns.  A failure rolls the whole upgrade back, and a
+leftover ``evidence_refs_legacy`` table from an interrupted run is merged first
+so a restart resumes instead of stranding legacy rows.
 """
 
 import hashlib
@@ -56,42 +59,52 @@ _EVIDENCE_COLUMNS = (
     "created_by",
 )
 
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS evidence_refs (
-    evidence_ref_id TEXT PRIMARY KEY,
-    incident_id TEXT NOT NULL,
-    evidence_kind TEXT NOT NULL,
-    agent_run_id TEXT,
-    project_id TEXT NOT NULL,
-    target_id TEXT NOT NULL,
-    service_name TEXT NOT NULL,
-    source_ref TEXT,
-    source_kind TEXT,
-    scope TEXT,
-    cursor TEXT,
-    content_redacted TEXT NOT NULL,
-    content_sha256 TEXT NOT NULL,
-    redaction_summary_json TEXT NOT NULL,
-    truncation_json TEXT,
-    metadata_json TEXT NOT NULL,
-    severity TEXT,
-    event_time TEXT,
-    normal_signal TEXT,
-    correlation_key TEXT,
-    dedupe_key TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    created_by TEXT NOT NULL,
-    UNIQUE(dedupe_key)
-);
-CREATE INDEX IF NOT EXISTS idx_evidence_refs_incident
-    ON evidence_refs(incident_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_evidence_refs_run
-    ON evidence_refs(agent_run_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_evidence_refs_kind
-    ON evidence_refs(evidence_kind, created_at);
-CREATE INDEX IF NOT EXISTS idx_evidence_refs_incident_kind
-    ON evidence_refs(incident_id, evidence_kind, created_at);
-"""
+_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS evidence_refs (
+        evidence_ref_id TEXT PRIMARY KEY,
+        incident_id TEXT NOT NULL,
+        evidence_kind TEXT NOT NULL,
+        agent_run_id TEXT,
+        project_id TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        service_name TEXT NOT NULL,
+        source_ref TEXT,
+        source_kind TEXT,
+        scope TEXT,
+        cursor TEXT,
+        content_redacted TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL,
+        redaction_summary_json TEXT NOT NULL,
+        truncation_json TEXT,
+        metadata_json TEXT NOT NULL,
+        severity TEXT,
+        event_time TEXT,
+        normal_signal TEXT,
+        correlation_key TEXT,
+        dedupe_key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        UNIQUE(dedupe_key)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_evidence_refs_incident
+        ON evidence_refs(incident_id, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_evidence_refs_run
+        ON evidence_refs(agent_run_id, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_evidence_refs_kind
+        ON evidence_refs(evidence_kind, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_evidence_refs_incident_kind
+        ON evidence_refs(incident_id, evidence_kind, created_at)
+    """,
+)
 
 _LEGACY_COLUMNS = (
     "evidence_ref_id",
@@ -119,10 +132,12 @@ _LEGACY_COLUMNS = (
 def _derive_dedupe_key(evidence: EvidenceRef) -> str:
     """Return the canonical idempotency key for an evidence ref.
 
-    The key is derived from the kind, the generic source identity and the hash
-    of the redacted content, so re-creating the same evidence yields the same
-    key and never duplicates rows regardless of which log-specific columns are
-    NULL.
+    The key is derived from the kind, the generic source identity, the typed
+    metadata and the hash of the redacted content, so re-creating the same
+    evidence yields the same key and never duplicates rows regardless of which
+    log-specific columns are NULL.  Metadata is part of the identity so two
+    refs with the same redacted content but different kind-typed metadata stay
+    distinct.
     """
     identity = "|".join(
         (
@@ -137,8 +152,9 @@ def _derive_dedupe_key(evidence: EvidenceRef) -> str:
             evidence.cursor or "",
         )
     )
+    metadata_json = json.dumps(evidence.metadata, sort_keys=True)
     return hashlib.sha256(
-        f"{identity}|{evidence.content_sha256}".encode("utf-8")
+        f"{identity}|{metadata_json}|{evidence.content_sha256}".encode("utf-8")
     ).hexdigest()
 
 
@@ -258,38 +274,61 @@ class EvidenceStore:
     def migrate(self) -> None:
         """Create the unified evidence_refs table, upgrading a legacy schema.
 
-        A legacy (log-only) table is renamed aside, the unified schema is
-        created, and existing rows are copied over with defaults for the new
-        columns and a ``dedupe_key`` derived exactly as the current code would
-        derive it.
+        The whole upgrade runs in a single explicit transaction, so a mid-copy
+        failure rolls back cleanly and can never leave ``evidence_refs`` in the
+        new schema with legacy rows stranded.  A leftover
+        ``evidence_refs_legacy`` table (from an older interrupted run) is
+        merged first, so a restart resumes instead of skipping.
         """
         with self._connection_factory() as conn:
-            legacy = self._table_missing_column(conn, "dedupe_key")
-            if legacy:
-                conn.execute(
-                    "ALTER TABLE evidence_refs RENAME TO evidence_refs_legacy"
-                )
-                conn.executescript(_SCHEMA_SQL)
-                rows = conn.execute(
-                    f"""
-                    SELECT {", ".join(_LEGACY_COLUMNS)}
-                    FROM evidence_refs_legacy
-                    """
-                ).fetchall()
-                for row in rows:
-                    evidence = _legacy_evidence_from_row(row)
+            conn.isolation_level = None
+            conn.execute("BEGIN")
+            try:
+                if self._table_exists(conn, "evidence_refs_legacy"):
+                    self._merge_legacy_rows(conn)
+                if self._table_missing_column(conn, "dedupe_key"):
                     conn.execute(
-                        f"""
-                        INSERT OR IGNORE INTO evidence_refs
-                            ({", ".join(_EVIDENCE_COLUMNS)})
-                        VALUES ({", ".join("?" for _ in _EVIDENCE_COLUMNS)})
-                        """,
-                        _evidence_values(evidence),
+                        "ALTER TABLE evidence_refs RENAME TO evidence_refs_legacy"
                     )
-                conn.execute("DROP TABLE IF EXISTS evidence_refs_legacy")
-            else:
-                conn.executescript(_SCHEMA_SQL)
-            conn.commit()
+                    for statement in _SCHEMA_STATEMENTS:
+                        conn.execute(statement)
+                    self._merge_legacy_rows(conn)
+                else:
+                    for statement in _SCHEMA_STATEMENTS:
+                        conn.execute(statement)
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master"
+            " WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        return row is not None
+
+    def _merge_legacy_rows(self, conn: sqlite3.Connection) -> None:
+        """Copy ``evidence_refs_legacy`` rows into ``evidence_refs``, then drop it."""
+        rows = conn.execute(
+            f"""
+            SELECT {", ".join(_LEGACY_COLUMNS)}
+            FROM evidence_refs_legacy
+            """
+        ).fetchall()
+        for row in rows:
+            evidence = _legacy_evidence_from_row(row)
+            conn.execute(
+                f"""
+                INSERT OR IGNORE INTO evidence_refs
+                    ({", ".join(_EVIDENCE_COLUMNS)})
+                VALUES ({", ".join("?" for _ in _EVIDENCE_COLUMNS)})
+                """,
+                _evidence_values(evidence),
+            )
+        conn.execute("DROP TABLE IF EXISTS evidence_refs_legacy")
 
     @staticmethod
     def _table_missing_column(conn: sqlite3.Connection, column: str) -> bool:

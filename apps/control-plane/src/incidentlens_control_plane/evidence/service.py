@@ -17,6 +17,7 @@ investigations.
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime
 
 from incidentlens_control_plane.evidence.store import EvidenceStore
@@ -65,13 +66,15 @@ def _derive_evidence_ref_id(
     service_name: str,
     agent_run_id: str | None,
     source_ref: str | None,
+    metadata: dict[str, str],
     content_sha256: str,
 ) -> str:
     identity = "|".join(
         (project_id, target_id, service_name, agent_run_id or "", source_ref or "")
     )
+    metadata_json = json.dumps(metadata, sort_keys=True)
     return "ev-" + hashlib.sha256(
-        f"{kind.value}|{identity}|{content_sha256}".encode("utf-8")
+        f"{kind.value}|{identity}|{metadata_json}|{content_sha256}".encode("utf-8")
     ).hexdigest()[:24]
 
 
@@ -119,7 +122,11 @@ class EvidenceService:
     ) -> EvidenceRef:
         """Record the bounded, redacted output of a shell command."""
         self._assert_run_owned_by_incident(
-            agent_run_id, incident_id, project_id=project_id, target_id=target_id
+            agent_run_id,
+            incident_id,
+            project_id=project_id,
+            target_id=target_id,
+            service_name=service_name,
         )
         redacted = self._redact_content(output, EvidenceKind.COMMAND_OUTPUT)
         return self._persist(
@@ -155,7 +162,11 @@ class EvidenceService:
     ) -> EvidenceRef:
         """Record the bounded, redacted snapshot of a file read."""
         self._assert_run_owned_by_incident(
-            agent_run_id, incident_id, project_id=project_id, target_id=target_id
+            agent_run_id,
+            incident_id,
+            project_id=project_id,
+            target_id=target_id,
+            service_name=service_name,
         )
         redacted = self._redact_content(content, EvidenceKind.FILE_SNAPSHOT)
         return self._persist(
@@ -190,7 +201,11 @@ class EvidenceService:
     ) -> EvidenceRef:
         """Record the bounded, redacted diff between two states."""
         self._assert_run_owned_by_incident(
-            agent_run_id, incident_id, project_id=project_id, target_id=target_id
+            agent_run_id,
+            incident_id,
+            project_id=project_id,
+            target_id=target_id,
+            service_name=service_name,
         )
         redacted = self._redact_content(diff_text, EvidenceKind.DIFF)
         return self._persist(
@@ -228,7 +243,11 @@ class EvidenceService:
     ) -> EvidenceRef:
         """Record the bounded, redacted outcome of a validation check."""
         self._assert_run_owned_by_incident(
-            agent_run_id, incident_id, project_id=project_id, target_id=target_id
+            agent_run_id,
+            incident_id,
+            project_id=project_id,
+            target_id=target_id,
+            service_name=service_name,
         )
         redacted = self._redact_content(detail, EvidenceKind.VALIDATION_RESULT)
         return self._persist(
@@ -267,7 +286,11 @@ class EvidenceService:
     ) -> EvidenceRef:
         """Record the bounded, redacted report a child run returned."""
         self._assert_run_owned_by_incident(
-            agent_run_id, incident_id, project_id=project_id, target_id=target_id
+            agent_run_id,
+            incident_id,
+            project_id=project_id,
+            target_id=target_id,
+            service_name=service_name,
         )
         redacted = self._redact_content(report_summary, EvidenceKind.CHILD_REPORT)
         return self._persist(
@@ -305,7 +328,11 @@ class EvidenceService:
     ) -> EvidenceRef:
         """Record the bounded, redacted discovery of a registry extension."""
         self._assert_run_owned_by_incident(
-            agent_run_id, incident_id, project_id=project_id, target_id=target_id
+            agent_run_id,
+            incident_id,
+            project_id=project_id,
+            target_id=target_id,
+            service_name=service_name,
         )
         redacted = self._redact_content(
             description, EvidenceKind.REGISTRY_DISCOVERY
@@ -341,7 +368,11 @@ class EvidenceService:
     ) -> EvidenceRef:
         """Record the bounded, redacted outcome of an approval decision."""
         self._assert_run_owned_by_incident(
-            agent_run_id, incident_id, project_id=project_id, target_id=target_id
+            agent_run_id,
+            incident_id,
+            project_id=project_id,
+            target_id=target_id,
+            service_name=service_name,
         )
         redacted = self._redact_content(
             intent_summary, EvidenceKind.APPROVAL_DECISION
@@ -379,7 +410,11 @@ class EvidenceService:
     ) -> EvidenceRef:
         """Record that a run stopped on an uncertain state."""
         self._assert_run_owned_by_incident(
-            agent_run_id, incident_id, project_id=project_id, target_id=target_id
+            agent_run_id,
+            incident_id,
+            project_id=project_id,
+            target_id=target_id,
+            service_name=service_name,
         )
         redacted = self._redact_content(description, EvidenceKind.UNCERTAIN_STATE)
         return self._persist(
@@ -434,6 +469,7 @@ class EvidenceService:
             service_name=service_name,
             agent_run_id=agent_run_id,
             source_ref=source_ref,
+            metadata=metadata,
             content_sha256=content_sha256,
         )
         evidence = EvidenceRef(
@@ -462,6 +498,7 @@ class EvidenceService:
         *,
         project_id: str,
         target_id: str,
+        service_name: str,
     ) -> None:
         if self._investigations is None:
             return
@@ -487,4 +524,12 @@ class EvidenceService:
                 f"run {agent_run_id} scope is "
                 f"{run.scope.project_id}/{run.scope.target_id}, not "
                 f"{project_id}/{target_id}"
+            )
+        if (
+            run.scope.service_name is not None
+            and run.scope.service_name != service_name
+        ):
+            raise EvidenceOwnershipError(
+                f"run {agent_run_id} scope service is "
+                f"{run.scope.service_name}, not {service_name}"
             )

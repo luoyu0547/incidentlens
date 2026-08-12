@@ -58,8 +58,11 @@ class EvidenceRef(BaseModel):
     cursor: str | None = Field(default=None, min_length=1, max_length=1000)
     severity: LogSeverity | None = None
     event_time: datetime | None = None
-    normal_signal: str | None = Field(default=None, max_length=500)
-    correlation_key: str | None = Field(default=None, max_length=500)
+    # No length caps: these mirror the upstream ``LogRecord`` fields, which are
+    # unbounded (``correlation_key`` can be derived from arbitrarily long field
+    # values), so a stored log record must always be able to become evidence.
+    normal_signal: str | None = None
+    correlation_key: str | None = None
 
     # Redacted, truncated content and its provenance.
     content_redacted: str

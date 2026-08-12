@@ -47,14 +47,26 @@ def make_investigation_store(
     run_id: str = "run-1",
     project_id: str = "payments",
     target_id: str = "dev-a",
+    scope_kind: LogScope = LogScope.HOST,
+    service_name: str | None = None,
+    container_name: str | None = None,
 ) -> InvestigationStore:
     inv_store = InvestigationStore(
         lambda: sqlite3.connect(tmp_path / "investigations.db")
     )
     inv_store.migrate()
-    scope = AgentScope(
-        project_id=project_id, target_id=target_id, scope=LogScope.HOST
-    )
+    if scope_kind is LogScope.CONTAINER:
+        scope = AgentScope(
+            project_id=project_id,
+            target_id=target_id,
+            scope=LogScope.CONTAINER,
+            service_name=service_name or "orders",
+            container_name=container_name or "orders-1",
+        )
+    else:
+        scope = AgentScope(
+            project_id=project_id, target_id=target_id, scope=LogScope.HOST
+        )
     inv_store.create_investigation(
         Investigation(
             investigation_id="inv-1",
@@ -307,3 +319,58 @@ def test_ownership_skipped_without_investigation_store(tmp_path: Path) -> None:
     service = EvidenceService(make_store(tmp_path))
     ref = service.record_command_output(**_command_kwargs(agent_run_id="ghost"))
     assert ref.agent_run_id == "ghost"
+
+
+def test_same_content_different_metadata_is_distinct(tmp_path: Path) -> None:
+    """Same redacted content under different metadata must not collapse."""
+    service = EvidenceService(make_store(tmp_path))
+    first = service.record_command_output(
+        **_command_kwargs(command="systemctl restart mysql")
+    )
+    second = service.record_command_output(
+        **_command_kwargs(command="systemctl status mysql")
+    )
+
+    assert first.content_redacted == second.content_redacted
+    assert first.evidence_ref_id != second.evidence_ref_id
+    assert len(
+        service._store.query(
+            incident_id="inc-1", evidence_kind=EvidenceKind.COMMAND_OUTPUT
+        )
+    ) == 2
+
+
+def test_ownership_rejected_for_service_mismatch(tmp_path: Path) -> None:
+    service = EvidenceService(
+        make_store(tmp_path),
+        investigations=make_investigation_store(
+            tmp_path, scope_kind=LogScope.CONTAINER, service_name="orders"
+        ),
+    )
+    with pytest.raises(EvidenceOwnershipError):
+        service.record_command_output(
+            **_command_kwargs(service_name="payment-api")
+        )
+
+
+def test_ownership_allowed_for_matching_container_service(tmp_path: Path) -> None:
+    service = EvidenceService(
+        make_store(tmp_path),
+        investigations=make_investigation_store(
+            tmp_path, scope_kind=LogScope.CONTAINER, service_name="orders"
+        ),
+    )
+    ref = service.record_command_output(
+        **_command_kwargs(service_name="orders")
+    )
+    assert ref.service_name == "orders"
+
+
+def test_ownership_skips_service_check_for_host_scope(tmp_path: Path) -> None:
+    """Host-scoped runs have no service in their scope; the check is skipped."""
+    service = EvidenceService(
+        make_store(tmp_path),
+        investigations=make_investigation_store(tmp_path),
+    )
+    ref = service.record_command_output(**_command_kwargs(service_name="payment-api"))
+    assert ref.service_name == "payment-api"

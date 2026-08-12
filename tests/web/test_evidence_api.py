@@ -31,6 +31,37 @@ def test_create_evidence_from_log_records(client, runtime, registered_project) -
     assert "abc123" not in response.text
 
 
+def test_create_evidence_from_log_record_with_long_correlation_key(
+    client, runtime, registered_project
+) -> None:
+    """A derived correlation_key longer than the old 500-char cap must not 500."""
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    record = make_web_log_record(
+        "ERROR token=[REDACTED_TOKEN]", now=now
+    ).model_copy(
+        update={
+            "log_id": "log-long",
+            "correlation_key": "x" * 2000,
+            "normal_signal": "y" * 2000,
+        }
+    )
+    runtime.log_store.append_batch((record,))
+
+    response = client.post(
+        "/api/evidence/from-log-records",
+        json={
+            "incident_id": "inc-1",
+            "log_ids": ["log-long"],
+            "created_by": "alice",
+        },
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body[0]["correlation_key"] == "x" * 2000
+    assert body[0]["normal_signal"] == "y" * 2000
+
+
 def test_get_incident_evidence_lists_redacted_refs(client, runtime, registered_project) -> None:
     record = make_web_log_record(
         "WARN password=[REDACTED_PASSWORD]", now=datetime(2026, 8, 12, tzinfo=UTC)
