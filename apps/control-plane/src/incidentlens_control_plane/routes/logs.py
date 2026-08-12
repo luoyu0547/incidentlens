@@ -122,6 +122,8 @@ async def search_logs(
     severity: LogSeverity | None = None,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
+    correlation_key: str | None = None,
+    normal_signal: str | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
 ) -> list[dict[str, object]]:
     """Search persisted redacted log records by filters and full-text match."""
@@ -136,6 +138,8 @@ async def search_logs(
         text=text,
         start_time=start_time,
         end_time=end_time,
+        correlation_key=correlation_key,
+        normal_signal=normal_signal,
     )
     try:
         records = runtime.log_store.search(filters, limit=limit)

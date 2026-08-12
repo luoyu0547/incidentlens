@@ -96,13 +96,31 @@ class EvidenceService:
         incident_id: str,
         created_by: str,
         now: datetime,
+        *,
+        agent_run_id: str | None = None,
     ) -> EvidenceRef:
-        """Create evidence from a stored redacted ``LogRecord`` (legacy path)."""
+        """Create evidence from a stored redacted ``LogRecord``.
+
+        When ``agent_run_id`` is set the ref is scoped to that run and its
+        ownership is asserted against the investigation store (the same check
+        the typed ``record_*`` methods run), so agent-collected log evidence is
+        audited exactly like any other run evidence.  Without ``agent_run_id``
+        this is the legacy incident-scoped path.
+        """
+        if agent_run_id is not None:
+            self._assert_run_owned_by_incident(
+                agent_run_id,
+                incident_id,
+                project_id=record.project_id,
+                target_id=record.target_id,
+                service_name=record.service_name,
+            )
         return self._store.create_from_log_record(
             record,
             incident_id=incident_id,
             created_by=created_by,
             now=now,
+            agent_run_id=agent_run_id,
         )
 
     def record_command_output(

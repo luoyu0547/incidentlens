@@ -56,6 +56,9 @@ if TYPE_CHECKING:
         ChangeManager,
         ChangeResult,
     )
+    from incidentlens_control_plane.project_registry.types import (
+        ServiceRegistration,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,14 +233,10 @@ class RemoteToolGateway:
         self, project_id: str, target_id: str, service: str
     ) -> tuple[object, TargetRegistration, object]:
         """Return ``(project_record, target_registration, service_registration)`` or raise."""
-        from incidentlens_control_plane.project_registry.types import (
-            ServiceRegistration,
-        )
-
         record = self._projects.get(project_id)
         target = self._resolve_target(project_id, target_id)
 
-        svc: ServiceRegistration | None = None
+        svc = None
         for s in record.services:
             if s.compose_service == service:
                 svc = s
@@ -247,6 +246,23 @@ class RemoteToolGateway:
                 f"service {service!r} not found in project {project_id!r}"
             )
         return record, target, svc
+
+    def resolve_service(
+        self, project_id: str, target_id: str, service: str
+    ) -> ServiceRegistration:
+        """Return the service registration, validating target and service names.
+
+        Exposes the same registry resolution the gateway uses for every
+        operation so an agent executor can classify shell commands and inspect
+        allowed paths against the registered service without duplicating the
+        lookup or contacting the remote target.
+        """
+        record = self._projects.get(project_id)
+        self._resolve_target(project_id, target_id)
+        for svc in record.services:
+            if svc.compose_service == service:
+                return svc
+        raise ValueError(f"service {service!r} not found in project {project_id!r}")
 
     def _make_scope(
         self, scope: dict[str, object] | None

@@ -32,6 +32,8 @@ class LogSearchFilters(BaseModel):
     text: str | None = None
     start_time: datetime | None = None
     end_time: datetime | None = None
+    correlation_key: str | None = None
+    normal_signal: str | None = None
 
 
 _RECORD_COLUMNS = (
@@ -177,6 +179,11 @@ class LogStore:
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS log_records_fts
                 USING fts5(log_id UNINDEXED, message_redacted);
+
+                CREATE INDEX IF NOT EXISTS idx_log_records_correlation_key
+                    ON log_records(correlation_key);
+                CREATE INDEX IF NOT EXISTS idx_log_records_normal_signal
+                    ON log_records(normal_signal);
 
                 CREATE TABLE IF NOT EXISTS log_subscriptions (
                     subscription_id TEXT PRIMARY KEY,
@@ -400,6 +407,12 @@ class LogStore:
         if filters.end_time is not None:
             clauses.append("observed_at <= ?")
             params.append(filters.end_time.astimezone(UTC).isoformat())
+        if filters.correlation_key is not None:
+            clauses.append("correlation_key = ?")
+            params.append(filters.correlation_key)
+        if filters.normal_signal is not None:
+            clauses.append("normal_signal = ?")
+            params.append(filters.normal_signal)
         if filters.text is not None and filters.text.strip():
             clauses.append(
                 "log_id IN (SELECT log_id FROM log_records_fts WHERE log_records_fts MATCH ?)"

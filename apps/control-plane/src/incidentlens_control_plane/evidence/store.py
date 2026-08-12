@@ -383,8 +383,16 @@ class EvidenceStore:
         incident_id: str,
         created_by: str,
         now: datetime,
+        agent_run_id: str | None = None,
     ) -> EvidenceRef:
-        """Create an evidence ref for a redacted log record, idempotently."""
+        """Create an evidence ref for a redacted log record, idempotently.
+
+        When ``agent_run_id`` is set the ref is scoped to that run: the run id
+        is folded into both the evidence ref identity and the dedupe key, so
+        the same log record evidenced by two runs stays two distinct refs and
+        is queryable via ``EvidenceStore.query(agent_run_id=...)``.  Leaving it
+        ``None`` keeps the legacy incident-scoped identity exactly unchanged.
+        """
         content_sha256 = hashlib.sha256(
             record.message_redacted.encode("utf-8")
         ).hexdigest()
@@ -399,6 +407,8 @@ class EvidenceStore:
                 record.cursor,
             )
         )
+        if agent_run_id is not None:
+            identity = f"{agent_run_id}|{identity}"
         evidence_ref_id = "ev-" + hashlib.sha256(
             f"{identity}|{content_sha256}".encode("utf-8")
         ).hexdigest()[:24]
@@ -406,6 +416,7 @@ class EvidenceStore:
             evidence_ref_id=evidence_ref_id,
             incident_id=incident_id,
             evidence_kind=EvidenceKind.LOG_RECORD,
+            agent_run_id=agent_run_id,
             project_id=record.project_id,
             target_id=record.target_id,
             service_name=record.service_name,

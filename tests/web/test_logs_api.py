@@ -65,6 +65,41 @@ def test_logs_search_returns_persisted_redacted_records(
     assert "abc123" not in response.text
 
 
+def test_logs_search_filters_by_correlation_key_and_normal_signal(
+    client, runtime, registered_project
+) -> None:
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    runtime.log_store.append_batch(
+        (
+            make_web_log_record("ERROR trace hit", now=now, log_id="log-c1").model_copy(
+                update={"correlation_key": "trace:aaa"}
+            ),
+            make_web_log_record("WARN other trace", now=now, log_id="log-c2").model_copy(
+                update={"correlation_key": "trace:bbb"}
+            ),
+            make_web_log_record("INFO healthcheck", now=now, log_id="log-c3").model_copy(
+                update={"normal_signal": "healthcheck_ok"}
+            ),
+        )
+    )
+
+    by_key = client.get(
+        "/api/logs/search",
+        params={"project_id": "payments", "correlation_key": "trace:aaa"},
+    )
+    assert by_key.status_code == 200
+    assert [row["message_redacted"] for row in by_key.json()] == ["ERROR trace hit"]
+
+    by_signal = client.get(
+        "/api/logs/search",
+        params={"project_id": "payments", "normal_signal": "healthcheck_ok"},
+    )
+    assert by_signal.status_code == 200
+    assert [row["message_redacted"] for row in by_signal.json()] == [
+        "INFO healthcheck"
+    ]
+
+
 def test_logs_query_rejects_unknown_target(client, registered_project) -> None:
     response = client.post(
         "/api/logs/query",

@@ -243,3 +243,35 @@ def test_search_start_time_normalizes_to_utc(tmp_path: Path) -> None:
     )
 
     assert [r.message_redacted for r in results] == ["after"]
+
+
+def test_search_filters_by_correlation_key_and_normal_signal(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    store.append_batch(
+        (
+            make_record("trace hit", dedupe_key="k1").model_copy(
+                update={"log_id": "log-k1", "correlation_key": "trace:aaa"}
+            ),
+            make_record("trace miss", dedupe_key="k2").model_copy(
+                update={"log_id": "log-k2", "correlation_key": "trace:bbb"}
+            ),
+            make_record("health ok", dedupe_key="k3").model_copy(
+                update={"log_id": "log-k3", "normal_signal": "healthcheck_ok"}
+            ),
+        )
+    )
+
+    by_key = store.search(LogSearchFilters(correlation_key="trace:aaa"), limit=10)
+    assert [r.message_redacted for r in by_key] == ["trace hit"]
+
+    by_signal = store.search(LogSearchFilters(normal_signal="healthcheck_ok"), limit=10)
+    assert [r.message_redacted for r in by_signal] == ["health ok"]
+
+    # Bounded filters AND together; a record must satisfy every set filter.
+    combined = store.search(
+        LogSearchFilters(
+            correlation_key="trace:aaa", normal_signal="healthcheck_ok"
+        ),
+        limit=10,
+    )
+    assert combined == ()

@@ -958,6 +958,38 @@ def test_gateway_edit_applies_single_file(
 
 
 @pytest.mark.asyncio
+async def test_gateway_resolve_service_validates_target_and_service(
+    project_store, target_registration, service_registration
+) -> None:
+    from incidentlens_control_plane.project_registry.types import ProjectRegistration
+    from incidentlens_control_plane.remote_ops.fakes import FakeTransportFactory
+    from incidentlens_control_plane.remote_ops.gateway import RemoteToolGateway
+    from incidentlens_control_plane.remote_ops.sessions import SessionManager
+
+    project_store.create(
+        ProjectRegistration(
+            project_id="payments",
+            display_name="Payments",
+            targets=(target_registration,),
+            services=(service_registration,),
+        ),
+        now=datetime(2026, 8, 12, tzinfo=UTC),
+    )
+    gateway = RemoteToolGateway(
+        projects=project_store,
+        sessions=SessionManager(FakeTransportFactory()),
+    )
+
+    svc = gateway.resolve_service("payments", "dev-a", "payment-api")
+    assert svc.compose_service == "payment-api"
+
+    with pytest.raises(ValueError, match="service 'ghost' not found"):
+        gateway.resolve_service("payments", "dev-a", "ghost")
+    with pytest.raises(ValueError, match="not registered"):
+        gateway.resolve_service("payments", "ghost-target", "payment-api")
+
+
+@pytest.mark.asyncio
 async def test_gateway_container_list_requires_registered_container(
     project_store, target_registration, service_registration
 ) -> None:

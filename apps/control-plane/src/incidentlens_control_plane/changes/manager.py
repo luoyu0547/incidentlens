@@ -104,6 +104,34 @@ def protected_paths_intent(
     }
 
 
+def is_protected_path(
+    path: PurePosixPath, service_protected: tuple[PurePosixPath, ...] = ()
+) -> bool:
+    """Return whether *path* is a protected path requiring an exact approval.
+
+    The rules are the single source of truth shared by the executor and
+    ``ChangeManager``: service-level protected roots, well-known config/compose
+    filenames, ``/etc`` and systemd unit paths.  A protected path is exactly
+    the class of mutation the approval gate must cover before any backup or
+    write happens.
+    """
+    if any(path.is_relative_to(p) for p in service_protected):
+        return True
+    name = path.name.lower()
+    if name in (".env", "compose.yaml", "compose.yml", "dockerfile"):
+        return True
+    if name.startswith("docker-compose") and name.endswith((".yml", ".yaml")):
+        return True
+    if path.is_relative_to(PurePosixPath("/etc")):
+        return True
+    if name.endswith(".service") and (
+        path.is_relative_to(PurePosixPath("/etc/systemd"))
+        or path.is_relative_to(PurePosixPath("/lib/systemd"))
+    ):
+        return True
+    return False
+
+
 class ChangeManager:
     """Orchestrates atomic remote file changes with two-backup ordering.
 
@@ -816,21 +844,7 @@ class ChangeManager:
     def _is_protected_path(
         self, path: PurePosixPath, service_protected: tuple[PurePosixPath, ...]
     ) -> bool:
-        if any(path.is_relative_to(p) for p in service_protected):
-            return True
-        name = path.name.lower()
-        if name in (".env", "compose.yaml", "compose.yml", "dockerfile"):
-            return True
-        if name.startswith("docker-compose") and name.endswith((".yml", ".yaml")):
-            return True
-        if path.is_relative_to(PurePosixPath("/etc")):
-            return True
-        if name.endswith(".service") and (
-            path.is_relative_to(PurePosixPath("/etc/systemd"))
-            or path.is_relative_to(PurePosixPath("/lib/systemd"))
-        ):
-            return True
-        return False
+        return is_protected_path(path, service_protected)
 
     # ------------------------------------------------------------------
     # Transport/policy resolution

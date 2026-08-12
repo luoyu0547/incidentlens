@@ -17,6 +17,7 @@ from incidentlens_control_plane.changes.manager import (
     ChangeApplyError,
     ChangeManager,
     ChangeRollbackError,
+    is_protected_path,
     protected_paths_intent,
 )
 from incidentlens_control_plane.changes.store import ChangeSetStore
@@ -440,6 +441,19 @@ def test_overlapping_replacements_are_rejected(
 # ---------------------------------------------------------------------------
 # Protected paths and approvals
 # ---------------------------------------------------------------------------
+
+
+def test_is_protected_path_rules_are_shared_and_exhaustive() -> None:
+    """The module-level rule mirrors ChangeManager's approval gate."""
+    assert is_protected_path(PurePosixPath("/opt/app/.env")) is True
+    assert is_protected_path(PurePosixPath("/opt/app/compose.yaml")) is True
+    assert is_protected_path(PurePosixPath("/opt/app/Dockerfile")) is True
+    assert is_protected_path(PurePosixPath("/etc/hosts")) is True
+    assert is_protected_path(PurePosixPath("/etc/systemd/system/web.service")) is True
+    assert is_protected_path(PurePosixPath("/opt/app/plain.conf")) is False
+    protected = (PurePosixPath("/opt/app/protected"),)
+    assert is_protected_path(PurePosixPath("/opt/app/protected/secrets.env"), protected) is True
+    assert is_protected_path(PurePosixPath("/opt/app/other.env"), protected) is False
 
 
 def test_protected_path_requires_approval(
