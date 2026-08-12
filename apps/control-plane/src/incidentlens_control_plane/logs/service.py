@@ -30,6 +30,7 @@ from incidentlens_control_plane.logs.types import (
     LogRecord,
     LogScope,
     LogSourceKind,
+    LogSubscription,
     ProcessedLogLine,
     RawLogLine,
     ServiceNotFound,
@@ -208,6 +209,29 @@ class LogService:
     def _to_record(
         self, request: LogQueryRequest, raw: RawLogLine, now: datetime
     ) -> LogRecord:
+        return self._record_from_raw(
+            raw,
+            now,
+            project_id=request.project_id,
+            target_id=request.target_id,
+            service_name=request.service_name,
+            source_kind=request.source_kind,
+            scope=request.scope,
+            source_ref=request.source_ref,
+        )
+
+    def _record_from_raw(
+        self,
+        raw: RawLogLine,
+        now: datetime,
+        *,
+        project_id: str,
+        target_id: str,
+        service_name: str,
+        source_kind: LogSourceKind,
+        scope: LogScope,
+        source_ref: str,
+    ) -> LogRecord:
         parsed = parse_log_line(raw.text)
         redacted = redact_message(parsed.message)
         processed = ProcessedLogLine(
@@ -220,12 +244,12 @@ class LogService:
         )
         dedupe_source = "|".join(
             (
-                request.project_id,
-                request.target_id,
-                request.service_name,
-                request.source_kind.value,
-                request.scope.value,
-                request.source_ref,
+                project_id,
+                target_id,
+                service_name,
+                source_kind.value,
+                scope.value,
+                source_ref,
                 raw.cursor,
                 processed.message_redacted,
             )
@@ -233,12 +257,12 @@ class LogService:
         return LogRecord(
             log_id=f"log-{uuid.uuid4().hex[:12]}",
             subscription_id=None,
-            project_id=request.project_id,
-            target_id=request.target_id,
-            service_name=request.service_name,
-            source_kind=request.source_kind,
-            scope=request.scope,
-            source_ref=request.source_ref,
+            project_id=project_id,
+            target_id=target_id,
+            service_name=service_name,
+            source_kind=source_kind,
+            scope=scope,
+            source_ref=source_ref,
             cursor=raw.cursor,
             dedupe_key=hashlib.sha256(dedupe_source.encode("utf-8")).hexdigest(),
             observed_at=now,
@@ -250,6 +274,33 @@ class LogService:
             correlation_key=processed.correlation_key,
             evidence_ref_id=None,
             created_at=now,
+        )
+
+    def process_raw_lines(
+        self,
+        raw_lines: tuple[RawLogLine, ...],
+        *,
+        now: datetime,
+        subscription: LogSubscription,
+    ) -> tuple[LogRecord, ...]:
+        """Run the parse -> redact -> signal -> correlation pipeline over raw lines.
+
+        ``subscription`` supplies the record context (project/target/service/
+        source kind and scope) that ``RawLogLine`` does not carry.  Raw log text
+        is transient: only redacted ``LogRecord`` rows are returned.
+        """
+        return tuple(
+            self._record_from_raw(
+                raw,
+                now,
+                project_id=subscription.project_id,
+                target_id=subscription.target_id,
+                service_name=subscription.service_name,
+                source_kind=subscription.source_kind,
+                scope=subscription.scope,
+                source_ref=subscription.source_ref,
+            )
+            for raw in raw_lines
         )
 
     @staticmethod

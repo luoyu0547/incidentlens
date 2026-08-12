@@ -27,6 +27,7 @@ async def _lifespan(
     try:
         yield
     finally:
+        await services.subscriptions.close_all()
         await services.sessions.close_all()
         app.state.runtime = None  # type: ignore[assignment]
 

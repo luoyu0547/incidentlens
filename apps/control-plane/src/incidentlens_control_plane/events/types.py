@@ -30,6 +30,9 @@ class RuntimeEventType(StrEnum):
     REMOTE_OPERATION_STARTED = "remote_operation.started"
     REMOTE_OPERATION_COMPLETED = "remote_operation.completed"
 
+    LOG_SUBSCRIPTION_STARTED = "log.subscription_started"
+    LOG_SUBSCRIPTION_PAUSED = "log.subscription_paused"
+
 
 # JsonValue is a union type for JSON-serializable values
 # Using Any to avoid recursion issues with Pydantic

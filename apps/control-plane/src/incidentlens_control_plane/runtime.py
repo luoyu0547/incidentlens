@@ -16,6 +16,7 @@ from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.evidence.store import EvidenceStore
 from incidentlens_control_plane.logs.service import LogService
 from incidentlens_control_plane.logs.store import LogStore
+from incidentlens_control_plane.logs.subscriptions import LogSubscriptionManager
 from incidentlens_control_plane.project_registry.store import ProjectRegistryStore
 from incidentlens_control_plane.remote_ops.asyncssh_adapter import (
     AsyncSshTransportFactory,
@@ -41,6 +42,7 @@ class RuntimeServices:
     log_store: LogStore
     evidence: EvidenceStore
     logs: LogService
+    subscriptions: LogSubscriptionManager
 
 
 def build_runtime(
@@ -115,6 +117,13 @@ def build_runtime(
         sessions=sessions,
         evidence=evidence,
     )
+    subscriptions = LogSubscriptionManager(
+        store=log_store,
+        service=logs,
+        events=events,
+        broker=broker,
+        settings=settings,
+    )
 
     return RuntimeServices(
         projects=projects,
@@ -129,4 +138,5 @@ def build_runtime(
         log_store=log_store,
         evidence=evidence,
         logs=logs,
+        subscriptions=subscriptions,
     )

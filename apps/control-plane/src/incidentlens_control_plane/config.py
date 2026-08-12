@@ -14,6 +14,10 @@ class RuntimeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     data_dir: Path
+    max_active_log_subscriptions: int = 20
+    log_subscription_queue_size: int = 1000
+    log_subscription_batch_size: int = 100
+    log_file_poll_interval_seconds: float = 2.0
 
     @classmethod
     def from_environment(cls) -> RuntimeSettings:
