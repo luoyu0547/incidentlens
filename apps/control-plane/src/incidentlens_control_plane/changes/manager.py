@@ -25,7 +25,9 @@ from incidentlens_control_plane.remote_ops.files import ContainerFileBackend
 from incidentlens_control_plane.remote_ops.policy import RemotePathPolicy
 from incidentlens_control_plane.remote_ops.sessions import SessionManager
 from incidentlens_control_plane.remote_ops.transport import (
+    RemoteConnectionError,
     RemotePathError,
+    RemoteTimeoutError,
     RemoteTransport,
 )
 from incidentlens_control_plane.remote_ops.types import (
@@ -39,6 +41,18 @@ from incidentlens_control_plane.remote_ops.types import (
 
 # Maximum bytes read for a single remote file during a change.
 _MAX_CHANGE_FILE_BYTES = 10 * 1024 * 1024
+
+
+def _is_uncertain_failure(exc: BaseException) -> bool:
+    """Return True when *exc* is a timeout/connection loss (not a deterministic error).
+
+    The apply rollback folds every failure into a ``ChangeResult``; this flag
+    tells the agent executor that the remote state could not be confirmed so
+    the run pauses UNCERTAIN instead of reporting a deterministic FAILED.
+    """
+    return isinstance(
+        exc, (RemoteTimeoutError, RemoteConnectionError, asyncio.TimeoutError)
+    )
 
 
 class ChangeApplyError(Exception):
@@ -61,6 +75,10 @@ class ChangeResult:
     status: ChangeSetStatus
     applied_files: tuple[str, ...] = ()
     error: str | None = None
+    # True when the apply failed because the remote state could not be
+    # confirmed (timeout / connection loss) rather than a deterministic error.
+    # The agent executor pauses such a run UNCERTAIN instead of failing it.
+    uncertain: bool = False
 
 
 def change_intent(
@@ -698,11 +716,13 @@ class ChangeManager:
                 status=ChangeSetStatus.ROLLED_BACK,
                 applied_files=tuple(applied_files),
                 error=str(exc),
+                uncertain=_is_uncertain_failure(exc),
             )
         return ChangeResult(
             changeset_id=request.changeset_id,
             status=ChangeSetStatus.FAILED,
             error=str(exc),
+            uncertain=_is_uncertain_failure(exc),
         )
 
     # ------------------------------------------------------------------
