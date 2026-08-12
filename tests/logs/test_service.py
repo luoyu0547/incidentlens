@@ -235,6 +235,48 @@ async def test_query_create_evidence_persists_and_propagates_ref_id(
 
 
 @pytest.mark.asyncio
+async def test_flat_json_line_without_message_persists_no_secrets(
+    tmp_path, target_registration
+) -> None:
+    """A flat JSON log line with secrets and NO message key must not persist them.
+
+    The message falls back to the raw JSON text, which is redacted before
+    persisting so neither the password nor the token survive into the stored
+    record or the FTS index.
+    """
+    service = build_test_log_service(tmp_path, target_registration)
+    session = await service._sessions.connect(target_registration)
+    session.transport._files[PurePosixPath("/var/log/payment/app.log")] = (
+        b'{"lvl":"ERROR","password":"hunter2","token":"abc123"}\n'
+    )
+
+    records = await service.query(
+        LogQueryRequest(
+            project_id="payments",
+            target_id="dev-a",
+            service_name="payment-api",
+            source_kind=LogSourceKind.FILE,
+            scope=LogScope.HOST,
+            source_ref="/var/log/payment/app.log",
+            tail_lines=10,
+            persist=True,
+            create_evidence=False,
+        ),
+        now=datetime(2026, 8, 12, 10, 0, tzinfo=UTC),
+    )
+
+    assert len(records) == 1
+    assert "hunter2" not in records[0].message_redacted
+    assert "abc123" not in records[0].message_redacted
+    stored = service._store.search(
+        LogSearchFilters(project_id="payments"), limit=10
+    )
+    assert len(stored) == 1
+    assert "hunter2" not in stored[0].message_redacted
+    assert "abc123" not in stored[0].message_redacted
+
+
+@pytest.mark.asyncio
 async def test_docker_reconnect_overlap_uses_stable_dedupe_identity(
     tmp_path, target_registration
 ) -> None:

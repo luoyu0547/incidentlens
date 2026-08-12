@@ -19,6 +19,33 @@ def test_redacts_token_password_email_ip_and_url_secret() -> None:
     assert result.summary["url_secret"] == 1
 
 
+def test_redacts_json_quoted_secret_keys() -> None:
+    result = redact_message('{"password":"hunter2","token":"abc123"}')
+
+    assert "hunter2" not in result.message_redacted
+    assert "abc123" not in result.message_redacted
+    assert result.summary["password"] == 1
+    assert result.summary["token"] == 1
+
+
+def test_redacts_json_quoted_secret_keys_with_whitespace() -> None:
+    result = redact_message('{"password": "hunter2", "token": "abc123"}')
+
+    assert "hunter2" not in result.message_redacted
+    assert "abc123" not in result.message_redacted
+    assert result.summary["password"] == 1
+    assert result.summary["token"] == 1
+
+
+def test_redacts_single_quoted_json_keys() -> None:
+    result = redact_message("{'password': 'hunter2', 'token': 'abc123'}")
+
+    assert "hunter2" not in result.message_redacted
+    assert "abc123" not in result.message_redacted
+    assert result.summary["password"] == 1
+    assert result.summary["token"] == 1
+
+
 def test_truncates_redacted_message_to_16_kib() -> None:
     result = redact_message("x" * (16 * 1024 + 10))
 

@@ -8,6 +8,10 @@ class UnregisteredLogContainer(Exception):
     """Raised when a docker/container-scope query names an unregistered container."""
 
 
+class InvalidSubscription(Exception):
+    """Raised when a log subscription cannot be created for the requested source."""
+
+
 class InvalidSubscriptionTransition(Exception):
     """Raised when a log subscription state transition is not permitted."""
 
@@ -55,6 +59,11 @@ class ParsedLogLine(BaseModel):
     severity: LogSeverity
     fields: dict[str, object]
     message: str
+    # True when the line parsed as JSON but had no ``message``/``msg`` field,
+    # so ``message`` is the raw JSON text.  Persisting that text must go
+    # through explicit redaction (callers redact the raw text rather than
+    # treating ``message`` as a safe message).
+    message_is_raw: bool = False
 
 
 class RedactionResult(BaseModel):

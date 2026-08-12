@@ -26,6 +26,7 @@ from incidentlens_control_plane.logs.sources import (
 )
 from incidentlens_control_plane.logs.store import LogStore
 from incidentlens_control_plane.logs.types import (
+    InvalidSubscription,
     LogQueryRequest,
     LogRecord,
     LogScope,
@@ -250,7 +251,14 @@ class LogService:
         subscription_id: str | None = None,
     ) -> LogRecord:
         parsed = parse_log_line(raw.text)
-        redacted = redact_message(parsed.message)
+        if parsed.message_is_raw:
+            # The line parsed as JSON but carried no message field, so
+            # ``parsed.message`` is the raw JSON text.  Never persist that text
+            # directly: redact the raw text explicitly so secrets inside the
+            # structured line (e.g. ``{"password": "hunter2"}``) are replaced.
+            redacted = redact_message(raw.text)
+        else:
+            redacted = redact_message(parsed.message)
         processed = ProcessedLogLine(
             raw=raw,
             parsed=parsed,
@@ -324,6 +332,56 @@ class LogService:
             )
             for raw in raw_lines
         )
+
+    async def validate_subscription_source(
+        self,
+        *,
+        project_id: str,
+        target_id: str,
+        service_name: str,
+        source_kind: LogSourceKind,
+        scope: LogScope,
+        source_ref: str,
+    ) -> None:
+        """Validate a subscription source against the registry, like ``query``.
+
+        Resolves the project/target/service registration and checks the source
+        reference WITHOUT contacting the remote target: a docker source must
+        name a registered container, and a host file source must stay under the
+        service's allowed log paths (or fall back to the allowed host paths).
+        Raises ``ProjectNotFound``, ``TargetNotFound``, ``ServiceNotFound``,
+        ``UnregisteredLogContainer``, ``RemotePathDenied`` or
+        ``InvalidSubscription`` so a subscription can never be created for an
+        unregistered source.
+        """
+        project = self._projects.get(project_id)
+        self._resolve_target(project, target_id)
+        svc = self._resolve_service(project, service_name)
+        if source_kind == LogSourceKind.DOCKER:
+            if source_ref not in svc.container_names:
+                raise UnregisteredLogContainer(
+                    f"container {source_ref!r} is not a registered container"
+                )
+            return
+        if source_kind == LogSourceKind.FILE:
+            if scope == LogScope.CONTAINER:
+                raise InvalidSubscription("container file reads are not supported")
+            path = PurePosixPath(source_ref)
+            if not path.is_absolute():
+                raise RemotePathDenied(f"path is not absolute: {path}")
+            if ".." in path.parts:
+                raise RemotePathDenied(f"path contains '..': {path}")
+            if svc.allowed_log_paths:
+                if self._match_log_path_root(path, svc.allowed_log_paths) is None:
+                    raise RemotePathDenied(
+                        f"path {path} is outside allowed log paths {svc.allowed_log_paths}"
+                    )
+            else:
+                await RemotePathPolicy(svc).authorize(
+                    HostScope(), path, write=False, transport=None
+                )
+            return
+        raise InvalidSubscription(f"unsupported source kind: {source_kind}")
 
     @staticmethod
     def _resolve_target(

@@ -34,11 +34,19 @@ _URL_SECRET_RE = re.compile(
     r"[?&](?P<key>secret|token|password|passwd|pwd|api[_-]?key|apikey|"
     r"access[_-]?key|auth|signature|sig|private[_-]?key|client[_-]?secret)=[^&\s]*"
 )
+# Matches both plain key-value forms (``password=abc``, ``token: abc``) and
+# JSON-quoted forms (``"password": "abc"``, ``'token': 'abc'``).  The optional
+# quotes around the key and the ``[=:]`` separator (with surrounding
+# whitespace) let one rule cover text and structured log lines; the value group
+# consumes the surrounding quotes so the replacement never echoes them.
 _SECRET_KV_RE = re.compile(
-    r"(?P<key>\b(?:"
+    r"(?P<key>[\"']?"
+    r"(?P<bare>\b(?:"
     r"client[_-]?secret|access[_-]?(?:token|key)|api[_-]?key|apikey|auth[_-]?token"
     r"|secret[_-]?key|private[_-]?key|token|password|passwd|pwd|secret"
-    r")\b)\s*[=:]\s*"
+    r")\b)"
+    r"[\"']?)"
+    r"\s*[=:]\s*"
     r"(?P<value>(?:\"[^\"]*\"|'[^']*'|(?!\[REDACTED_)[^\s,]+))"
 )
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
@@ -87,12 +95,12 @@ def _url_secret_repl(match: re.Match[str]) -> str:
 
 
 def _secret_kv_repl(match: re.Match[str], summary: dict[str, int]) -> str:
-    key = match.group("key").lower()
+    key = match.group("bare").lower()
     if key in _PASSWORD_KEYS:
         summary["password"] = summary.get("password", 0) + 1
-        return f"{match.group('key')}={_REDACTED_PASSWORD}"
+        return f"{match.group('bare')}={_REDACTED_PASSWORD}"
     summary["token"] = summary.get("token", 0) + 1
-    return f"{match.group('key')}={_REDACTED_TOKEN}"
+    return f"{match.group('bare')}={_REDACTED_TOKEN}"
 
 
 def redact_message(message: str) -> RedactionResult:

@@ -63,6 +63,7 @@ def _severity_from_text(text: str) -> LogSeverity:
 def parse_log_line(text: str) -> ParsedLogLine:
     fields: dict[str, object] = {}
     message = text
+    message_is_raw = False
     event_time: datetime | None = None
     severity = LogSeverity.UNKNOWN
     try:
@@ -72,8 +73,14 @@ def parse_log_line(text: str) -> ParsedLogLine:
 
     if isinstance(value, dict):
         fields = dict(value)
-        message_value = value.get("message") or value.get("msg") or text
-        message = str(message_value)
+        message_value = value.get("message") or value.get("msg")
+        if message_value is None:
+            # A structured JSON line with no message field.  ``message`` must
+            # never be persisted as the raw JSON text: flag it so callers route
+            # the raw text through redaction (or a safe placeholder).
+            message_is_raw = True
+        else:
+            message = str(message_value)
         for key in ("timestamp", "time", "@timestamp", "ts"):
             if key in value:
                 event_time = _parse_time(str(value[key]))
@@ -82,6 +89,11 @@ def parse_log_line(text: str) -> ParsedLogLine:
             if key in value:
                 severity = _severity_from_token(str(value[key]))
                 break
+    elif value is not None:
+        # JSON that is not an object (array/string/number) has no message
+        # field; the message is the raw JSON text and must be redacted before
+        # persistence.
+        message_is_raw = True
 
     if severity is LogSeverity.UNKNOWN:
         severity = _severity_from_text(text)
@@ -92,4 +104,5 @@ def parse_log_line(text: str) -> ParsedLogLine:
         severity=severity,
         fields=fields,
         message=message,
+        message_is_raw=message_is_raw,
     )
