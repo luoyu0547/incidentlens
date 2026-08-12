@@ -50,7 +50,9 @@ class RemoteTransport(Protocol):
     async def lstat(self, path: PurePosixPath) -> FileMetadata:
         raise NotImplementedError
 
-    async def read_bytes(self, path: PurePosixPath, *, max_bytes: int) -> bytes:
+    async def read_bytes(
+        self, path: PurePosixPath, *, offset: int = 0, max_bytes: int
+    ) -> bytes:
         raise NotImplementedError
 
     async def list_directory(self, path: PurePosixPath) -> tuple[FileMetadata, ...]:

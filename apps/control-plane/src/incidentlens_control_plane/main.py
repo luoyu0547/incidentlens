@@ -4,6 +4,7 @@ No route in this module contacts a remote server. Remote execution will be
 wired only through the typed policy gate and provider adapters.
 """
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -12,6 +13,8 @@ from fastapi import FastAPI
 from incidentlens_control_plane.config import RuntimeSettings
 from incidentlens_control_plane.remote_ops.transport import RemoteTransportFactory
 from incidentlens_control_plane.runtime import build_runtime
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -25,6 +28,14 @@ async def _lifespan(
     services = build_runtime(settings, transport_factory=transport_factory)
     app.state.runtime = services
     try:
+        # Restore active opt-in log subscriptions.  A single failing
+        # subscription must not prevent startup: the manager isolates
+        # per-subscription reader errors, and this guard covers any
+        # unexpected store/setup failure.
+        try:
+            await services.subscriptions.start_active_opt_in()
+        except Exception:
+            logger.exception("failed to restore active log subscriptions")
         yield
     finally:
         await services.subscriptions.close_all()

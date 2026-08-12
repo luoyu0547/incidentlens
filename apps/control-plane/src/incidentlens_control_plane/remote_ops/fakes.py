@@ -64,9 +64,11 @@ class FakeTransport:
             is_symlink=False,
         )
 
-    async def read_bytes(self, path: PurePosixPath, *, max_bytes: int) -> bytes:
+    async def read_bytes(
+        self, path: PurePosixPath, *, offset: int = 0, max_bytes: int
+    ) -> bytes:
         data = self._files.get(path, b"")
-        return data[:max_bytes]
+        return data[offset : offset + max_bytes]
 
     async def list_directory(self, path: PurePosixPath) -> tuple[FileMetadata, ...]:
         entries: list[FileMetadata] = []
@@ -223,10 +225,12 @@ class FakeChangeTransport:
             is_symlink=False,
         )
 
-    async def read_bytes(self, path: PurePosixPath, *, max_bytes: int) -> bytes:
+    async def read_bytes(
+        self, path: PurePosixPath, *, offset: int = 0, max_bytes: int
+    ) -> bytes:
         self.calls.append(f"read:{path}")
         data = self.files.get(path, b"")
-        return data[:max_bytes]
+        return data[offset : offset + max_bytes]
 
     async def list_directory(self, path: PurePosixPath) -> tuple[FileMetadata, ...]:
         entries: list[FileMetadata] = []

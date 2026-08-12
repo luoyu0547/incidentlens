@@ -114,8 +114,10 @@ class FileLogSource:
             offset = 0
         if size <= offset:
             return FileStreamResult(generation=_generation_for(meta), lines=())
-        content = await transport.read_bytes(path, max_bytes=_MAX_TAIL_READ_BYTES)
-        data = content[offset:]
+        content = await transport.read_bytes(
+            path, offset=offset, max_bytes=_MAX_TAIL_READ_BYTES
+        )
+        data = content
         last_newline = data.rfind(b"\n")
         if last_newline == -1:
             # No complete line yet; keep the offset for the next poll.

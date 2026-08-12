@@ -113,9 +113,12 @@ class AsyncSshTransport(RemoteTransport):
         except Exception as exc:
             raise _map_error(exc) from exc
 
-    async def read_bytes(self, path: PurePosixPath, *, max_bytes: int) -> bytes:
+    async def read_bytes(
+        self, path: PurePosixPath, *, offset: int = 0, max_bytes: int
+    ) -> bytes:
         try:
             async with self._sftp.open(str(path), "rb") as f:
+                await f.seek(offset)
                 return await f.read(max_bytes)
         except Exception as exc:
             raise _map_error(exc) from exc
