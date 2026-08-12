@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -12,6 +13,12 @@ from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.logs.service import LogService
 from incidentlens_control_plane.logs.store import LogStore
 from incidentlens_control_plane.logs.subscriptions import LogSubscriptionManager
+from incidentlens_control_plane.logs.types import (
+    LogScope,
+    LogSourceKind,
+    LogSubscription,
+    LogSubscriptionStatus,
+)
 from incidentlens_control_plane.project_registry.store import ProjectRegistryStore
 from incidentlens_control_plane.project_registry.types import (
     ProjectRegistration,
@@ -43,7 +50,40 @@ def store(tmp_path) -> LogStore:
 
 
 @pytest.fixture
-async def manager(tmp_path, store, target_registration) -> LogSubscriptionManager:
+def runtime_events(tmp_path) -> RuntimeEventStore:
+    """A migrated RuntimeEventStore over the same temp DB the manager uses.
+
+    The manager fixture wires this exact instance into the
+    ``LogSubscriptionManager`` so tests can read back the events the manager
+    appended through ``list_after``.
+    """
+    events = RuntimeEventStore(lambda: sqlite3.connect(tmp_path / "runtime.db"))
+    events.migrate()
+    return events
+
+
+def docker_subscription(container: str) -> LogSubscription:
+    """A minimal active docker/container subscription for source tests."""
+    return LogSubscription(
+        subscription_id=f"sub-{uuid.uuid4().hex[:8]}",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.DOCKER,
+        scope=LogScope.CONTAINER,
+        source_ref=container,
+        opt_in_streaming=True,
+        status=LogSubscriptionStatus.ACTIVE,
+        created_by="alice",
+        created_at=_PAYMENTS_NOW,
+        updated_at=_PAYMENTS_NOW,
+    )
+
+
+@pytest.fixture
+async def manager(
+    tmp_path, store, target_registration, runtime_events
+) -> LogSubscriptionManager:
     """A LogSubscriptionManager wired to the store, a LogService, events, and settings.
 
     The payments project is registered so reader tasks can resolve the target;
@@ -67,8 +107,6 @@ async def manager(tmp_path, store, target_registration) -> LogSubscriptionManage
         ),
         now=_PAYMENTS_NOW,
     )
-    events = RuntimeEventStore(lambda: sqlite3.connect(tmp_path / "runtime.db"))
-    events.migrate()
     service = LogService(
         projects=projects,
         store=store,
@@ -82,7 +120,7 @@ async def manager(tmp_path, store, target_registration) -> LogSubscriptionManage
     mgr = LogSubscriptionManager(
         store=store,
         service=service,
-        events=events,
+        events=runtime_events,
         broker=broker,
         settings=settings,
     )

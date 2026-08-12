@@ -32,6 +32,12 @@ class RuntimeEventType(StrEnum):
 
     LOG_SUBSCRIPTION_STARTED = "log.subscription_started"
     LOG_SUBSCRIPTION_PAUSED = "log.subscription_paused"
+    LOG_SUBSCRIPTION_RESUMED = "log.subscription_resumed"
+    LOG_SUBSCRIPTION_DELETED = "log.subscription_deleted"
+    LOG_BATCH_WRITTEN = "log.batch_written"
+    LOG_SOURCE_ROTATED = "log.source_rotated"
+    LOG_BACKPRESSURE = "log.backpressure"
+    LOG_SUBSCRIPTION_ERROR = "log.subscription_error"
 
 
 # JsonValue is a union type for JSON-serializable values

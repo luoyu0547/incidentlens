@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+import re
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 
 from incidentlens_control_plane.logs.types import (
@@ -27,6 +29,14 @@ from incidentlens_control_plane.remote_ops.transport import (
 _MAX_TAIL_READ_BYTES = 16 * 1024 * 1024
 
 _DOCKER_LOG_TIMEOUT = 30.0
+
+# ``docker logs --timestamps`` prefixes each line with an RFC 3339 timestamp
+# (e.g. ``2026-08-12T10:00:00Z``).
+_DOCKER_TS_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?"
+)
+_DOCKER_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+_DOCKER_STREAM_READ_SIZE = 64 * 1024
 
 
 class LogSourceUnavailable(Exception):
@@ -182,4 +192,103 @@ class DockerLogSource:
                 text=text,
             )
             for offset, text in enumerate(tail_lines)
+        )
+
+    async def stream(
+        self,
+        subscription: LogSubscription,
+        target: TargetRegistration,
+        cursor: LogCursor | str | None,
+    ) -> AsyncIterator[RawLogLine]:
+        """Stream docker container stdout/stderr lines via a fixed ``--follow`` argv.
+
+        The cursor (``docker:time=<iso>:seq=<n>``) supplies the ``--since``
+        time; when absent or malformed the stream bootstraps to one second
+        before ``observed_at``.  Each emitted line carries a ``docker:time=<ts>``
+        cursor whose sequence increments per line within the same timestamp, and
+        the timestamp prefix is stripped from the emitted text.  The process is
+        always closed on exit or cancellation.  A failed process (open error or
+        read error) is converted to ``LogSourceUnavailable`` and stderr is never
+        surfaced as application log content.
+        """
+        since_time = self._parse_docker_cursor(cursor)
+        if since_time is None:
+            since_time = (
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            ).strftime(_DOCKER_TIME_FORMAT)
+        transport = self._transport_factory(target)
+        try:
+            process = await transport.open_process(
+                (
+                    "docker",
+                    "logs",
+                    "--timestamps",
+                    "--follow",
+                    "--since",
+                    since_time,
+                    "--",
+                    subscription.source_ref,
+                ),
+                term_type=None,
+            )
+        except Exception as exc:
+            raise LogSourceUnavailable("docker log stream unavailable") from exc
+        buffer = b""
+        seq = 0
+        try:
+            while True:
+                try:
+                    chunk = await process.read(_DOCKER_STREAM_READ_SIZE)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    raise LogSourceUnavailable(
+                        "docker log stream unavailable"
+                    ) from exc
+                if not chunk:
+                    break
+                buffer += chunk
+                parts = buffer.split(b"\n")
+                buffer = parts.pop()  # trailing partial line, if any
+                for raw in parts:
+                    seq += 1
+                    yield self._line_from_raw(subscription, raw, seq)
+            if buffer:
+                seq += 1
+                yield self._line_from_raw(subscription, buffer, seq)
+        finally:
+            await process.close()
+
+    @staticmethod
+    def _parse_docker_cursor(cursor: LogCursor | str | None) -> str | None:
+        """Return the ``since`` timestamp from a docker cursor, or None."""
+        if cursor is None:
+            return None
+        value = cursor.cursor if isinstance(cursor, LogCursor) else cursor
+        prefix = "docker:time="
+        if not value.startswith(prefix):
+            return None
+        return value[len(prefix) :].split(":seq=", 1)[0]
+
+    @classmethod
+    def _line_from_raw(
+        cls, subscription: LogSubscription, raw: bytes, seq: int
+    ) -> RawLogLine:
+        """Build a ``RawLogLine`` from one raw streamed line.
+
+        The docker ``--timestamps`` prefix (e.g. ``2026-08-12T10:00:00Z``) is
+        parsed into the cursor timestamp and stripped from the emitted text;
+        lines without a parseable prefix use a literal ``unknown`` timestamp.
+        """
+        text = raw.decode("utf-8", errors="replace")
+        head, sep, rest = text.partition(" ")
+        if sep and _DOCKER_TS_RE.match(head):
+            ts, message = head, rest
+        else:
+            ts, message = "unknown", text
+        return RawLogLine(
+            source_ref=subscription.source_ref,
+            cursor=f"docker:time={ts}:seq={seq}",
+            observed_at=datetime.now(timezone.utc),
+            text=message,
         )

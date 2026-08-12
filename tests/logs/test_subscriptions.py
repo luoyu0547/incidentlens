@@ -1,6 +1,7 @@
 """LogSubscriptionManager state machine, recovery, and cursor tests."""
 
 import asyncio
+import json
 import logging
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
@@ -227,3 +228,49 @@ async def test_failed_append_batch_does_not_advance_cursor(
 
     assert store.get_cursor(subscription.subscription_id).cursor == "file:offset=5"
     assert len(store.search(LogSearchFilters(project_id="payments"), limit=10)) == 1
+
+
+@pytest.mark.asyncio
+async def test_docker_backpressure_closes_process_and_emits_safe_event(
+    manager: LogSubscriptionManager, runtime_events
+) -> None:
+    subscription = await manager.create(
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.DOCKER,
+        scope=LogScope.CONTAINER,
+        source_ref="payments-api-1",
+        opt_in_streaming=True,
+        created_by="alice",
+    )
+    await manager.force_backpressure_for_test(subscription.subscription_id)
+
+    events = runtime_events.list_after(0, limit=100)
+    payloads = [
+        event.payload
+        for event in events
+        if event.event_type.value == "log.backpressure"
+    ]
+
+    assert payloads
+    assert "token=abc123" not in json.dumps(payloads)
+    assert "dev-a.example.test" not in json.dumps(payloads)
+
+
+@pytest.mark.asyncio
+async def test_repeated_errors_move_subscription_to_error_with_redacted_summary(
+    manager: LogSubscriptionManager, store
+) -> None:
+    manager.max_failures = 2
+    await manager.record_failure_for_test(
+        "sub-1", RuntimeError("token=abc123 host dev-a.example.test")
+    )
+    await manager.record_failure_for_test(
+        "sub-1", RuntimeError("token=abc123 host dev-a.example.test")
+    )
+
+    subscription = store.get_subscription("sub-1")
+    assert subscription.status.value == "error"
+    assert "abc123" not in subscription.last_error_redacted
+    assert "dev-a.example.test" not in subscription.last_error_redacted

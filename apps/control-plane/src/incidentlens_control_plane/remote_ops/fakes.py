@@ -15,15 +15,25 @@ from incidentlens_control_plane.remote_ops.transport import (
 
 @dataclass
 class FakeProcess:
-    """Minimal in-memory ``RemoteProcess`` for testing."""
+    """Minimal in-memory ``RemoteProcess`` for testing.
+
+    ``read`` returns the next chunk from ``chunks`` and ``b""`` when the chunks
+    are exhausted, so stream consumers see real byte boundaries before EOF.
+    """
 
     closed: bool = False
+    chunks: tuple[bytes, ...] = ()
+    _index: int = field(default=0, init=False, repr=False)
 
     async def write(self, data: bytes) -> None:  # noqa: ARG002
         pass
 
     async def read(self, max_bytes: int) -> bytes:  # noqa: ARG002
-        return b""
+        if self._index >= len(self.chunks):
+            return b""
+        chunk = self.chunks[self._index]
+        self._index += 1
+        return chunk
 
     async def close(self) -> None:
         self.closed = True
@@ -45,6 +55,10 @@ class FakeTransport:
     _sftp_opened: bool = False
     _sftp_closed: bool = False
     _files: dict[PurePosixPath, bytes] = field(default_factory=dict)
+    open_process_calls: list[tuple[tuple[str, ...], str | None]] = field(
+        default_factory=list
+    )
+    process_chunks: list[bytes] = field(default_factory=list)
 
     async def is_alive(self) -> bool:
         return self.alive
@@ -123,7 +137,8 @@ class FakeTransport:
     async def open_process(
         self, argv: tuple[str, ...], *, term_type: str | None
     ) -> RemoteProcess:
-        return FakeProcess()
+        self.open_process_calls.append((argv, term_type))
+        return FakeProcess(chunks=tuple(self.process_chunks))
 
     async def close(self) -> None:
         self.closed = True
@@ -176,6 +191,10 @@ class FakeChangeTransport:
     container_symlinks: set[PurePosixPath] = field(default_factory=set)
     docker_logs: dict[tuple[str, int], bytes] = field(default_factory=dict)
     run_argv_calls: list[tuple[str, ...]] = field(default_factory=list)
+    open_process_calls: list[tuple[tuple[str, ...], str | None]] = field(
+        default_factory=list
+    )
+    process_chunks: list[bytes] = field(default_factory=list)
     _fail_renames: set[PurePosixPath] = field(default_factory=set)
     _fail_copies: set[PurePosixPath] = field(default_factory=set)
     _rename_error_msg: str = "rename failed"
@@ -392,7 +411,8 @@ class FakeChangeTransport:
     async def open_process(
         self, argv: tuple[str, ...], *, term_type: str | None = None
     ) -> RemoteProcess:
-        return FakeProcess()
+        self.open_process_calls.append((argv, term_type))
+        return FakeProcess(chunks=tuple(self.process_chunks))
 
     async def close(self) -> None:
         pass

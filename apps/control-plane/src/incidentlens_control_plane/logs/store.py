@@ -67,6 +67,7 @@ _SUBSCRIPTION_COLUMNS = (
     "status",
     "created_by",
     "last_error",
+    "last_error_redacted",
     "created_at",
     "updated_at",
 )
@@ -124,8 +125,9 @@ def _subscription_from_row(row: tuple[object, ...]) -> LogSubscription:
         status=LogSubscriptionStatus(row[8]),
         created_by=row[9],
         last_error=row[10],
-        created_at=datetime.fromisoformat(row[11]),
-        updated_at=datetime.fromisoformat(row[12]),
+        last_error_redacted=row[11],
+        created_at=datetime.fromisoformat(row[12]),
+        updated_at=datetime.fromisoformat(row[13]),
     )
 
 
@@ -187,6 +189,7 @@ class LogStore:
                     status TEXT NOT NULL,
                     created_by TEXT NOT NULL,
                     last_error TEXT,
+                    last_error_redacted TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -211,6 +214,25 @@ class LogStore:
                 """
             )
             conn.commit()
+        self._ensure_subscription_columns()
+
+    def _ensure_subscription_columns(self) -> None:
+        """Add the ``last_error_redacted`` column to an existing schema.
+
+        Fresh databases get the column from the CREATE TABLE statement; older
+        databases need an idempotent ALTER TABLE so ``mark_subscription_error``
+        can persist redacted summaries.
+        """
+        with self._connection_factory() as conn:
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(log_subscriptions)")
+            }
+            if "last_error_redacted" not in columns:
+                conn.execute(
+                    "ALTER TABLE log_subscriptions ADD COLUMN last_error_redacted TEXT"
+                )
+                conn.commit()
 
     def append_batch(self, records: tuple[LogRecord, ...]) -> tuple[LogRecord, ...]:
         """Insert records, deduping by dedupe_key, and mirror new rows into FTS.
@@ -377,6 +399,7 @@ class LogStore:
             status=LogSubscriptionStatus.ACTIVE,
             created_by=created_by,
             last_error=None,
+            last_error_redacted=None,
             created_at=now,
             updated_at=now,
         )
@@ -384,7 +407,7 @@ class LogStore:
             conn.execute(
                 f"""
                 INSERT INTO log_subscriptions ({", ".join(_SUBSCRIPTION_COLUMNS)})
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     subscription.subscription_id,
@@ -398,6 +421,7 @@ class LogStore:
                     subscription.status.value,
                     subscription.created_by,
                     subscription.last_error,
+                    subscription.last_error_redacted,
                     subscription.created_at.isoformat(),
                     subscription.updated_at.isoformat(),
                 ),
@@ -425,6 +449,51 @@ class LogStore:
                 WHERE subscription_id = ?
                 """,
                 (status.value, now.isoformat(), subscription_id),
+            )
+            conn.commit()
+        updated = self.get_subscription(subscription_id)
+        if updated is None:
+            raise KeyError(f"subscription not found: {subscription_id}")
+        return updated
+
+    def mark_subscription_error(
+        self, subscription_id: str, last_error_redacted: str, now: datetime
+    ) -> LogSubscription:
+        """Mark a subscription errored, upserting a minimal row if absent.
+
+        Only the *redacted* error summary is persisted; the raw error text never
+        reaches the database.  The subscription row may be absent (a test hook
+        may record a failure for an id that was never created), so the status
+        update is an upsert that inserts a minimal placeholder row rather than
+        raising ``KeyError``.
+        """
+        now_iso = now.isoformat()
+        with self._connection_factory() as conn:
+            conn.execute(
+                f"""
+                INSERT INTO log_subscriptions ({", ".join(_SUBSCRIPTION_COLUMNS)})
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(subscription_id) DO UPDATE SET
+                    status = excluded.status,
+                    last_error_redacted = excluded.last_error_redacted,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    subscription_id,
+                    "unknown",
+                    "unknown",
+                    "unknown",
+                    LogSourceKind.FILE.value,
+                    LogScope.HOST.value,
+                    "unknown",
+                    0,
+                    LogSubscriptionStatus.ERROR.value,
+                    "system",
+                    last_error_redacted,
+                    last_error_redacted,
+                    now_iso,
+                    now_iso,
+                ),
             )
             conn.commit()
         updated = self.get_subscription(subscription_id)

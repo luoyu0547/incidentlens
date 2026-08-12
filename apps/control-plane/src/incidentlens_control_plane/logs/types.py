@@ -129,6 +129,7 @@ class LogSubscription(BaseModel):
     status: LogSubscriptionStatus
     created_by: str = Field(min_length=1, max_length=80)
     last_error: str | None = None
+    last_error_redacted: str | None = None
     created_at: datetime
     updated_at: datetime
 

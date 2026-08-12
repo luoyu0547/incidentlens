@@ -1,18 +1,20 @@
 """Persistent opt-in log subscription manager.
 
 Each running subscription owns one reader task, one writer task, and one
-bounded ``asyncio.Queue``.  The reader polls the source and enqueues raw
-lines; the writer drains the queue in batches, runs the redaction pipeline,
-persists the records, and only then advances the stored cursor.  Reader
-errors are transient by design: a failed poll is logged and retried on the
-next interval so a running subscription survives a temporary transport or
-file error (full backoff/retry arrives with the docker stream task).
+bounded ``asyncio.Queue``.  The reader polls/streams the source and enqueues
+raw lines; the writer drains the queue in batches, runs the redaction
+pipeline, persists the records, and only then advances the stored cursor.
+Reader failures back off exponentially (capped at 60s) and move the
+subscription to status ``error`` after ``max_failures``; docker streams add a
+backpressure reconnect loop that closes the process, emits a safe
+``log.backpressure`` event, and resumes from the last committed cursor.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,9 +23,14 @@ from pathlib import PurePosixPath
 from incidentlens_control_plane.config import RuntimeSettings
 from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
-from incidentlens_control_plane.events.types import RuntimeEvent, RuntimeEventType
+from incidentlens_control_plane.events.types import (
+    JsonValue,
+    RuntimeEvent,
+    RuntimeEventType,
+)
+from incidentlens_control_plane.logs.redaction import redact_message
 from incidentlens_control_plane.logs.service import LogService
-from incidentlens_control_plane.logs.sources import FileLogSource
+from incidentlens_control_plane.logs.sources import DockerLogSource, FileLogSource
 from incidentlens_control_plane.logs.store import LogStore
 from incidentlens_control_plane.logs.types import (
     LogScope,
@@ -34,6 +41,21 @@ from incidentlens_control_plane.logs.types import (
 from incidentlens_control_plane.project_registry.types import TargetRegistration
 
 logger = logging.getLogger(__name__)
+
+# Hostname-like tokens (``dev-a.example.test``) are redacted from persisted
+# error summaries so a target host can never leak into a subscription record.
+_HOST_RE = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b")
+
+
+def _summarize_error(error: BaseException) -> str:
+    """Return a redacted, persistable summary of a reader error.
+
+    The message passes through the message redactor (secrets, tokens, emails,
+    IPs) and hostname-like tokens are additionally redacted so neither a
+    credential nor a target host survives into ``last_error_redacted``.
+    """
+    redacted = redact_message(str(error)).message_redacted
+    return _HOST_RE.sub("[REDACTED_HOST]", redacted)
 
 
 class TooManyActiveSubscriptions(Exception):
@@ -78,6 +100,13 @@ class LogSubscriptionManager:
         self._broker = broker
         self._settings = settings
         self.max_active: int = settings.max_active_log_subscriptions
+        # Reader retry/backoff policy.  ``max_failures`` and the backoff cap are
+        # mutable so callers can tune them at runtime (and tests can shrink
+        # them); the put timeout guards the bounded queue against a slow writer.
+        self.max_failures: int = 3
+        self._max_backoff_seconds: float = 60.0
+        self._queue_put_timeout: float = 5.0
+        self._failures: dict[str, int] = {}
         self._queue_size: int = settings.log_subscription_queue_size
         self._batch_size: int = settings.log_subscription_batch_size
         self._poll_interval: float = settings.log_file_poll_interval_seconds
@@ -153,7 +182,9 @@ class LogSubscriptionManager:
         now = now or datetime.now(UTC)
         await self._stop(subscription_id)
         subscription = self._store.pause_subscription(subscription_id, now=now)
-        await self._emit(RuntimeEventType.LOG_SUBSCRIPTION_PAUSED, subscription)
+        await self._emit_safe_event(
+            RuntimeEventType.LOG_SUBSCRIPTION_PAUSED, subscription
+        )
         return subscription
 
     async def resume(
@@ -162,7 +193,10 @@ class LogSubscriptionManager:
         """Mark the subscription active and restart its reader/writer tasks."""
         now = now or datetime.now(UTC)
         subscription = self._store.resume_subscription(subscription_id, now=now)
-        await self._start(subscription.subscription_id)
+        await self._start(
+            subscription.subscription_id,
+            event_type=RuntimeEventType.LOG_SUBSCRIPTION_RESUMED,
+        )
         return subscription
 
     async def delete(
@@ -171,7 +205,11 @@ class LogSubscriptionManager:
         """Stop the reader/writer tasks and mark the subscription deleted."""
         now = now or datetime.now(UTC)
         await self._stop(subscription_id)
-        return self._store.delete_subscription(subscription_id, now=now)
+        subscription = self._store.delete_subscription(subscription_id, now=now)
+        await self._emit_safe_event(
+            RuntimeEventType.LOG_SUBSCRIPTION_DELETED, subscription
+        )
+        return subscription
 
     async def close_all(self) -> None:
         """Cancel and await every running reader/writer task.
@@ -184,7 +222,12 @@ class LogSubscriptionManager:
 
     # --- task management ---
 
-    async def _start(self, subscription_id: str) -> None:
+    async def _start(
+        self,
+        subscription_id: str,
+        *,
+        event_type: RuntimeEventType = RuntimeEventType.LOG_SUBSCRIPTION_STARTED,
+    ) -> None:
         subscription = self._store.get_subscription(subscription_id)
         if subscription is None:
             raise KeyError(f"subscription not found: {subscription_id}")
@@ -196,7 +239,7 @@ class LogSubscriptionManager:
         self._running[subscription_id] = _SubscriptionTasks(
             reader=reader, writer=writer, queue=queue
         )
-        await self._emit(RuntimeEventType.LOG_SUBSCRIPTION_STARTED, subscription)
+        await self._emit_safe_event(event_type, subscription)
 
     async def _stop(self, subscription_id: str) -> None:
         tasks = self._running.pop(subscription_id, None)
@@ -211,25 +254,39 @@ class LogSubscriptionManager:
     async def _reader_loop(
         self, subscription: LogSubscription, queue: asyncio.Queue[_QueuedLine]
     ) -> None:
+        """Poll/stream the source and enqueue raw lines, retrying with backoff.
+
+        File subscriptions poll on an interval; docker subscriptions stream a
+        long-lived ``--follow`` process with an internal backpressure reconnect
+        loop.  Reader failures back off exponentially (capped at 60s) and the
+        subscription is moved to status ``error`` after ``max_failures``
+        consecutive failures.
+        """
+        backoff = 1.0
         try:
             while True:
                 try:
                     if subscription.source_kind == LogSourceKind.FILE:
                         await self._poll_file(subscription, queue)
                     else:
-                        # Docker streaming arrives in a later task; log and poll on.
-                        logger.warning(
-                            "unsupported log source for subscription %s: %s",
-                            subscription.subscription_id,
-                            subscription.source_kind.value,
-                        )
+                        await self._stream_docker(subscription, queue)
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as exc:
                     logger.exception(
                         "log subscription reader error for %s; retrying",
                         subscription.subscription_id,
                     )
+                    reached = await self._record_failure(
+                        subscription.subscription_id, exc
+                    )
+                    if reached:
+                        return
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, self._max_backoff_seconds)
+                    continue
+                self._failures.pop(subscription.subscription_id, None)
+                backoff = 1.0
                 await asyncio.sleep(self._poll_interval)
         except asyncio.CancelledError:
             pass
@@ -247,8 +304,47 @@ class LogSubscriptionManager:
                 "log source rotated for subscription %s; restarting at offset 0",
                 subscription.subscription_id,
             )
+            await self._emit_safe_event(
+                RuntimeEventType.LOG_SOURCE_ROTATED, subscription
+            )
         for raw in result.lines:
             await queue.put(_QueuedLine(raw=raw, generation=result.generation))
+
+    async def _stream_docker(
+        self, subscription: LogSubscription, queue: asyncio.Queue[_QueuedLine]
+    ) -> None:
+        """Stream docker container logs, reconnecting on backpressure.
+
+        Lines are enqueued exactly like file polls.  When the bounded queue
+        stays full past the put timeout the process is closed (via the source
+        generator's ``finally``), a ``log.backpressure`` event is emitted, and
+        the stream reconnects from the last committed cursor.
+        """
+        target = self._resolve_target(subscription)
+        session = await self._service._sessions.connect(target)
+        source = DockerLogSource(lambda _target: session.transport)
+        while True:
+            cursor = self._store.get_cursor(subscription.subscription_id)
+            try:
+                async for line in source.stream(subscription, target, cursor):
+                    item = _QueuedLine(raw=line, generation=line.cursor)
+                    try:
+                        await asyncio.wait_for(
+                            queue.put(item), timeout=self._queue_put_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        await self._emit_safe_event(
+                            RuntimeEventType.LOG_BACKPRESSURE,
+                            subscription,
+                            reason="queue full",
+                        )
+                        break
+                else:
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                raise
 
     def _resolve_target(self, subscription: LogSubscription) -> TargetRegistration:
         project = self._service._projects.get(subscription.project_id)
@@ -304,29 +400,104 @@ class LogSubscriptionManager:
             observed_at=latest.raw.observed_at,
             now=now,
         )
+        await self._emit_safe_event(
+            RuntimeEventType.LOG_BATCH_WRITTEN,
+            subscription,
+            lines=len(batch),
+            records_written=len(records),
+        )
 
     # --- runtime events ---
 
-    async def _emit(self, event_type: RuntimeEventType, subscription: LogSubscription) -> None:
-        """Persist and publish a safe lifecycle event for a subscription."""
+    def _safe_payload(
+        self, subscription: LogSubscription, **extra: JsonValue
+    ) -> dict[str, JsonValue]:
+        """Build an event payload with ONLY safe subscription metadata.
+
+        Never includes raw log text, target hosts, or credentials: only the
+        subscription identity, project/target ids, service name, source kind,
+        scope, source ref, status, and caller-supplied safe counts/summaries.
+        """
+        payload: dict[str, JsonValue] = {
+            "subscription_id": subscription.subscription_id,
+            "project_id": subscription.project_id,
+            "target_id": subscription.target_id,
+            "service_name": subscription.service_name,
+            "source_kind": subscription.source_kind.value,
+            "scope": subscription.scope.value,
+            "source_ref": subscription.source_ref,
+            "status": subscription.status.value,
+        }
+        payload.update(extra)
+        return payload
+
+    async def _emit_safe_event(
+        self,
+        event_type: RuntimeEventType,
+        subscription: LogSubscription,
+        **extra: JsonValue,
+    ) -> None:
+        """Persist and publish a safe lifecycle event for a subscription.
+
+        All log.* events flow through here so the redaction discipline is
+        enforced in one place.
+        """
         try:
             event = RuntimeEvent(
                 event_id=f"evt-{uuid.uuid4().hex[:12]}",
                 sequence=0,
                 event_type=event_type,
                 occurred_at=datetime.now(UTC),
-                payload={
-                    "subscription_id": subscription.subscription_id,
-                    "project_id": subscription.project_id,
-                    "target_id": subscription.target_id,
-                    "service_name": subscription.service_name,
-                    "source_kind": subscription.source_kind.value,
-                    "scope": subscription.scope.value,
-                    "source_ref": subscription.source_ref,
-                    "status": subscription.status.value,
-                },
+                payload=self._safe_payload(subscription, **extra),
             )
             stored = self._events.append(event)
             await self._broker.publish(stored)
         except Exception:
             logger.exception("failed to emit runtime event")
+
+    # --- test hooks and failure recording ---
+
+    async def force_backpressure_for_test(self, subscription_id: str) -> None:
+        """Test hook: simulate a docker backpressure condition.
+
+        Drives the real ``_emit_safe_event`` path so the emitted
+        ``log.backpressure`` event is subject to the same redaction discipline
+        as production events.
+        """
+        subscription = self._store.get_subscription(subscription_id)
+        if subscription is None:
+            return
+        await self._emit_safe_event(
+            RuntimeEventType.LOG_BACKPRESSURE, subscription, reason="queue full"
+        )
+
+    async def record_failure_for_test(
+        self, subscription_id: str, error: Exception
+    ) -> None:
+        """Test hook: record a reader failure (see ``_record_failure``)."""
+        await self._record_failure(subscription_id, error)
+
+    async def _record_failure(
+        self, subscription_id: str, error: BaseException
+    ) -> bool:
+        """Count a reader failure; at ``max_failures`` error the subscription.
+
+        Returns True when the subscription was moved to status ``error`` (the
+        reader loop should then stop retrying).
+        """
+        count = self._failures.get(subscription_id, 0) + 1
+        self._failures[subscription_id] = count
+        if count < self.max_failures:
+            return False
+        now = datetime.now(UTC)
+        subscription = self._store.mark_subscription_error(
+            subscription_id,
+            last_error_redacted=_summarize_error(error),
+            now=now,
+        )
+        await self._emit_safe_event(
+            RuntimeEventType.LOG_SUBSCRIPTION_ERROR,
+            subscription,
+            failure_count=count,
+        )
+        return True

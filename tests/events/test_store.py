@@ -26,3 +26,20 @@ def test_event_store_returns_ordered_events_after_cursor(tmp_path: Path) -> None
     assert stored_first.sequence == 1
     assert stored_second.sequence == 2
     assert store.list_after(1, limit=100) == (stored_second,)
+
+
+def test_log_subscription_event_types_persist_round_trip(tmp_path: Path) -> None:
+    store = RuntimeEventStore(lambda: sqlite3.connect(tmp_path / "runtime.db"))
+    store.migrate()
+    event = RuntimeEvent(
+        event_id="evt-log-bp-001",
+        sequence=0,
+        event_type=RuntimeEventType.LOG_BACKPRESSURE,
+        occurred_at=datetime(2026, 8, 12, tzinfo=UTC),
+        payload={"subscription_id": "sub-1", "status": "active"},
+    )
+
+    stored = store.append(event)
+
+    assert stored.sequence == 1
+    assert store.list_after(0, limit=100)[0].event_type == RuntimeEventType.LOG_BACKPRESSURE
