@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
+import incidentlens_control_plane.main as main_module
+import pytest
+from fastapi import FastAPI
+from incidentlens_control_plane.config import RuntimeSettings
 from incidentlens_control_plane.logs.types import LogScope, LogSourceKind
+from incidentlens_control_plane.runtime import build_runtime
 
 from web.conftest import make_subscription_record
 
@@ -149,3 +157,56 @@ def test_websocket_disconnect_unregisters_live_queue(
         )
 
     _await_live_subscriber_count(runtime.subscriptions, subscription.subscription_id, 0)
+
+
+def test_lifespan_restores_subscriptions_before_requests_and_closes_before_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drive the real lifespan and assert startup/shutdown ordering.
+
+    The lifespan must restore active log subscriptions before any request is
+    served (``subscriptions.start``) and, on shutdown, close subscriptions
+    before closing SSH sessions (``subscriptions.close`` then
+    ``sessions.close``).
+    """
+    calls: list[str] = []
+
+    class TrackingSubscriptions:
+        async def start_active_opt_in(self) -> None:
+            calls.append("subscriptions.start")
+
+        async def close_all(self) -> None:
+            calls.append("subscriptions.close")
+
+    class TrackingSessions:
+        async def close_all(self) -> None:
+            calls.append("sessions.close")
+
+    settings = RuntimeSettings(data_dir=tmp_path / "data")
+    services = build_runtime(settings)
+    # ``RuntimeServices`` is a frozen slots dataclass, so tracking stubs are
+    # injected with ``dataclasses.replace`` rather than ``model_copy``.
+    services = dataclasses.replace(
+        services,
+        subscriptions=TrackingSubscriptions(),  # type: ignore[arg-type]
+        sessions=TrackingSessions(),  # type: ignore[arg-type]
+    )
+
+    # Inject the tracking-stub runtime into the REAL lifespan so startup and
+    # shutdown drive our stubs instead of a second real runtime.
+    monkeypatch.setattr(
+        main_module,
+        "build_runtime",
+        lambda _settings, transport_factory=None: services,
+    )
+
+    app = FastAPI()
+
+    async def drive() -> None:
+        async with main_module._lifespan(app, settings):
+            assert app.state.runtime is services
+        assert app.state.runtime is None
+
+    asyncio.run(drive())
+
+    assert calls == ["subscriptions.start", "subscriptions.close", "sessions.close"]

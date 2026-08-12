@@ -41,6 +41,40 @@ unavailable. See [Phase 2 Verification Guide](docs/phase-2-remote-tools-verifica
 for registration JSON, manual connection/read/edit examples, backup locations,
 the approval flow, rollback, and cleanup.
 
+## Phase 3: Hybrid Log Evidence
+
+Phase 3 adds a log investigation pipeline over the same registered targets. It
+never stores or returns raw log text: every line is parsed, redacted
+(secrets/tokens/emails/IPs), truncated at 16 KiB, and only the redacted message
+is persisted, streamed, or cited as evidence.
+
+### Features
+
+- **On-demand log queries** for host files and registered containers
+  (`POST /api/logs/query`) with conservative redaction
+- **Full-text search** over persisted redacted records
+  (`GET /api/logs/search`)
+- **Opt-in persistent subscriptions** with pause/resume/delete, stored cursors,
+  restart recovery, and WebSocket replay/live dedupe
+  (`/api/logs/subscriptions`, `WS /api/logs/subscriptions/{id}/ws`)
+- **Append-only evidence** built exclusively from redacted content
+  (`POST /api/evidence/from-log-records`)
+- **Runtime lifecycle ordering** — active subscriptions are restored at startup
+  before requests and closed before SSH sessions on shutdown
+
+### Quick Start (live verification)
+
+The live log acceptance test is opt-in and skipped by default:
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run pytest tests/logs tests/evidence tests/remote_ops tests/web tests/events tests/test_app.py -q
+INCIDENTLENS_RUN_LIVE_LOG_TESTS=1 uv run pytest tests/integration/test_live_log_tools.py -q
+```
+
+The fixture skips with a clear reason when the variable is absent or Docker is
+unavailable. See [Phase 3 Verification Guide](docs/phase-3-hybrid-log-evidence-verification.md)
+for the full offline and opt-in live command set.
+
 ## Phase 1: Local Runtime and Project Registry
 
 Phase 1 provides a **local-only runtime** and the **project registry** that
