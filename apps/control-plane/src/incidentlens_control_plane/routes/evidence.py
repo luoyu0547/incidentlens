@@ -1,8 +1,8 @@
 """Evidence HTTP API routes.
 
 Evidence is built exclusively from stored redacted ``LogRecord`` rows and the
-immutable ``EvidenceRef`` views are serialized directly, so raw log content
-never appears in responses.
+immutable ``EvidenceRef`` views are serialized directly, so raw content never
+appears in responses.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from incidentlens_control_plane.evidence.types import EvidenceKind
 from incidentlens_control_plane.routes import get_runtime
 
 router = APIRouter(prefix="/api/evidence", tags=["evidence"])
@@ -65,8 +66,19 @@ async def list_incident_evidence(
     request: Request,
     incident_id: str,
     limit: int = Query(default=100, ge=1, le=1000),
+    kind: EvidenceKind | None = None,
+    agent_run_id: str | None = Query(default=None, max_length=120),
 ) -> list[dict[str, object]]:
-    """List evidence refs for an incident, oldest first."""
+    """List evidence refs for an incident, oldest first.
+
+    Optional ``kind`` and ``agent_run_id`` filters narrow the result set; both
+    default to "any" so existing callers are unaffected.
+    """
     runtime = get_runtime(request)
-    refs = runtime.evidence.list_for_incident(incident_id, limit=limit)
+    refs = runtime.evidence.query(
+        incident_id=incident_id,
+        evidence_kind=kind,
+        agent_run_id=agent_run_id,
+        limit=limit,
+    )
     return [ref.model_dump(mode="json") for ref in refs]

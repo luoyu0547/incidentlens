@@ -52,6 +52,29 @@ def test_truncates_redacted_message_to_16_kib() -> None:
     assert len(result.message_redacted) <= 16 * 1024
     assert result.truncated is True
     assert result.summary["truncated"] == 1
+    assert result.truncation is not None
+    assert result.truncation.original_length == 16 * 1024 + 10
+    assert result.truncation.kept_length == 16 * 1024
+
+
+def test_redact_message_accepts_custom_max_length() -> None:
+    result = redact_message("x" * 100 + " token=abc123", max_length=50)
+
+    assert len(result.message_redacted) <= 50
+    assert result.truncated is True
+    assert result.truncation is not None
+    assert result.truncation.original_length == 123
+    assert result.truncation.kept_length == 50
+    assert result.summary["token"] == 1
+    assert result.summary["truncated"] == 1
+
+
+def test_redact_message_without_truncation_reports_no_summary() -> None:
+    result = redact_message("token=abc123", max_length=16 * 1024)
+
+    assert result.truncated is False
+    assert result.truncation is None
+    assert "truncated" not in result.summary
 
 
 def test_preserves_clock_time_not_ipv6() -> None:

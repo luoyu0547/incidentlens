@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from typing import Callable
 
-from incidentlens_control_plane.logs.types import RedactionResult
+from incidentlens_control_plane.logs.types import RedactionResult, TruncationInfo
 
 _MAX_MESSAGE_LENGTH = 16 * 1024
 
@@ -103,7 +103,9 @@ def _secret_kv_repl(match: re.Match[str], summary: dict[str, int]) -> str:
     return f"{match.group('bare')}={_REDACTED_TOKEN}"
 
 
-def redact_message(message: str) -> RedactionResult:
+def redact_message(
+    message: str, *, max_length: int = _MAX_MESSAGE_LENGTH
+) -> RedactionResult:
     summary: dict[str, int] = {}
     text = message
 
@@ -116,10 +118,27 @@ def redact_message(message: str) -> RedactionResult:
     text = _apply(_IPV4_RE, text, lambda _m: _REDACTED_IP, summary, "ip")
     text = _apply(_IPV6_RE, text, lambda _m: _REDACTED_IP, summary, "ip")
 
+    original_length = len(text)
+    kept_length = original_length
     truncated = False
-    if len(text) > _MAX_MESSAGE_LENGTH:
-        text = text[:_MAX_MESSAGE_LENGTH]
+    if len(text) > max_length:
+        text = text[:max_length]
+        kept_length = len(text)
         truncated = True
         summary["truncated"] = 1
 
-    return RedactionResult(message_redacted=text, summary=summary, truncated=truncated)
+    truncation = (
+        TruncationInfo(
+            original_length=original_length,
+            kept_length=kept_length,
+            truncated=True,
+        )
+        if truncated
+        else None
+    )
+    return RedactionResult(
+        message_redacted=text,
+        summary=summary,
+        truncated=truncated,
+        truncation=truncation,
+    )

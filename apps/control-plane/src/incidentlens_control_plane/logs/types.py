@@ -66,11 +66,21 @@ class ParsedLogLine(BaseModel):
     message_is_raw: bool = False
 
 
+class TruncationInfo(BaseModel):
+    """Record of a truncation applied after redaction."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    original_length: int = Field(ge=0)
+    kept_length: int = Field(ge=0)
+    truncated: bool
+
+
 class RedactionResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     message_redacted: str
     summary: dict[str, int]
     truncated: bool = False
+    truncation: TruncationInfo | None = None
 
 
 class ProcessedLogLine(BaseModel):
