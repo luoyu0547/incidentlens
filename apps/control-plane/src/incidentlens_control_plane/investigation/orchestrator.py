@@ -173,6 +173,11 @@ class AgentOrchestrator:
                 # budget: pause safely instead of silently exceeding the cap.
                 run = self._store.get_agent_run(agent_run_id)
                 investigation = self._store.get_investigation(run.investigation_id)
+                if run.status is AgentRunStatus.WAITING_CHILDREN:
+                    # The drain that raised may have left the run in
+                    # WAITING_CHILDREN, from which PAUSED_BUDGET is illegal.
+                    run = self._transition_run(run, AgentRunStatus.RUNNING, now=self._now())
+                    investigation = self._store.get_investigation(run.investigation_id)
                 self._pause(
                     run, investigation, AgentRunStatus.PAUSED_BUDGET,
                     now=self._now(), reason=str(exc),
@@ -557,6 +562,11 @@ class AgentOrchestrator:
         evidence_before: set[str],
         now: datetime,
     ) -> tuple[AgentRun, Investigation]:
+        # Reload the investigation fresh before writing: a concurrent child may
+        # have bumped usage during this round's provider/tool awaits, and a
+        # stale copy would clobber those increments (rounds / no-new-evidence
+        # budgets would be silently weakened).
+        investigation = self._store.get_investigation(investigation.investigation_id)
         run = self._bump_usage(run, wall_clock_seconds=self._elapsed(run, now))
         investigation = self._bump_investigation_usage(
             investigation, rounds=investigation.usage.rounds + 1
@@ -1088,24 +1098,35 @@ class AgentOrchestrator:
     ) -> tuple[AgentRun, Investigation] | None:
         remaining: list[tuple[str, asyncio.Task]] = []
         changed = False
-        for child_id, task in pending_children:
-            if not task.done():
-                remaining.append((child_id, task))
-                continue
-            changed = True
-            try:
-                report, ref = task.result()
-            except BaseException:
-                continue
-            run, new_evidence = self._append_evidence(
-                run, investigation, (ref,), now
-            )
-            if new_evidence:
-                investigation = self._bump_investigation_usage(
-                    investigation,
-                    evidence_count=investigation.usage.evidence_count + new_evidence,
+        try:
+            for child_id, task in pending_children:
+                if not task.done():
+                    remaining.append((child_id, task))
+                    continue
+                changed = True
+                try:
+                    report, ref = task.result()
+                except BaseException:
+                    continue
+                run, new_evidence = self._append_evidence(
+                    run, investigation, (ref,), now
                 )
-            child_reports.append(report)
+                if new_evidence:
+                    investigation = self._bump_investigation_usage(
+                        investigation,
+                        evidence_count=investigation.usage.evidence_count + new_evidence,
+                    )
+                child_reports.append(report)
+        except _EvidenceBudgetExceeded:
+            # Persist the already-drained child reports and restore RUNNING so
+            # the loop's evidence-budget pause can transition legally (a
+            # WAITING_CHILDREN run cannot move straight to PAUSED_BUDGET).
+            pending_children[:] = remaining
+            self._store.update_agent_run(run)
+            self._store.update_investigation(investigation)
+            if run.status is AgentRunStatus.WAITING_CHILDREN:
+                self._transition_run(run, AgentRunStatus.RUNNING, now=now)
+            raise
         pending_children[:] = remaining
         return (run, investigation) if changed else None
 
@@ -1129,19 +1150,29 @@ class AgentOrchestrator:
         # investigation-usage increments are never clobbered by a stale copy.
         run = self._store.get_agent_run(run.agent_run_id)
         investigation = self._store.get_investigation(run.investigation_id)
-        for outcome in results:
-            if isinstance(outcome, BaseException):
-                continue
-            report, ref = outcome
-            run, new_evidence = self._append_evidence(
-                run, investigation, (ref,), now
-            )
-            if new_evidence:
-                investigation = self._bump_investigation_usage(
-                    investigation,
-                    evidence_count=investigation.usage.evidence_count + new_evidence,
+        try:
+            for outcome in results:
+                if isinstance(outcome, BaseException):
+                    continue
+                report, ref = outcome
+                run, new_evidence = self._append_evidence(
+                    run, investigation, (ref,), now
                 )
-            child_reports.append(report)
+                if new_evidence:
+                    investigation = self._bump_investigation_usage(
+                        investigation,
+                        evidence_count=investigation.usage.evidence_count + new_evidence,
+                    )
+                child_reports.append(report)
+        except _EvidenceBudgetExceeded:
+            # Persist the already-drained child reports and restore RUNNING so
+            # the loop's evidence-budget pause can transition legally (a
+            # WAITING_CHILDREN run cannot move straight to PAUSED_BUDGET).
+            self._store.update_agent_run(run)
+            self._store.update_investigation(investigation)
+            if was_running:
+                run = self._transition_run(run, AgentRunStatus.RUNNING, now=now)
+            raise
         # Persist the appended child-report evidence before the next status
         # transition (which would otherwise discard the in-memory append).
         self._store.update_agent_run(run)
@@ -1270,8 +1301,17 @@ class AgentOrchestrator:
         new_refs = tuple(ref for ref in refs if ref.evidence_id not in known)
         if not new_refs:
             return run, 0
+        # The guard's can_accept_*_evidence methods are the canonical budget
+        # gates; the incremental len(new_refs) check catches a single large
+        # tool result that would overshoot the cap in one shot.
+        allowed, reason = self._guard.can_accept_new_evidence(run)
+        if not allowed:
+            raise _EvidenceBudgetExceeded(reason)
         if run.usage.evidence_count + len(new_refs) > run.budget.max_evidence:
             raise _EvidenceBudgetExceeded("evidence budget exhausted")
+        allowed, reason = self._guard.can_investigation_accept_new_evidence(investigation)
+        if not allowed:
+            raise _EvidenceBudgetExceeded(reason)
         if (
             investigation.usage.evidence_count + len(new_refs)
             > investigation.budget.max_evidence

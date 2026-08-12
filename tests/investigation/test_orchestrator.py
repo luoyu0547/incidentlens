@@ -1121,6 +1121,103 @@ async def test_child_usage_increments_not_clobbered_by_parent(tmp_path: Any) -> 
     assert inv.usage.children == 1
 
 
+async def test_hypothesis_continue_path_preserves_child_usage(tmp_path: Any) -> None:
+    """The hypotheses-only continue path must not clobber a child's usage."""
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(
+        harness,
+        status=InvestigationStatus.RUNNING,
+        budget=InvestigationBudget(max_no_new_evidence_rounds=20),
+    )
+    _make_parent_run(harness, budget=AgentBudget(max_no_new_evidence_rounds=20))
+    registry.set_script(
+        "run-1",
+        [
+            DelegateChildStep(
+                delegation=ChildDelegationRequest(
+                    child_run_id="child-1", task_prompt="inspect the container",
+                    scope=_container_scope(),
+                )
+            ),
+            RequestToolsStep(tool_requests=(), hypotheses=(_hypothesis(),)),
+            RequestToolsStep(tool_requests=(), hypotheses=(_hypothesis(),)),
+            RequestToolsStep(
+                tool_requests=(tool_request("registry_info", "parent-registry-call"),)
+            ),
+            StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="done")),
+        ],
+    )
+    registry.set_script(
+        "child-1",
+        [
+            RequestToolsStep(tool_requests=(tool_request("registry_info", "child-call-1"),)),
+            StopStep(
+                stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="child done")
+            ),
+        ],
+    )
+    orchestrator, service, _ = build_orchestrator(harness, registry)
+
+    final = await orchestrator.run("run-1")
+
+    assert final.status is AgentRunStatus.COMPLETED
+    inv = service.get_investigation("inv-1")
+    # parent rounds (1 delegate + 2 hypothesis + 1 registry + 1 stop = 5) plus
+    # child rounds (2) all counted; the continue path must not lose the child's.
+    assert inv.usage.rounds == 7
+    assert inv.usage.tool_calls == 2
+    assert inv.usage.children == 1
+
+
+async def test_child_report_over_evidence_budget_pauses_not_crash(tmp_path: Any) -> None:
+    """A child report exceeding the parent's max_evidence pauses, never crashes."""
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(harness, status=InvestigationStatus.RUNNING)
+    _make_parent_run(harness, budget=AgentBudget(max_evidence=1))
+    registry.set_script(
+        "run-1",
+        [
+            DelegateChildStep(
+                delegation=ChildDelegationRequest(
+                    child_run_id="child-1", task_prompt="inspect the container",
+                    scope=_container_scope(),
+                )
+            ),
+            RequestToolsStep(
+                tool_requests=(tool_request("registry_info", "parent-registry-call"),)
+            ),
+            StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="done")),
+        ],
+    )
+    registry.set_script(
+        "child-1",
+        [
+            RequestToolsStep(
+                tool_requests=(tool_request("registry_info", f"child-call-{i}"),)
+            )
+            for i in range(3)
+        ]
+        + [
+            StopStep(
+                stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="child done")
+            )
+        ],
+    )
+    orchestrator, service, _ = build_orchestrator(harness, registry)
+
+    final = await orchestrator.run("run-1")
+
+    # The parent's registry round put it at its evidence cap (1); the child
+    # report would exceed it, so the run must pause -- not raise.
+    assert final.status is AgentRunStatus.PAUSED_BUDGET
+    assert final.stop_reason is StopReason.BUDGET_EVIDENCE
+    assert final.usage.evidence_count <= final.budget.max_evidence
+    child = harness.investigations.get_agent_run("child-1")
+    assert child.status is AgentRunStatus.COMPLETED
+
+
 # ---------------------------------------------------------------------------
 # Provider contract invariants through the orchestrator
 # ---------------------------------------------------------------------------
