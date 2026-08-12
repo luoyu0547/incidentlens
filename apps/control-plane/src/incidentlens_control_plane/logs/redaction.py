@@ -43,7 +43,21 @@ _SECRET_KV_RE = re.compile(
 )
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-_IPV6_RE = re.compile(r"\b(?:[0-9a-fA-F]{1,4}:){2,}[0-9a-fA-F]{0,4}\b")
+# RFC 3986 IPv6: either eight hex groups, or a "::" compressed form.  The
+# boundary lookarounds are used instead of \b because IPv6 starts/ends with
+# non-word characters (colons).  A prose clock time like "10:11:12" has no
+# "::" and only three groups, so it does not match.
+_IPV6_RE = re.compile(
+    r"(?<![\dA-Fa-f:])"
+    r"(?:"
+    r"(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}"
+    r"|"
+    r"(?:(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4})?"
+    r"::"
+    r"(?:(?:[0-9a-fA-F]{1,4}:){0,5}[0-9a-fA-F]{1,4})?"
+    r")"
+    r"(?![\dA-Fa-f:])"
+)
 
 
 def _apply(

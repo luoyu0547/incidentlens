@@ -25,3 +25,19 @@ def test_truncates_redacted_message_to_16_kib() -> None:
     assert len(result.message_redacted) <= 16 * 1024
     assert result.truncated is True
     assert result.summary["truncated"] == 1
+
+
+def test_preserves_clock_time_not_ipv6() -> None:
+    result = redact_message("started at 10:11:12")
+
+    assert "10:11:12" in result.message_redacted
+    assert "ip" not in result.summary
+
+
+def test_redacts_compressed_ipv6() -> None:
+    result = redact_message("link local fe80::1, loopback ::1, 2001:db8::1")
+
+    assert "fe80::1" not in result.message_redacted
+    assert "::1" not in result.message_redacted
+    assert "2001:db8::1" not in result.message_redacted
+    assert result.summary["ip"] == 3
