@@ -953,12 +953,15 @@ class InvestigationStore:
         output_bytes: int | None = None,
         evidence_ids: Sequence[str] | None = None,
         error_redacted: str | None = None,
+        approval_id: str | None = None,
     ) -> ToolCall:
         """Atomically move a tool call to ``target`` via a conditional UPDATE.
 
         ``RUNNING`` stamps ``started_at`` and terminal targets stamp
         ``finished_at``; success may attach bounded ``output_bytes``,
-        ``evidence_ids`` and a redacted error summary.
+        ``evidence_ids`` and a redacted error summary.  ``approval_id`` records
+        the exact approval a WAITING_APPROVAL tool call is paused on so an API
+        (Task 8) can link the run back to its pending approval.
         """
         now_utc = now.astimezone(UTC)
         with self._connection_factory() as conn:
@@ -982,6 +985,8 @@ class InvestigationStore:
                 updates["evidence_ids"] = tuple(evidence_ids)
             if error_redacted is not None:
                 updates["error_redacted"] = error_redacted
+            if approval_id is not None:
+                updates["approval_id"] = approval_id
             updated = _derive_validated(current, updates)
 
             cursor = conn.execute(

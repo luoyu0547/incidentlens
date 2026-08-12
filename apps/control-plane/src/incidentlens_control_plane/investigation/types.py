@@ -284,6 +284,7 @@ class ToolCall(BaseModel):
     finished_at: datetime | None = None
     output_bytes: int = Field(default=0, ge=0)
     evidence_ids: tuple[str, ...] = Field(default=(), max_length=24)
+    approval_id: str | None = Field(default=None, max_length=120)
     error_redacted: str | None = Field(default=None, max_length=2_000)
 
     _validate_evidence_ids = field_validator("evidence_ids")(_validate_unique_citations)
