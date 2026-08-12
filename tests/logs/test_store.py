@@ -96,6 +96,34 @@ def test_active_opt_in_subscriptions_are_listed_for_restore(tmp_path: Path) -> N
     assert store.list_active_opt_in_subscriptions() == (resumed,)
 
 
+def test_mark_subscription_error_updates_existing_row_only(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    subscription = store.create_subscription(
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.FILE,
+        scope=LogScope.HOST,
+        source_ref="/var/log/payment/app.log",
+        opt_in_streaming=True,
+        created_by="alice",
+        now=now,
+    )
+
+    # A never-created id must NOT fabricate a row.
+    assert store.mark_subscription_error("ghost-sub", "boom", now) is None
+    assert store.get_subscription("ghost-sub") is None
+
+    # An existing row is updated with the redacted summary.
+    updated = store.mark_subscription_error(
+        subscription.subscription_id, "[REDACTED_TOKEN] boom", now
+    )
+    assert updated is not None
+    assert updated.status.value == "error"
+    assert updated.last_error_redacted == "[REDACTED_TOKEN] boom"
+
+
 def test_cursor_upsert_round_trips(tmp_path: Path) -> None:
     store = make_store(tmp_path)
     now = datetime(2026, 8, 12, tzinfo=UTC)

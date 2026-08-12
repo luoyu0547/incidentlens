@@ -19,11 +19,15 @@ class FakeProcess:
 
     ``read`` returns the next chunk from ``chunks`` and ``b""`` when the chunks
     are exhausted, so stream consumers see real byte boundaries before EOF.
+    ``read_stderr`` behaves the same way over ``stderr_chunks`` so a drain loop
+    can be exercised.
     """
 
     closed: bool = False
     chunks: tuple[bytes, ...] = ()
+    stderr_chunks: tuple[bytes, ...] = ()
     _index: int = field(default=0, init=False, repr=False)
+    _stderr_index: int = field(default=0, init=False, repr=False)
 
     async def write(self, data: bytes) -> None:  # noqa: ARG002
         pass
@@ -33,6 +37,13 @@ class FakeProcess:
             return b""
         chunk = self.chunks[self._index]
         self._index += 1
+        return chunk
+
+    async def read_stderr(self, max_bytes: int) -> bytes:  # noqa: ARG002
+        if self._stderr_index >= len(self.stderr_chunks):
+            return b""
+        chunk = self.stderr_chunks[self._stderr_index]
+        self._stderr_index += 1
         return chunk
 
     async def close(self) -> None:

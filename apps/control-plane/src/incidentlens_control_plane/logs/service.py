@@ -52,6 +52,20 @@ from incidentlens_control_plane.remote_ops.transport import RemoteTransport
 from incidentlens_control_plane.remote_ops.types import HostScope
 
 
+def _docker_cursor_time(cursor: str) -> str:
+    """Return the timestamp component of a docker cursor, or ``unknown``.
+
+    Docker cursors are ``docker:time=<ts>:seq=<n>``; the per-stream ``seq``
+    restarts on every reconnect, so dedupe identity must be built from the
+    timestamp only.  That keeps replayed overlap lines (``docker --since`` is
+    inclusive) producing the SAME dedupe_key as their originals.
+    """
+    prefix = "docker:time="
+    if cursor.startswith(prefix):
+        return cursor[len(prefix) :].split(":seq=", 1)[0]
+    return "unknown"
+
+
 class LogService:
     """Coordinate log source queries, redaction, and optional persistence."""
 
@@ -250,7 +264,11 @@ class LogService:
                 source_kind.value,
                 scope.value,
                 source_ref,
-                raw.cursor,
+                (
+                    _docker_cursor_time(raw.cursor)
+                    if source_kind == LogSourceKind.DOCKER
+                    else raw.cursor
+                ),
                 processed.message_redacted,
             )
         )

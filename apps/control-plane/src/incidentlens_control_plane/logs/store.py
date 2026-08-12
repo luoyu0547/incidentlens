@@ -458,48 +458,31 @@ class LogStore:
 
     def mark_subscription_error(
         self, subscription_id: str, last_error_redacted: str, now: datetime
-    ) -> LogSubscription:
-        """Mark a subscription errored, upserting a minimal row if absent.
+    ) -> LogSubscription | None:
+        """Mark an EXISTING subscription errored; no-op when the row is absent.
 
         Only the *redacted* error summary is persisted; the raw error text never
-        reaches the database.  The subscription row may be absent (a test hook
-        may record a failure for an id that was never created), so the status
-        update is an upsert that inserts a minimal placeholder row rather than
-        raising ``KeyError``.
+        reaches the database.  The update targets an existing row only and never
+        fabricates or resurrects a subscription, so a deleted or never-created
+        id stays deleted/absent.  Returns the updated subscription, or None when
+        no row matched.
         """
-        now_iso = now.isoformat()
         with self._connection_factory() as conn:
             conn.execute(
-                f"""
-                INSERT INTO log_subscriptions ({", ".join(_SUBSCRIPTION_COLUMNS)})
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(subscription_id) DO UPDATE SET
-                    status = excluded.status,
-                    last_error_redacted = excluded.last_error_redacted,
-                    updated_at = excluded.updated_at
+                """
+                UPDATE log_subscriptions
+                SET status = ?, last_error_redacted = ?, updated_at = ?
+                WHERE subscription_id = ?
                 """,
                 (
-                    subscription_id,
-                    "unknown",
-                    "unknown",
-                    "unknown",
-                    LogSourceKind.FILE.value,
-                    LogScope.HOST.value,
-                    "unknown",
-                    0,
                     LogSubscriptionStatus.ERROR.value,
-                    "system",
                     last_error_redacted,
-                    last_error_redacted,
-                    now_iso,
-                    now_iso,
+                    now.isoformat(),
+                    subscription_id,
                 ),
             )
             conn.commit()
-        updated = self.get_subscription(subscription_id)
-        if updated is None:
-            raise KeyError(f"subscription not found: {subscription_id}")
-        return updated
+        return self.get_subscription(subscription_id)
 
     def get_subscription(self, subscription_id: str) -> LogSubscription | None:
         with self._connection_factory() as conn:

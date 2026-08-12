@@ -36,6 +36,9 @@ class RemoteProcess(Protocol):
     async def read(self, max_bytes: int) -> bytes:
         raise NotImplementedError
 
+    async def read_stderr(self, max_bytes: int) -> bytes:
+        raise NotImplementedError
+
     async def close(self) -> None:
         raise NotImplementedError
 

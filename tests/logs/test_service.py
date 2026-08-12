@@ -233,3 +233,48 @@ async def test_query_create_evidence_persists_and_propagates_ref_id(
     assert "abc123" not in evidence.content_redacted
     assert service._evidence.list_for_incident("inc-1", limit=10) == (evidence,)
 
+
+@pytest.mark.asyncio
+async def test_docker_reconnect_overlap_uses_stable_dedupe_identity(
+    tmp_path, target_registration
+) -> None:
+    """Replayed docker lines across a reconnect must dedupe to one record.
+
+    The docker cursor's per-stream ``seq`` restarts on every reconnect, so a
+    replayed overlap line is renumbered.  Dedupe identity must be built from
+    the timestamp+message instead of the cursor, so the replayed line produces
+    the same ``dedupe_key`` as the original and only one record persists.
+    """
+    from incidentlens_control_plane.logs.types import RawLogLine
+
+    from logs.conftest import docker_subscription
+
+    service = build_test_log_service(tmp_path, target_registration)
+    subscription = docker_subscription("payments-api-1")
+    now = datetime(2026, 8, 12, 10, 0, tzinfo=UTC)
+
+    original = RawLogLine(
+        source_ref="payments-api-1",
+        cursor="docker:time=2026-08-12T10:00:00Z:seq=5",
+        observed_at=now,
+        text="INFO once",
+    )
+    replayed = RawLogLine(
+        source_ref="payments-api-1",
+        cursor="docker:time=2026-08-12T10:00:00Z:seq=1",
+        observed_at=now,
+        text="INFO once",
+    )
+
+    records = service.process_raw_lines(
+        (original, replayed), now=now, subscription=subscription
+    )
+    assert records[0].dedupe_key == records[1].dedupe_key
+
+    inserted = service._store.append_batch(records)
+    assert len(inserted) == 1
+    stored = service._store.search(
+        LogSearchFilters(project_id="payments"), limit=10
+    )
+    assert len(stored) == 1
+

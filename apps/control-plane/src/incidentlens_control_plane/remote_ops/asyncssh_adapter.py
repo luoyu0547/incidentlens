@@ -66,6 +66,9 @@ class _AsyncSshProcess:
     async def read(self, max_bytes: int) -> bytes:
         return await self._proc.stdout.read(max_bytes)
 
+    async def read_stderr(self, max_bytes: int) -> bytes:
+        return await self._proc.stderr.read(max_bytes)
+
     async def close(self) -> None:
         if not self._closed:
             self._closed = True

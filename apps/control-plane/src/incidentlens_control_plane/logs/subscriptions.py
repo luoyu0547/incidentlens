@@ -36,6 +36,7 @@ from incidentlens_control_plane.logs.types import (
     LogScope,
     LogSourceKind,
     LogSubscription,
+    LogSubscriptionStatus,
     RawLogLine,
 )
 from incidentlens_control_plane.project_registry.types import TargetRegistration
@@ -233,6 +234,9 @@ class LogSubscriptionManager:
             raise KeyError(f"subscription not found: {subscription_id}")
         if subscription_id in self._running:
             return
+        # A restart (create/resume/recovery) resets retry state so the failure
+        # counter and backoff do not carry over from a prior errored run.
+        self._failures.pop(subscription_id, None)
         queue: asyncio.Queue[_QueuedLine] = asyncio.Queue(maxsize=self._queue_size)
         reader = asyncio.create_task(self._reader_loop(subscription, queue))
         writer = asyncio.create_task(self._writer_loop(subscription, queue))
@@ -483,8 +487,13 @@ class LogSubscriptionManager:
         """Count a reader failure; at ``max_failures`` error the subscription.
 
         Returns True when the subscription was moved to status ``error`` (the
-        reader loop should then stop retrying).
+        reader loop should then stop retrying).  Absent or deleted subscriptions
+        are a no-op: a reader failure racing a delete must never resurrect a
+        deleted row, and a never-created id must not fabricate one.
         """
+        existing = self._store.get_subscription(subscription_id)
+        if existing is None or existing.status == LogSubscriptionStatus.DELETED:
+            return False
         count = self._failures.get(subscription_id, 0) + 1
         self._failures[subscription_id] = count
         if count < self.max_failures:
@@ -495,9 +504,32 @@ class LogSubscriptionManager:
             last_error_redacted=_summarize_error(error),
             now=now,
         )
+        if subscription is None:
+            self._failures.pop(subscription_id, None)
+            return False
         await self._emit_safe_event(
             RuntimeEventType.LOG_SUBSCRIPTION_ERROR,
             subscription,
             failure_count=count,
         )
+        await self._teardown_running(subscription_id)
         return True
+
+    async def _teardown_running(self, subscription_id: str) -> None:
+        """Drop the running entry and stop its tasks after an error transition.
+
+        Called when a subscription moves to status ``error`` so the entry does
+        not stay wedged in ``_running`` (the writer would keep blocking on
+        ``queue.get()`` and the id would keep counting toward ``max_active``),
+        letting ``resume`` restart it cleanly.  The reader is cancelled too,
+        unless it is the current caller (the reader loop observes the error and
+        returns on its own).
+        """
+        tasks = self._running.pop(subscription_id, None)
+        if tasks is None:
+            return
+        tasks.writer.cancel()
+        await asyncio.gather(tasks.writer, return_exceptions=True)
+        if tasks.reader is not asyncio.current_task():
+            tasks.reader.cancel()
+            await asyncio.gather(tasks.reader, return_exceptions=True)

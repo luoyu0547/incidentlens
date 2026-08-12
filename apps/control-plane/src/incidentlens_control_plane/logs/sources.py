@@ -19,6 +19,7 @@ from incidentlens_control_plane.project_registry.types import TargetRegistration
 from incidentlens_control_plane.remote_ops.sessions import SessionManager
 from incidentlens_control_plane.remote_ops.transport import (
     FileMetadata,
+    RemoteProcess,
     RemoteTransport,
 )
 
@@ -37,6 +38,18 @@ _DOCKER_TS_RE = re.compile(
 )
 _DOCKER_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _DOCKER_STREAM_READ_SIZE = 64 * 1024
+
+
+async def _drain_stderr(process: RemoteProcess) -> None:
+    """Drain-and-discard a process's stderr so the pipe never fills.
+
+    Runs as a background task for the duration of a docker ``--follow`` stream.
+    Stderr is deliberately never surfaced as application log content.
+    """
+    while True:
+        chunk = await process.read_stderr(_DOCKER_STREAM_READ_SIZE)
+        if not chunk:
+            return
 
 
 class LogSourceUnavailable(Exception):
@@ -206,10 +219,15 @@ class DockerLogSource:
         time; when absent or malformed the stream bootstraps to one second
         before ``observed_at``.  Each emitted line carries a ``docker:time=<ts>``
         cursor whose sequence increments per line within the same timestamp, and
-        the timestamp prefix is stripped from the emitted text.  The process is
-        always closed on exit or cancellation.  A failed process (open error or
-        read error) is converted to ``LogSourceUnavailable`` and stderr is never
-        surfaced as application log content.
+        the timestamp prefix is stripped from the emitted text.
+
+        The CLI's stderr is drained-and-discarded concurrently so a ``--follow``
+        process never deadlocks on a full stderr pipe buffer, and stderr is
+        never surfaced as application log content.  A ``--follow`` process must
+        not end cleanly: an EOF on stdout means the CLI exited, which is treated
+        as ``LogSourceUnavailable("docker log stream unavailable")`` rather than
+        a clean end so the manager records a failure instead of reconnecting
+        forever.  The process is always closed on exit or cancellation.
         """
         since_time = self._parse_docker_cursor(cursor)
         if since_time is None:
@@ -235,7 +253,9 @@ class DockerLogSource:
             raise LogSourceUnavailable("docker log stream unavailable") from exc
         buffer = b""
         seq = 0
+        stderr_task: asyncio.Task[None] | None = None
         try:
+            stderr_task = asyncio.create_task(_drain_stderr(process))
             while True:
                 try:
                     chunk = await process.read(_DOCKER_STREAM_READ_SIZE)
@@ -246,17 +266,17 @@ class DockerLogSource:
                         "docker log stream unavailable"
                     ) from exc
                 if not chunk:
-                    break
+                    raise LogSourceUnavailable("docker log stream unavailable")
                 buffer += chunk
                 parts = buffer.split(b"\n")
                 buffer = parts.pop()  # trailing partial line, if any
                 for raw in parts:
                     seq += 1
                     yield self._line_from_raw(subscription, raw, seq)
-            if buffer:
-                seq += 1
-                yield self._line_from_raw(subscription, buffer, seq)
         finally:
+            if stderr_task is not None:
+                stderr_task.cancel()
+                await asyncio.gather(stderr_task, return_exceptions=True)
             await process.close()
 
     @staticmethod

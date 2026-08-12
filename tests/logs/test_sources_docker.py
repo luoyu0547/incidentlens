@@ -1,7 +1,7 @@
 """Docker log source tests."""
 
 import pytest
-from incidentlens_control_plane.logs.sources import DockerLogSource
+from incidentlens_control_plane.logs.sources import DockerLogSource, LogSourceUnavailable
 from incidentlens_control_plane.logs.types import (
     LogQueryRequest,
     LogScope,
@@ -90,3 +90,18 @@ async def test_docker_stream_uses_since_cursor_and_follow_argv(
             None,
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_docker_stream_eof_raises_unavailable(target_registration) -> None:
+    """A --follow process that EOFs is a CLI failure, not a clean end."""
+    transport = FakeChangeTransport()  # no chunks -> process EOFs immediately
+    source = DockerLogSource(lambda target: transport)
+
+    with pytest.raises(LogSourceUnavailable, match="docker log stream unavailable"):
+        async for _line in source.stream(
+            subscription=docker_subscription("payments-api-1"),
+            target=target_registration,
+            cursor=None,
+        ):
+            pass

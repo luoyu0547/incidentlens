@@ -262,15 +262,106 @@ async def test_docker_backpressure_closes_process_and_emits_safe_event(
 async def test_repeated_errors_move_subscription_to_error_with_redacted_summary(
     manager: LogSubscriptionManager, store
 ) -> None:
+    subscription = store.create_subscription(
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.FILE,
+        scope=LogScope.HOST,
+        source_ref="/var/log/payment/app.log",
+        opt_in_streaming=True,
+        created_by="alice",
+        now=datetime(2026, 8, 12, tzinfo=UTC),
+    )
     manager.max_failures = 2
     await manager.record_failure_for_test(
-        "sub-1", RuntimeError("token=abc123 host dev-a.example.test")
+        subscription.subscription_id,
+        RuntimeError("token=abc123 host dev-a.example.test"),
     )
     await manager.record_failure_for_test(
-        "sub-1", RuntimeError("token=abc123 host dev-a.example.test")
+        subscription.subscription_id,
+        RuntimeError("token=abc123 host dev-a.example.test"),
     )
 
-    subscription = store.get_subscription("sub-1")
-    assert subscription.status.value == "error"
-    assert "abc123" not in subscription.last_error_redacted
-    assert "dev-a.example.test" not in subscription.last_error_redacted
+    errored = store.get_subscription(subscription.subscription_id)
+    assert errored.status.value == "error"
+    assert "abc123" not in errored.last_error_redacted
+    assert "dev-a.example.test" not in errored.last_error_redacted
+
+
+@pytest.mark.asyncio
+async def test_record_failure_for_absent_subscription_is_noop(
+    manager: LogSubscriptionManager, store
+) -> None:
+    manager.max_failures = 1
+    await manager.record_failure_for_test("ghost-sub", RuntimeError("boom"))
+
+    assert store.get_subscription("ghost-sub") is None
+
+
+@pytest.mark.asyncio
+async def test_record_failure_for_deleted_subscription_is_noop(
+    manager: LogSubscriptionManager, store
+) -> None:
+    subscription = store.create_subscription(
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.FILE,
+        scope=LogScope.HOST,
+        source_ref="/var/log/payment/app.log",
+        opt_in_streaming=True,
+        created_by="alice",
+        now=datetime(2026, 8, 12, tzinfo=UTC),
+    )
+    store.delete_subscription(
+        subscription.subscription_id, now=datetime(2026, 8, 12, tzinfo=UTC)
+    )
+    manager.max_failures = 1
+    await manager.record_failure_for_test(
+        subscription.subscription_id, RuntimeError("boom")
+    )
+
+    assert store.get_subscription(subscription.subscription_id).status.value == "deleted"
+
+
+@pytest.mark.asyncio
+async def test_errored_subscription_resume_restarts_and_resets_failures(
+    manager: LogSubscriptionManager, store, runtime_events
+) -> None:
+    subscription = await manager.create(
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.FILE,
+        scope=LogScope.HOST,
+        source_ref="/var/log/payment/app.log",
+        opt_in_streaming=True,
+        created_by="alice",
+    )
+    manager.max_failures = 2
+    await manager.record_failure_for_test(
+        subscription.subscription_id, RuntimeError("boom one")
+    )
+    await manager.record_failure_for_test(
+        subscription.subscription_id, RuntimeError("boom two")
+    )
+
+    assert store.get_subscription(subscription.subscription_id).status.value == "error"
+    assert subscription.subscription_id not in manager.running_subscription_ids()
+
+    resumed = await manager.resume(subscription.subscription_id)
+
+    assert resumed.status.value == "active"
+    assert subscription.subscription_id in manager.running_subscription_ids()
+    events = runtime_events.list_after(0, limit=100)
+    assert any(
+        event.event_type.value == "log.subscription_resumed" for event in events
+    )
+
+    # The failure counter was reset on resume: a single failure must not
+    # immediately re-error the subscription (needs 2 with max_failures=2).
+    await manager.record_failure_for_test(
+        subscription.subscription_id, RuntimeError("one more")
+    )
+    assert store.get_subscription(subscription.subscription_id).status.value == "active"
