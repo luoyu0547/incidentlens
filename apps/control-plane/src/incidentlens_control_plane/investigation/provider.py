@@ -88,6 +88,16 @@ class ProviderCrash(Exception):
     """A non-retryable provider failure — the run must fail, not retry."""
 
 
+class ProviderContextMismatch(Exception):
+    """Raised when an ``AgentTurnRequest`` and its ``AgentRun`` disagree on identity.
+
+    The validator derives the tool allowlist from the request but the budget,
+    scope and evidence-ownership checks from the run, so handing it a
+    mismatched pair would silently disable those checks.  The orchestrator must
+    always pass the run that produced the request.
+    """
+
+
 class ProviderOutputRejected(Exception):
     """Raised when a provider result fails schema/allowlist/scope/ownership checks."""
 
@@ -264,7 +274,14 @@ class ToolSchema(BaseModel):
         default=None,
         description="When set, the tool may only be called by a run of this scope.",
     )
-    output_cap_bytes: int = Field(default=512 * 1024, ge=1)
+    output_cap_bytes: int = Field(
+        default=512 * 1024,
+        ge=1,
+        description="Advisory cap the provider should respect when sizing tool "
+        "arguments.  The run budget (``AgentBudget.max_output_bytes_per_tool``) "
+        "is the binding per-tool output limit enforced by the guard; this value "
+        "is guidance only and is not independently enforced.",
+    )
     requires_approval: bool = False
 
     @field_validator("parameters_json_schema")
@@ -453,10 +470,36 @@ class ProviderOutputValidator:
         *,
         guard: InvestigationGuard | None = None,
     ) -> None:
+        self._check_identity(request, run)
         self._request = request
         self._run = run
         self._guard = guard or InvestigationGuard()
         self._schemas = {schema.tool_name: schema for schema in request.tool_schemas}
+
+    @staticmethod
+    def _check_identity(request: AgentTurnRequest, run: AgentRun) -> None:
+        """Fail fast when the request and run do not describe the same run.
+
+        The tool allowlist comes from the request while the budget, scope and
+        evidence-ownership checks come from ``run``; a mismatched pair would
+        silently validate output against a different run.
+        """
+        if request.checkpoint.agent_run_id != run.agent_run_id:
+            raise ProviderContextMismatch(
+                "request checkpoint names run "
+                f"{request.checkpoint.agent_run_id!r} but the provided run is "
+                f"{run.agent_run_id!r}"
+            )
+        if request.investigation.investigation_id != run.investigation_id:
+            raise ProviderContextMismatch(
+                "request names investigation "
+                f"{request.investigation.investigation_id!r} but the provided "
+                f"run belongs to {run.investigation_id!r}"
+            )
+        if request.checkpoint.scope != run.scope:
+            raise ProviderContextMismatch(
+                "request checkpoint scope does not match the provided run scope"
+            )
 
     def validate(self, result: AgentTurnResult) -> ProviderValidation:
         """Return the validated turn, raising ``ProviderOutputRejected`` on failure."""
@@ -598,6 +641,7 @@ __all__ = [
     "InvestigationSnapshot",
     "ModelProvider",
     "ProviderCrash",
+    "ProviderContextMismatch",
     "ProviderError",
     "ProviderOutputRejected",
     "ProviderOutputValidator",

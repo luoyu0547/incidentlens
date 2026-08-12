@@ -37,6 +37,7 @@ from incidentlens_control_plane.investigation.provider import (
     HypothesisProposal,
     InvestigationSnapshot,
     ModelProvider,
+    ProviderContextMismatch,
     ProviderCrash,
     ProviderError,
     ProviderOutputRejected,
@@ -565,6 +566,45 @@ def test_registry_steps_are_addressable_by_index():
     assert registry.remaining("run-1") == 2  # peek does not consume
     with pytest.raises(ScriptNotFound):
         registry.peek("run-1", 2)
+
+
+# -- validator: request/run identity consistency ------------------------------
+
+
+def test_validator_rejects_run_identity_mismatch():
+    request = make_request(make_run(), make_investigation())
+    other_run = make_run(agent_run_id="run-2")
+
+    with pytest.raises(ProviderContextMismatch, match="but the provided run is"):
+        ProviderOutputValidator(request, other_run)
+
+
+def test_validator_rejects_investigation_identity_mismatch():
+    request = make_request(make_run(), make_investigation())
+    other_run = make_run(investigation_id="inv-2")
+
+    with pytest.raises(ProviderContextMismatch, match="run belongs to"):
+        ProviderOutputValidator(request, other_run)
+
+
+def test_validator_rejects_scope_mismatch():
+    request = make_request(make_run(), make_investigation())
+    other_run = make_container_run()  # same run id, different scope
+
+    with pytest.raises(ProviderContextMismatch, match="scope does not match"):
+        ProviderOutputValidator(request, other_run)
+
+
+def test_validator_accepts_matching_run_and_request():
+    run = make_run()
+    request = make_request(run, make_investigation())
+    result = AgentTurnResult(
+        tool_requests=(
+            ToolRequest(tool_call_id="t1", tool_name="logs.query", arguments={"query": "x"}),
+        )
+    )
+
+    assert validate(request, run, result).requires_approval is False
 
 
 # -- validator: tool allowlist, arguments and scope ---------------------------
