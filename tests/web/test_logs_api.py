@@ -177,3 +177,37 @@ def test_logs_search_filters_by_time_window(client, runtime, registered_project)
     body = response.json()
     assert len(body) == 1
     assert body[0]["message_redacted"] == "ERROR late"
+
+
+def test_logs_search_normalizes_non_utc_start_time(
+    client, runtime, registered_project
+) -> None:
+    """A -05:00 start_time must be compared as UTC, not as an offset string."""
+    runtime.log_store.append_batch(
+        (
+            make_web_log_record(
+                "ERROR before",
+                now=datetime(2026, 8, 12, 15, 0, tzinfo=UTC),
+                log_id="log-web-before",
+            ),
+            make_web_log_record(
+                "ERROR after",
+                now=datetime(2026, 8, 12, 16, 30, tzinfo=UTC),
+                log_id="log-web-after",
+            ),
+        )
+    )
+
+    # 11:00 -05:00 == 16:00 UTC, so the 15:00 UTC record is excluded.
+    response = client.get(
+        "/api/logs/search",
+        params={
+            "project_id": "payments",
+            "start_time": "2026-08-12T11:00:00-05:00",
+            "limit": 10,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [record["message_redacted"] for record in body] == ["ERROR after"]

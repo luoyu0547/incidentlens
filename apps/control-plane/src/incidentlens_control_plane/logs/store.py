@@ -3,7 +3,7 @@ import re
 import sqlite3
 import uuid
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict
 
@@ -327,31 +327,45 @@ class LogStore:
         after_cursor: str | None = None,
         limit: int = 1000,
     ) -> tuple[LogRecord, ...]:
-        """Return records for a subscription in cursor order, optionally after a cursor.
+        """Return records for a subscription in insertion (``rowid``) order.
 
-        ``after_cursor`` is a lower bound on ``cursor`` for pagination; ``None``
-        means no lower bound (start from the first record).
+        ``after_cursor`` resumes after the row whose cursor equals it, so
+        pagination stays correct even when cursors do not sort lexicographically
+        (e.g. ``file:offset=100`` before ``file:offset=99``, or docker
+        ``:seq=10`` before ``:seq=2``).  Ordering by the monotonic ``rowid``
+        (SQLite insert order) delivers records in the order they were appended.
         """
         if not (1 <= limit <= 1000):
             raise ValueError("limit must be between 1 and 1000")
 
-        clauses = ["subscription_id = ?"]
-        params: list[object] = [subscription_id]
-        if after_cursor is not None:
-            clauses.append("cursor > ?")
-            params.append(after_cursor)
-
         with self._connection_factory() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT {", ".join(_RECORD_COLUMNS)}
-                FROM log_records
-                WHERE {" AND ".join(clauses)}
-                ORDER BY cursor ASC
-                LIMIT ?
-                """,
-                (*params, limit),
-            ).fetchall()
+            if after_cursor is None:
+                rows = conn.execute(
+                    f"""
+                    SELECT {", ".join(_RECORD_COLUMNS)}
+                    FROM log_records
+                    WHERE subscription_id = ?
+                    ORDER BY rowid ASC
+                    LIMIT ?
+                    """,
+                    (subscription_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"""
+                    SELECT {", ".join(_RECORD_COLUMNS)}
+                    FROM log_records
+                    WHERE subscription_id = ?
+                      AND rowid > COALESCE(
+                          (SELECT MAX(rowid) FROM log_records
+                           WHERE subscription_id = ? AND cursor = ?),
+                          0
+                      )
+                    ORDER BY rowid ASC
+                    LIMIT ?
+                    """,
+                    (subscription_id, subscription_id, after_cursor, limit),
+                ).fetchall()
         return tuple(_record_from_row(row) for row in rows)
 
     def search(self, filters: LogSearchFilters, limit: int = 100) -> tuple[LogRecord, ...]:
@@ -382,10 +396,10 @@ class LogStore:
             params.append(filters.severity.value)
         if filters.start_time is not None:
             clauses.append("observed_at >= ?")
-            params.append(filters.start_time.isoformat())
+            params.append(filters.start_time.astimezone(UTC).isoformat())
         if filters.end_time is not None:
             clauses.append("observed_at <= ?")
-            params.append(filters.end_time.isoformat())
+            params.append(filters.end_time.astimezone(UTC).isoformat())
         if filters.text is not None and filters.text.strip():
             clauses.append(
                 "log_id IN (SELECT log_id FROM log_records_fts WHERE log_records_fts MATCH ?)"
@@ -402,7 +416,7 @@ class LogStore:
                 SELECT {", ".join(_RECORD_COLUMNS)}
                 FROM log_records
                 {where_sql}
-                ORDER BY observed_at DESC
+                ORDER BY rowid ASC
                 LIMIT ?
                 """,
                 (*params, limit),
