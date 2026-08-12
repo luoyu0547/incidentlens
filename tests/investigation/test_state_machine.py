@@ -7,6 +7,9 @@ from incidentlens_control_plane.investigation.state_machine import (
     AGENT_RUN_STATE_MACHINE,
     AGENT_RUN_TERMINAL,
     AGENT_RUN_TRANSITIONS,
+    HYPOTHESIS_STATE_MACHINE,
+    HYPOTHESIS_TERMINAL,
+    HYPOTHESIS_TRANSITIONS,
     INVESTIGATION_STATE_MACHINE,
     INVESTIGATION_TERMINAL,
     INVESTIGATION_TRANSITIONS,
@@ -14,6 +17,7 @@ from incidentlens_control_plane.investigation.state_machine import (
     TOOL_CALL_TERMINAL,
     TOOL_CALL_TRANSITIONS,
     AgentRunStatus,
+    HypothesisStatus,
     IllegalTransition,
     InvestigationStatus,
     StateMachine,
@@ -131,28 +135,54 @@ TOOL_CALL_CASES = [
     (ToolCallStatus.CANCELLED, ToolCallStatus.RUNNING, False),
 ]
 
+HYPOTHESIS_CASES = [
+    (HypothesisStatus.PROPOSED, HypothesisStatus.ACTIVE, True),
+    (HypothesisStatus.PROPOSED, HypothesisStatus.CONFIRMED, True),
+    (HypothesisStatus.PROPOSED, HypothesisStatus.REFUTED, True),
+    (HypothesisStatus.PROPOSED, HypothesisStatus.SUPERSEDED, True),
+    (HypothesisStatus.PROPOSED, HypothesisStatus.PROPOSED, False),
+    (HypothesisStatus.ACTIVE, HypothesisStatus.CONFIRMED, True),
+    (HypothesisStatus.ACTIVE, HypothesisStatus.REFUTED, True),
+    (HypothesisStatus.ACTIVE, HypothesisStatus.SUPERSEDED, True),
+    (HypothesisStatus.ACTIVE, HypothesisStatus.PROPOSED, False),
+    (HypothesisStatus.CONFIRMED, HypothesisStatus.SUPERSEDED, False),
+    (HypothesisStatus.CONFIRMED, HypothesisStatus.ACTIVE, False),
+    (HypothesisStatus.CONFIRMED, HypothesisStatus.PROPOSED, False),
+    (HypothesisStatus.CONFIRMED, HypothesisStatus.REFUTED, False),
+    (HypothesisStatus.REFUTED, HypothesisStatus.ACTIVE, False),
+    (HypothesisStatus.REFUTED, HypothesisStatus.CONFIRMED, False),
+    (HypothesisStatus.REFUTED, HypothesisStatus.REFUTED, False),
+    (HypothesisStatus.SUPERSEDED, HypothesisStatus.ACTIVE, False),
+    (HypothesisStatus.SUPERSEDED, HypothesisStatus.CONFIRMED, False),
+    (HypothesisStatus.SUPERSEDED, HypothesisStatus.SUPERSEDED, False),
+]
+
 ALL_CASES = [
     *[(INVESTIGATION_STATE_MACHINE, *case) for case in INVESTIGATION_CASES],
     *[(AGENT_RUN_STATE_MACHINE, *case) for case in AGENT_RUN_CASES],
     *[(TOOL_CALL_STATE_MACHINE, *case) for case in TOOL_CALL_CASES],
+    *[(HYPOTHESIS_STATE_MACHINE, *case) for case in HYPOTHESIS_CASES],
 ]
 
 ALL_CASE_IDS = [
     *[f"inv:{current.value}->{target.value}" for current, target, _ in INVESTIGATION_CASES],
     *[f"run:{current.value}->{target.value}" for current, target, _ in AGENT_RUN_CASES],
     *[f"tool:{current.value}->{target.value}" for current, target, _ in TOOL_CALL_CASES],
+    *[f"hyp:{current.value}->{target.value}" for current, target, _ in HYPOTHESIS_CASES],
 ]
 
 MACHINES_AND_TERMINAL = [
     (INVESTIGATION_STATE_MACHINE, INVESTIGATION_TERMINAL),
     (AGENT_RUN_STATE_MACHINE, AGENT_RUN_TERMINAL),
     (TOOL_CALL_STATE_MACHINE, TOOL_CALL_TERMINAL),
+    (HYPOTHESIS_STATE_MACHINE, HYPOTHESIS_TERMINAL),
 ]
 
 MACHINES_AND_TABLES = [
     (INVESTIGATION_STATE_MACHINE, INVESTIGATION_TRANSITIONS, INVESTIGATION_TERMINAL),
     (AGENT_RUN_STATE_MACHINE, AGENT_RUN_TRANSITIONS, AGENT_RUN_TERMINAL),
     (TOOL_CALL_STATE_MACHINE, TOOL_CALL_TRANSITIONS, TOOL_CALL_TERMINAL),
+    (HYPOTHESIS_STATE_MACHINE, HYPOTHESIS_TRANSITIONS, HYPOTHESIS_TERMINAL),
 ]
 
 
@@ -173,7 +203,7 @@ def test_transition_is_legal_or_illegal(machine, current, target, expected):
 @pytest.mark.parametrize(
     ("machine", "terminal"),
     MACHINES_AND_TERMINAL,
-    ids=["investigation", "agent_run", "tool_call"],
+    ids=["investigation", "agent_run", "tool_call", "hypothesis"],
 )
 def test_terminal_states_have_no_outgoing_transitions(machine, terminal):
     for status in terminal:
@@ -185,7 +215,7 @@ def test_terminal_states_have_no_outgoing_transitions(machine, terminal):
 @pytest.mark.parametrize(
     ("machine", "terminal"),
     MACHINES_AND_TERMINAL,
-    ids=["investigation", "agent_run", "tool_call"],
+    ids=["investigation", "agent_run", "tool_call", "hypothesis"],
 )
 def test_terminal_invariants(machine, terminal):
     sample = next(iter(terminal))
@@ -202,7 +232,7 @@ def test_terminal_invariants(machine, terminal):
 @pytest.mark.parametrize(
     ("machine", "transitions", "terminal"),
     MACHINES_AND_TABLES,
-    ids=["investigation", "agent_run", "tool_call"],
+    ids=["investigation", "agent_run", "tool_call", "hypothesis"],
 )
 def test_transition_table_covers_every_status_and_terminal_is_empty(machine, transitions, terminal):
     status_type = type(next(iter(transitions)))

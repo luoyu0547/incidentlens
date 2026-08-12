@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 
 import pytest
 from incidentlens_control_plane.investigation.state_machine import (
+    HYPOTHESIS_STATE_MACHINE,
     INVESTIGATION_TERMINAL,
     AgentRunStatus,
     IllegalTransition,
@@ -48,6 +49,7 @@ from incidentlens_control_plane.investigation.types import (
     UsageCounters,
 )
 from incidentlens_control_plane.logs.types import LogScope
+from pydantic import ValidationError
 
 NOW = datetime(2026, 8, 12, 12, 0, 0, tzinfo=UTC)
 
@@ -670,6 +672,7 @@ def test_transition_hypothesis_status(tmp_path) -> None:
 
 def test_create_and_list_conclusions(tmp_path) -> None:
     store = make_store(tmp_path)
+    store.create_agent_run(make_run())
     conclusion = Conclusion(
         summary="database pool is exhausted",
         facts=("orders container reports pool timeout",),
@@ -680,6 +683,15 @@ def test_create_and_list_conclusions(tmp_path) -> None:
     assert store.list_conclusions(agent_run_id="run-1") == (conclusion,)
     assert store.list_conclusions(investigation_id="inv-1") == (conclusion,)
     assert store.list_conclusions(agent_run_id="other-run") == ()
+
+
+def test_create_conclusion_rejects_cross_investigation_attribution(tmp_path) -> None:
+    """A conclusion's agent run must belong to the named investigation (M3)."""
+    store = make_store(tmp_path)
+    store.create_agent_run(make_run())
+    conclusion = Conclusion(summary="database pool is exhausted")
+    with pytest.raises(IllegalTransition):
+        store.create_conclusion("run-1", "inv-OTHER", conclusion, now=NOW)
 
 
 # -- delegated tasks ----------------------------------------------------------
@@ -809,3 +821,212 @@ def test_raw_transcript_never_enters_round_json(tmp_path) -> None:
         ).fetchone()[0]
     assert "transcript" not in raw
     assert "reasoning" not in raw
+
+
+# -- C1: derived models are re-validated before persisting ---------------------
+
+
+def test_transition_tool_call_rejects_duplicate_evidence_ids(tmp_path) -> None:
+    """Duplicate evidence ids must not pollute the DB (C1)."""
+    store = make_store(tmp_path)
+    store.create_tool_call(make_tool_call())
+
+    with pytest.raises(ValidationError):
+        store.transition_tool_call_status(
+            "tool-1", ToolCallStatus.SUCCEEDED, now=NOW, evidence_ids=("ev-1", "ev-1")
+        )
+
+    # The stored row is unchanged: still planned, no evidence attached.
+    assert store.get_tool_call("tool-1").status is ToolCallStatus.PLANNED
+
+
+def test_transition_tool_call_rejects_empty_evidence_ids(tmp_path) -> None:
+    """Empty evidence id strings must not pollute the DB (C1)."""
+    store = make_store(tmp_path)
+    store.create_tool_call(make_tool_call())
+
+    with pytest.raises(ValidationError):
+        store.transition_tool_call_status(
+            "tool-1", ToolCallStatus.SUCCEEDED, now=NOW, evidence_ids=("ev-1", " ")
+        )
+
+    assert store.get_tool_call("tool-1").status is ToolCallStatus.PLANNED
+
+
+def test_transition_tool_call_rejects_negative_output_bytes(tmp_path) -> None:
+    """Negative output bytes must not pollute the DB (C1)."""
+    store = make_store(tmp_path)
+    store.create_tool_call(make_tool_call())
+
+    with pytest.raises(ValidationError):
+        store.transition_tool_call_status(
+            "tool-1", ToolCallStatus.SUCCEEDED, now=NOW, output_bytes=-1
+        )
+
+    assert store.get_tool_call("tool-1").status is ToolCallStatus.PLANNED
+
+
+def test_transition_tool_call_rejects_overlong_error(tmp_path) -> None:
+    """An over-long redacted error summary must not pollute the DB (C1)."""
+    store = make_store(tmp_path)
+    store.create_tool_call(make_tool_call())
+
+    with pytest.raises(ValidationError):
+        store.transition_tool_call_status(
+            "tool-1", ToolCallStatus.SUCCEEDED, now=NOW, error_redacted="x" * 2001
+        )
+
+    assert store.get_tool_call("tool-1").status is ToolCallStatus.PLANNED
+
+
+def test_transition_investigation_rejects_bogus_stop_reason(tmp_path) -> None:
+    """An invalid stop reason must not pollute the DB (C1)."""
+    store = make_store(tmp_path)
+    store.create_investigation(make_investigation(status=InvestigationStatus.RUNNING))
+
+    with pytest.raises(ValidationError):
+        store.transition_investigation_status(
+            "inv-1",
+            InvestigationStatus.PAUSED_BUDGET,
+            now=NOW,
+            stop_reason="bogus",  # type: ignore[arg-type]
+        )
+
+    assert store.get_investigation("inv-1").status is InvestigationStatus.RUNNING
+
+
+def test_transition_agent_run_rejects_bogus_stop_reason(tmp_path) -> None:
+    """An invalid stop reason must not pollute the DB (C1)."""
+    store = make_store(tmp_path)
+    store.create_agent_run(make_run(status=AgentRunStatus.RUNNING))
+
+    with pytest.raises(ValidationError):
+        store.transition_agent_run_status(
+            "run-1",
+            AgentRunStatus.PAUSED_BUDGET,
+            now=NOW,
+            stop_reason="bogus",  # type: ignore[arg-type]
+        )
+
+    assert store.get_agent_run("run-1").status is AgentRunStatus.RUNNING
+
+
+# -- I1: hypothesis state machine is enforced in the store --------------------
+
+
+def test_transition_hypothesis_rejects_rollback(tmp_path) -> None:
+    """A confirmed hypothesis cannot roll back to ACTIVE (I1)."""
+    store = make_store(tmp_path)
+    store.create_agent_run(make_run())
+    store.create_hypothesis(make_hypothesis())
+
+    confirmed = store.transition_hypothesis_status(
+        "hyp-1", HypothesisStatus.CONFIRMED, now=NOW
+    )
+    assert confirmed.status is HypothesisStatus.CONFIRMED
+
+    with pytest.raises(IllegalTransition):
+        store.transition_hypothesis_status("hyp-1", HypothesisStatus.ACTIVE, now=NOW)
+
+    assert store.get_hypothesis("hyp-1").status is HypothesisStatus.CONFIRMED
+
+
+def test_transition_hypothesis_confirmed_is_terminal(tmp_path) -> None:
+    """A confirmed hypothesis is absorbing: it cannot be superseded or rolled back (I1)."""
+    store = make_store(tmp_path)
+    store.create_agent_run(make_run())
+    store.create_hypothesis(make_hypothesis())
+
+    confirmed = store.transition_hypothesis_status(
+        "hyp-1", HypothesisStatus.CONFIRMED, now=NOW
+    )
+    assert confirmed.status is HypothesisStatus.CONFIRMED
+
+    with pytest.raises(IllegalTransition):
+        store.transition_hypothesis_status("hyp-1", HypothesisStatus.SUPERSEDED, now=NOW)
+    with pytest.raises(IllegalTransition):
+        store.transition_hypothesis_status("hyp-1", HypothesisStatus.ACTIVE, now=NOW)
+
+    assert store.get_hypothesis("hyp-1").status is HypothesisStatus.CONFIRMED
+
+
+def test_hypothesis_state_machine_shared_with_types(tmp_path) -> None:
+    """types.HypothesisStatus is the same enum the state machine guards (I1)."""
+    from incidentlens_control_plane.investigation import types as investigation_types
+
+    assert investigation_types.HypothesisStatus is HypothesisStatus
+    assert HYPOTHESIS_STATE_MACHINE.can_transition(
+        HypothesisStatus.CONFIRMED, HypothesisStatus.ACTIVE
+    ) is False
+
+
+# -- M2: proposal decisions are single-use and cannot self-transition ---------
+
+
+def test_proposal_rejects_self_transition(tmp_path) -> None:
+    """A pending proposal cannot be re-decided onto itself (M2)."""
+    store = make_store(tmp_path)
+    store.create_proposal(make_proposal())
+
+    with pytest.raises(IllegalTransition):
+        store.transition_proposal_status(
+            "prop-1", RegistryProposalStatus.PENDING, now=NOW
+        )
+    assert store.get_proposal("prop-1").status is RegistryProposalStatus.PENDING
+
+
+def test_proposal_rejects_second_decision(tmp_path) -> None:
+    """A decided proposal cannot be re-decided (M2)."""
+    store = make_store(tmp_path)
+    store.create_proposal(make_proposal())
+    store.transition_proposal_status("prop-1", RegistryProposalStatus.APPROVED, now=NOW)
+
+    with pytest.raises(IllegalTransition):
+        store.transition_proposal_status("prop-1", RegistryProposalStatus.REJECTED, now=NOW)
+    assert store.get_proposal("prop-1").status is RegistryProposalStatus.APPROVED
+
+
+# -- M3: cross-investigation attribution is rejected --------------------------
+
+
+def test_create_child_run_rejects_cross_investigation_parent(tmp_path) -> None:
+    """A child run must reference a parent in the same investigation (M3)."""
+    store = make_store(tmp_path)
+    store.create_agent_run(make_run())
+
+    with pytest.raises(IllegalTransition):
+        store.create_agent_run(
+            make_container_child(
+                agent_run_id="child-1",
+                parent_run_id="run-1",
+                investigation_id="inv-OTHER",
+            )
+        )
+
+
+def test_create_child_run_requires_existing_parent(tmp_path) -> None:
+    """A child run must reference an existing parent (M3)."""
+    store = make_store(tmp_path)
+    with pytest.raises(AgentRunNotFound):
+        store.create_agent_run(
+            make_container_child(agent_run_id="child-1", parent_run_id="missing")
+        )
+
+
+def test_create_delegated_task_rejects_cross_investigation_parent(tmp_path) -> None:
+    """A delegated task's parent must be in the same investigation (M3)."""
+    store = make_store(tmp_path)
+    store.create_agent_run(make_run())
+    child = make_container_child()
+    store.create_agent_run(child)
+    package = DelegatedTaskPackage(
+        child_run_id="child-1",
+        parent_run_id="run-1",
+        investigation_id="inv-OTHER",
+        task_prompt="inspect the orders container",
+        scope=child.scope,
+        budget=AgentBudget(),
+        evidence_ids=(),
+    )
+    with pytest.raises(IllegalTransition):
+        store.create_delegated_task(package, now=NOW)

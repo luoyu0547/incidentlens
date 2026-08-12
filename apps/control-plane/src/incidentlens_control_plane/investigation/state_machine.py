@@ -57,6 +57,14 @@ class ToolCallStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class HypothesisStatus(StrEnum):
+    PROPOSED = "proposed"
+    ACTIVE = "active"
+    CONFIRMED = "confirmed"
+    REFUTED = "refuted"
+    SUPERSEDED = "superseded"
+
+
 INVESTIGATION_TERMINAL = frozenset(
     {
         InvestigationStatus.CANCELLED,
@@ -79,6 +87,14 @@ TOOL_CALL_TERMINAL = frozenset(
         ToolCallStatus.FAILED,
         ToolCallStatus.UNCERTAIN,
         ToolCallStatus.CANCELLED,
+    }
+)
+
+HYPOTHESIS_TERMINAL = frozenset(
+    {
+        HypothesisStatus.CONFIRMED,
+        HypothesisStatus.REFUTED,
+        HypothesisStatus.SUPERSEDED,
     }
 )
 
@@ -254,6 +270,30 @@ TOOL_CALL_TRANSITIONS: dict[ToolCallStatus, frozenset[ToolCallStatus]] = {
     ToolCallStatus.CANCELLED: frozenset(),
 }
 
+HYPOTHESIS_TRANSITIONS: dict[HypothesisStatus, frozenset[HypothesisStatus]] = {
+    HypothesisStatus.PROPOSED: frozenset(
+        {
+            HypothesisStatus.ACTIVE,
+            HypothesisStatus.CONFIRMED,
+            HypothesisStatus.REFUTED,
+            HypothesisStatus.SUPERSEDED,
+        }
+    ),
+    HypothesisStatus.ACTIVE: frozenset(
+        {
+            HypothesisStatus.CONFIRMED,
+            HypothesisStatus.REFUTED,
+            HypothesisStatus.SUPERSEDED,
+        }
+    ),
+    # A decided hypothesis is absorbing: once it is confirmed, refuted or
+    # superseded it can never roll back to an earlier/proposed/active state
+    # nor be re-decided.
+    HypothesisStatus.CONFIRMED: frozenset(),
+    HypothesisStatus.REFUTED: frozenset(),
+    HypothesisStatus.SUPERSEDED: frozenset(),
+}
+
 
 class StateMachine(Generic[StatusT]):
     """A deterministic, table-driven state machine over an enum status.
@@ -333,3 +373,4 @@ INVESTIGATION_STATE_MACHINE = StateMachine(
 )
 AGENT_RUN_STATE_MACHINE = StateMachine(AGENT_RUN_TRANSITIONS, AGENT_RUN_TERMINAL)
 TOOL_CALL_STATE_MACHINE = StateMachine(TOOL_CALL_TRANSITIONS, TOOL_CALL_TERMINAL)
+HYPOTHESIS_STATE_MACHINE = StateMachine(HYPOTHESIS_TRANSITIONS, HYPOTHESIS_TERMINAL)

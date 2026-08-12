@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from incidentlens_control_plane.investigation.state_machine import (
     AGENT_RUN_STATE_MACHINE,
     AGENT_RUN_TERMINAL,
+    HYPOTHESIS_STATE_MACHINE,
     INVESTIGATION_STATE_MACHINE,
     INVESTIGATION_TERMINAL,
     TOOL_CALL_STATE_MACHINE,
@@ -201,6 +202,23 @@ _IN_FLIGHT_TOOL_STATUSES: frozenset[ToolCallStatus] = frozenset(
     }
 )
 
+# A proposal may only be decided while pending, and only to a *different*
+# status — a self-transition would let a decision be replayed.
+_PROPOSAL_DECISION_TRANSITIONS: dict[
+    RegistryProposalStatus, frozenset[RegistryProposalStatus]
+] = {
+    RegistryProposalStatus.PENDING: frozenset(
+        {
+            RegistryProposalStatus.APPROVED,
+            RegistryProposalStatus.REJECTED,
+            RegistryProposalStatus.STALE,
+        }
+    ),
+    RegistryProposalStatus.APPROVED: frozenset(),
+    RegistryProposalStatus.REJECTED: frozenset(),
+    RegistryProposalStatus.STALE: frozenset(),
+}
+
 
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
@@ -208,6 +226,18 @@ def _iso(value: datetime | None) -> str | None:
 
 def _placeholders(count: int) -> str:
     return ", ".join("?" for _ in range(count))
+
+
+def _derive_validated(model: BaseModel, updates: dict[str, object]) -> BaseModel:
+    """Derive a new validated contract from ``model`` plus ``updates``.
+
+    ``model_copy(update=...)`` skips validation, so a derived model built that
+    way could persist an invalid value (duplicate or empty evidence ids,
+    negative output bytes, an over-long error summary) that fails on the next
+    read/recovery.  Merging the base dump with the updates and re-validating
+    every field keeps the persisted ``record_json`` a valid contract.
+    """
+    return type(model).model_validate({**model.model_dump(), **updates})
 
 
 class InvestigationStore:
@@ -467,7 +497,7 @@ class InvestigationStore:
                 updates["completed_at"] = now_utc
             if stop_reason is not None:
                 updates["stop_reason"] = stop_reason
-            updated = current.model_copy(update=updates)
+            updated = _derive_validated(current, updates)
 
             cursor = conn.execute(
                 """
@@ -530,9 +560,27 @@ class InvestigationStore:
     # -- agent runs -----------------------------------------------------------
 
     def create_agent_run(self, run: AgentRun) -> AgentRun:
-        """Persist a new agent run; raise AlreadyExists on a duplicate id."""
+        """Persist a new agent run; raise AlreadyExists on a duplicate id.
+
+        A child run's ``parent_run_id`` must reference a parent run in the same
+        investigation, so a child can never be attributed across investigations.
+        """
         record_json = run.model_dump_json()
         with self._connection_factory() as conn:
+            if run.kind is AgentRunKind.CHILD:
+                parent = conn.execute(
+                    "SELECT investigation_id FROM agent_runs WHERE agent_run_id = ?",
+                    (run.parent_run_id,),
+                ).fetchone()
+                if parent is None:
+                    raise AgentRunNotFound(
+                        f"parent run not found: {run.parent_run_id}"
+                    )
+                if parent[0] != run.investigation_id:
+                    raise IllegalTransition(
+                        f"child run {run.agent_run_id} parent {run.parent_run_id} "
+                        f"belongs to investigation {parent[0]}, not {run.investigation_id}"
+                    )
             try:
                 conn.execute(
                     f"""
@@ -662,7 +710,7 @@ class InvestigationStore:
                 updates["completed_at"] = now_utc
             if stop_reason is not None:
                 updates["stop_reason"] = stop_reason
-            updated = current.model_copy(update=updates)
+            updated = _derive_validated(current, updates)
 
             cursor = conn.execute(
                 """
@@ -934,7 +982,7 @@ class InvestigationStore:
                 updates["evidence_ids"] = tuple(evidence_ids)
             if error_redacted is not None:
                 updates["error_redacted"] = error_redacted
-            updated = current.model_copy(update=updates)
+            updated = _derive_validated(current, updates)
 
             cursor = conn.execute(
                 """
@@ -1047,7 +1095,13 @@ class InvestigationStore:
         *,
         now: datetime,
     ) -> Hypothesis:
-        """Atomically move a hypothesis to ``target`` via a conditional UPDATE."""
+        """Atomically move a hypothesis to ``target`` via a conditional UPDATE.
+
+        The transition is validated by the hypothesis state machine and applied
+        with a conditional UPDATE on the *current* status, so an illegal rollback
+        (for example CONFIRMED -> ACTIVE) is rejected and a concurrent writer
+        cannot double-apply a transition.
+        """
         now_utc = now.astimezone(UTC)
         with self._connection_factory() as conn:
             row = conn.execute(
@@ -1057,8 +1111,9 @@ class InvestigationStore:
             if row is None:
                 raise HypothesisNotFound(f"hypothesis not found: {hypothesis_id}")
             current = Hypothesis.model_validate_json(row[0])
-            updated = current.model_copy(
-                update={"status": target, "updated_at": now_utc}
+            HYPOTHESIS_STATE_MACHINE.assert_transition(current.status, target)
+            updated = _derive_validated(
+                current, {"status": target, "updated_at": now_utc}
             )
             cursor = conn.execute(
                 """
@@ -1091,10 +1146,25 @@ class InvestigationStore:
         *,
         now: datetime,
     ) -> Conclusion:
-        """Persist a conclusion, returning the stored contract unchanged."""
+        """Persist a conclusion, returning the stored contract unchanged.
+
+        The owning agent run must belong to the named investigation, so a
+        conclusion can never be attributed across investigations.
+        """
         now_utc = now.astimezone(UTC)
         conclusion_id = f"concl-{uuid.uuid4().hex[:16]}"
         with self._connection_factory() as conn:
+            run_row = conn.execute(
+                "SELECT investigation_id FROM agent_runs WHERE agent_run_id = ?",
+                (agent_run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise AgentRunNotFound(f"agent run not found: {agent_run_id}")
+            if run_row[0] != investigation_id:
+                raise IllegalTransition(
+                    f"conclusion agent run {agent_run_id} belongs to investigation "
+                    f"{run_row[0]}, not {investigation_id}"
+                )
             conn.execute(
                 f"""
                 INSERT INTO conclusions ({", ".join(_CONCLUSION_COLUMNS)})
@@ -1143,8 +1213,25 @@ class InvestigationStore:
     def create_delegated_task(
         self, package: DelegatedTaskPackage, *, now: datetime
     ) -> DelegatedTaskPackage:
-        """Persist a delegated task package; raise AlreadyExists on a duplicate."""
+        """Persist a delegated task package; raise AlreadyExists on a duplicate.
+
+        The delegating parent run must belong to the package's investigation,
+        so a child task can never be attributed across investigations.
+        """
         with self._connection_factory() as conn:
+            parent = conn.execute(
+                "SELECT investigation_id FROM agent_runs WHERE agent_run_id = ?",
+                (package.parent_run_id,),
+            ).fetchone()
+            if parent is None:
+                raise AgentRunNotFound(
+                    f"parent run not found: {package.parent_run_id}"
+                )
+            if parent[0] != package.investigation_id:
+                raise IllegalTransition(
+                    f"delegated task parent {package.parent_run_id} belongs to "
+                    f"investigation {parent[0]}, not {package.investigation_id}"
+                )
             try:
                 conn.execute(
                     f"""
@@ -1308,8 +1395,9 @@ class InvestigationStore:
     ) -> RegistryUpdateProposal:
         """Atomically move a proposal to ``target`` via a conditional UPDATE.
 
-        Only a pending proposal may be approved, rejected or marked stale; the
-        transition stamps ``decided_at``.
+        Only a pending proposal may be decided; the move must target a different
+        status (no self-transition) so a decision cannot be re-applied or
+        replayed. The transition stamps ``decided_at``.
         """
         now_utc = now.astimezone(UTC)
         with self._connection_factory() as conn:
@@ -1320,12 +1408,13 @@ class InvestigationStore:
             if row is None:
                 raise ProposalNotFound(f"proposal not found: {proposal_id}")
             current = RegistryUpdateProposal.model_validate_json(row[0])
-            if current.status is not RegistryProposalStatus.PENDING:
+            legal_targets = _PROPOSAL_DECISION_TRANSITIONS.get(current.status, frozenset())
+            if target not in legal_targets:
                 raise IllegalTransition(
-                    f"proposal {proposal_id} is {current.status.value}, not pending"
+                    f"illegal proposal transition: {current.status.value!r} -> {target.value!r}"
                 )
-            updated = current.model_copy(
-                update={"status": target, "decided_at": now_utc}
+            updated = _derive_validated(
+                current, {"status": target, "decided_at": now_utc}
             )
             cursor = conn.execute(
                 """

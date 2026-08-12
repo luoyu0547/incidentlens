@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from incidentlens_control_plane.investigation.state_machine import (
     AgentRunStatus,
+    HypothesisStatus,
     InvestigationStatus,
     ToolCallStatus,
 )
@@ -76,14 +77,6 @@ class StopReason(StrEnum):
 class AgentRunKind(StrEnum):
     PARENT = "parent"
     CHILD = "child"
-
-
-class HypothesisStatus(StrEnum):
-    PROPOSED = "proposed"
-    ACTIVE = "active"
-    CONFIRMED = "confirmed"
-    REFUTED = "refuted"
-    SUPERSEDED = "superseded"
 
 
 class ChildReportStatus(StrEnum):
