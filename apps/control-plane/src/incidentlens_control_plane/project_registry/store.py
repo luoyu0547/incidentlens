@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Callable
 
 from incidentlens_control_plane.project_registry.types import (
     ProjectRecord,
     ProjectRegistration,
 )
+
+_CONTAINER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
 class ProjectAlreadyExists(Exception):
@@ -16,6 +20,14 @@ class ProjectAlreadyExists(Exception):
 
 class ProjectNotFound(Exception):
     """Raised when a requested project does not exist."""
+
+
+class ProjectServiceNotFound(Exception):
+    """Raised when a registry update names a service that is not registered."""
+
+
+class RegistryUpdateConflict(Exception):
+    """Raised when a proposed registry update is already applied (stale)."""
 
 
 class ProjectRegistryStore:
@@ -132,6 +144,82 @@ class ProjectRegistryStore:
             conn.commit()
 
         return record
+
+    def derive_registration_with_updates(
+        self,
+        project: ProjectRecord,
+        *,
+        service_name: str,
+        container: str | None = None,
+        host_paths: tuple[PurePosixPath, ...] = (),
+    ) -> ProjectRegistration:
+        """Derive a new ``ProjectRegistration`` from ``project`` adding a
+        container and/or host paths to ``service_name``.
+
+        No database write happens here; the caller persists the result with
+        ``replace()`` so an approved writeback stays atomic.  Raises
+        ``ProjectServiceNotFound`` when the service is not registered and
+        ``RegistryUpdateConflict`` when the container is already registered or
+        none of the proposed paths are new (the update is stale / already
+        applied by a concurrent writer).
+        """
+        services = list(project.services)
+        index = next(
+            (
+                i
+                for i, svc in enumerate(services)
+                if svc.compose_service == service_name
+            ),
+            None,
+        )
+        if index is None:
+            raise ProjectServiceNotFound(
+                f"service {service_name!r} is not registered for "
+                f"project {project.project_id!r}"
+            )
+        svc = services[index]
+
+        new_containers = list(svc.container_names)
+        new_host_paths = list(svc.allowed_host_paths)
+        added = False
+
+        if container is not None:
+            if not _CONTAINER_NAME_RE.match(container):
+                raise ValueError(f"invalid container name: {container!r}")
+            if container in new_containers:
+                raise RegistryUpdateConflict(
+                    f"container {container!r} is already registered for "
+                    f"service {service_name!r}"
+                )
+            new_containers.append(container)
+            added = True
+
+        for path in host_paths:
+            if not path.is_absolute() or ".." in path.parts:
+                raise ValueError(f"proposed path must be absolute: {path}")
+            if path not in new_host_paths:
+                new_host_paths.append(path)
+                added = True
+
+        if not added:
+            raise RegistryUpdateConflict(
+                f"proposed update for service {service_name!r} is already applied"
+            )
+
+        updated_svc = svc.model_copy(
+            update={
+                "container_names": tuple(new_containers),
+                "allowed_host_paths": tuple(new_host_paths),
+            }
+        )
+        services[index] = updated_svc
+        return ProjectRegistration(
+            project_id=project.project_id,
+            display_name=project.display_name,
+            local_source_paths=project.local_source_paths,
+            targets=project.targets,
+            services=tuple(services),
+        )
 
     def delete(self, project_id: str) -> None:
         """Delete a project by ID. Raises ProjectNotFound if not found."""
