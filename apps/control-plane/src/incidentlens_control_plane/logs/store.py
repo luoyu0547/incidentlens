@@ -320,6 +320,39 @@ class LogStore:
             ).fetchone()
         return _record_from_row(row) if row is not None else None
 
+    def list_records_for_subscription(
+        self,
+        subscription_id: str,
+        after_cursor: str | None = None,
+        limit: int = 1000,
+    ) -> tuple[LogRecord, ...]:
+        """Return records for a subscription in cursor order, optionally after a cursor.
+
+        ``after_cursor`` is a lower bound on ``cursor`` for pagination; ``None``
+        means no lower bound (start from the first record).
+        """
+        if not (1 <= limit <= 1000):
+            raise ValueError("limit must be between 1 and 1000")
+
+        clauses = ["subscription_id = ?"]
+        params: list[object] = [subscription_id]
+        if after_cursor is not None:
+            clauses.append("cursor > ?")
+            params.append(after_cursor)
+
+        with self._connection_factory() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {", ".join(_RECORD_COLUMNS)}
+                FROM log_records
+                WHERE {" AND ".join(clauses)}
+                ORDER BY cursor ASC
+                LIMIT ?
+                """,
+                (*params, limit),
+            ).fetchall()
+        return tuple(_record_from_row(row) for row in rows)
+
     def search(self, filters: LogSearchFilters, limit: int = 100) -> tuple[LogRecord, ...]:
         """Search log records, optionally restricting by filters and an FTS text match."""
         if not (1 <= limit <= 1000):

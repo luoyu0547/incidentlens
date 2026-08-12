@@ -16,6 +16,8 @@ import asyncio
 import logging
 import re
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
@@ -33,6 +35,7 @@ from incidentlens_control_plane.logs.service import LogService
 from incidentlens_control_plane.logs.sources import DockerLogSource, FileLogSource
 from incidentlens_control_plane.logs.store import LogStore
 from incidentlens_control_plane.logs.types import (
+    LogRecord,
     LogScope,
     LogSourceKind,
     LogSubscription,
@@ -112,6 +115,11 @@ class LogSubscriptionManager:
         self._batch_size: int = settings.log_subscription_batch_size
         self._poll_interval: float = settings.log_file_poll_interval_seconds
         self._running: dict[str, _SubscriptionTasks] = {}
+        # Live record fan-out for WebSocket subscribers, keyed by
+        # subscription_id.  A subscription need not be running (reader/writer
+        # tasks) to have live subscribers; the WebSocket handler registers here
+        # before replaying durable records so no live record is missed.
+        self._live_queues: dict[str, list[asyncio.Queue[LogRecord]]] = {}
 
     def running_subscription_ids(self) -> set[str]:
         """Return the ids of subscriptions with live reader/writer tasks."""
@@ -459,7 +467,64 @@ class LogSubscriptionManager:
         except Exception:
             logger.exception("failed to emit runtime event")
 
+    # --- live record fan-out (WebSocket subscribers) ---
+
+    @asynccontextmanager
+    async def subscribe_records(
+        self, subscription_id: str
+    ) -> AsyncIterator[asyncio.Queue[LogRecord]]:
+        """Register a queue for live records of a subscription.
+
+        Broker-style fan-out: every registered queue for the subscription
+        receives each live record.  Works for subscriptions that are not
+        currently running a reader/writer task (the WebSocket handler registers
+        before replaying durable records, so a record is never missed).  The
+        queue is bounded and drops the oldest record when full.
+        """
+        queue: asyncio.Queue[LogRecord] = asyncio.Queue(maxsize=self._queue_size)
+        self._live_queues.setdefault(subscription_id, []).append(queue)
+        try:
+            yield queue
+        finally:
+            queues = self._live_queues.get(subscription_id)
+            if queues is not None:
+                try:
+                    queues.remove(queue)
+                except ValueError:
+                    pass
+                if not queues:
+                    self._live_queues.pop(subscription_id, None)
+
+    def _publish_live(self, record: LogRecord) -> None:
+        """Fan out a live record to every subscribed queue for its subscription.
+
+        Never blocks: a full queue drops its oldest record, mirroring the
+        runtime event broker's backpressure behavior.
+        """
+        subscription_id = record.subscription_id
+        if subscription_id is None:
+            return
+        for queue in self._live_queues.get(subscription_id, ()):
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                queue.put_nowait(record)
+            except asyncio.QueueFull:
+                pass
+
     # --- test hooks and failure recording ---
+
+    def publish_live_for_test(self, record: LogRecord) -> None:
+        """Test hook: publish a live record to the subscription's live queues.
+
+        No-op when no WebSocket is subscribed.  Uses the same ``_publish_live``
+        fan-out the writer uses to notify live subscribers, so the WebSocket
+        dedupe logic is exercised against the real publish path.
+        """
+        self._publish_live(record)
 
     async def force_backpressure_for_test(self, subscription_id: str) -> None:
         """Test hook: simulate a docker backpressure condition.

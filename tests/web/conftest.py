@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -56,6 +56,39 @@ def make_web_log_record(
         event_time=None,
         severity=severity,
         message_redacted=message_redacted,
+        redaction_summary={},
+        normal_signal=None,
+        correlation_key=None,
+        evidence_ref_id=None,
+        created_at=now,
+    )
+
+
+def make_subscription_record(subscription_id: str, cursor: str) -> LogRecord:
+    """Build a redacted LogRecord bound to a persistent subscription.
+
+    Uses the standard web-test project/service defaults.  ``dedupe_key`` is
+    derived from the subscription id and cursor so the live duplicate of a
+    replayed record is recognized by the WS handler's dedupe set.
+    """
+    now = datetime.now(UTC)
+    return LogRecord(
+        log_id=f"log-sub-{subscription_id}-{cursor}",
+        subscription_id=subscription_id,
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.FILE,
+        scope=LogScope.HOST,
+        source_ref="/var/log/payment/app.log",
+        cursor=cursor,
+        dedupe_key=hashlib.sha256(
+            f"{subscription_id}:{cursor}".encode("utf-8")
+        ).hexdigest(),
+        observed_at=now,
+        event_time=None,
+        severity=LogSeverity.INFO,
+        message_redacted="[REDACTED_TOKEN] test",
         redaction_summary={},
         normal_signal=None,
         correlation_key=None,
