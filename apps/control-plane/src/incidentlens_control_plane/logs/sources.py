@@ -94,8 +94,15 @@ class FileLogSource:
         path: PurePosixPath,
     ) -> tuple[RawLogLine, ...]:
         session = await self._sessions.connect(target)
-        content = await session.transport.read_bytes(
-            path, max_bytes=_MAX_TAIL_READ_BYTES
+        transport = session.transport
+        # Read the TAIL of the file, not the head: stat the size first and read
+        # back from ``max(0, size - MAX_TAIL_READ_BYTES)`` so a large log's
+        # on-demand query returns recent lines rather than the stale head.
+        meta = await transport.lstat(path)
+        size = meta.size
+        offset = max(size - _MAX_TAIL_READ_BYTES, 0)
+        content = await transport.read_bytes(
+            path, offset=offset, max_bytes=_MAX_TAIL_READ_BYTES
         )
         lines = content.decode("utf-8", errors="replace").splitlines()
         start = max(len(lines) - request.tail_lines, 0)
@@ -104,11 +111,11 @@ class FileLogSource:
         return tuple(
             RawLogLine(
                 source_ref=request.source_ref,
-                cursor=f"file:{path}:{start + offset}",
+                cursor=f"file:{path}:{offset + start + offset_index}",
                 observed_at=now,
                 text=text,
             )
-            for offset, text in enumerate(tail)
+            for offset_index, text in enumerate(tail)
         )
 
     async def stream(
@@ -253,6 +260,7 @@ class DockerLogSource:
             raise LogSourceUnavailable("docker log stream unavailable") from exc
         buffer = b""
         seq = 0
+        last_valid_ts: str | None = None
         stderr_task: asyncio.Task[None] | None = None
         try:
             stderr_task = asyncio.create_task(_drain_stderr(process))
@@ -272,7 +280,10 @@ class DockerLogSource:
                 buffer = parts.pop()  # trailing partial line, if any
                 for raw in parts:
                     seq += 1
-                    yield self._line_from_raw(subscription, raw, seq)
+                    line, last_valid_ts = self._line_from_raw(
+                        subscription, raw, seq, last_valid_ts
+                    )
+                    yield line
         finally:
             if stderr_task is not None:
                 stderr_task.cancel()
@@ -281,34 +292,60 @@ class DockerLogSource:
 
     @staticmethod
     def _parse_docker_cursor(cursor: LogCursor | str | None) -> str | None:
-        """Return the ``since`` timestamp from a docker cursor, or None."""
+        """Return the ``since`` timestamp from a docker cursor, or None.
+
+        The extracted timestamp is re-validated against the docker timestamp
+        regex so a legacy ``docker:time=unknown`` cursor (or any other
+        unparseable value) returns None and the caller bootstraps ``now-1s``
+        instead of passing an invalid ``--since`` value to docker.
+        """
         if cursor is None:
             return None
         value = cursor.cursor if isinstance(cursor, LogCursor) else cursor
         prefix = "docker:time="
         if not value.startswith(prefix):
             return None
-        return value[len(prefix) :].split(":seq=", 1)[0]
+        ts = value[len(prefix) :].split(":seq=", 1)[0]
+        if not _DOCKER_TS_RE.fullmatch(ts):
+            return None
+        return ts
 
-    @classmethod
+    @staticmethod
     def _line_from_raw(
-        cls, subscription: LogSubscription, raw: bytes, seq: int
-    ) -> RawLogLine:
+        subscription: LogSubscription,
+        raw: bytes,
+        seq: int,
+        last_valid_ts: str | None,
+    ) -> tuple[RawLogLine, str | None]:
         """Build a ``RawLogLine`` from one raw streamed line.
 
         The docker ``--timestamps`` prefix (e.g. ``2026-08-12T10:00:00Z``) is
-        parsed into the cursor timestamp and stripped from the emitted text;
-        lines without a parseable prefix use a literal ``unknown`` timestamp.
+        parsed into the cursor timestamp and stripped from the emitted text.
+        A continuation line (no parseable timestamp prefix) reuses the last
+        valid timestamp so its cursor stays a parseable
+        ``docker:time=<ts>:seq=<n>`` identity instead of the literal
+        ``unknown`` (which would break the ``--since`` cursor on the next
+        reconnect).  Returns the updated ``last_valid_ts`` so the caller can
+        thread it across lines.
         """
         text = raw.decode("utf-8", errors="replace")
         head, sep, rest = text.partition(" ")
         if sep and _DOCKER_TS_RE.match(head):
             ts, message = head, rest
+            last_valid_ts = ts
         else:
-            ts, message = "unknown", text
-        return RawLogLine(
-            source_ref=subscription.source_ref,
-            cursor=f"docker:time={ts}:seq={seq}",
-            observed_at=datetime.now(timezone.utc),
-            text=message,
+            message = text
+            if last_valid_ts is None:
+                # A continuation line with no prior timestamp: use a parseable
+                # epoch fallback so the cursor never reads ``unknown``.
+                last_valid_ts = "1970-01-01T00:00:00Z"
+            ts = last_valid_ts
+        return (
+            RawLogLine(
+                source_ref=subscription.source_ref,
+                cursor=f"docker:time={ts}:seq={seq}",
+                observed_at=datetime.now(timezone.utc),
+                text=message,
+            ),
+            last_valid_ts,
         )
