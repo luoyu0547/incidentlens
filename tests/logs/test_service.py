@@ -278,3 +278,47 @@ async def test_docker_reconnect_overlap_uses_stable_dedupe_identity(
     )
     assert len(stored) == 1
 
+
+@pytest.mark.asyncio
+async def test_docker_query_persist_keeps_distinct_offset_lines(
+    tmp_path, target_registration
+) -> None:
+    """Distinct docker query lines must not collapse into one dedupe_key.
+
+    Query cursors are ``docker:<ref>:<offset>`` (not ``docker:time=...``), so
+    the dedupe identity must fall back to the full cursor.  Two distinct lines
+    with identical redacted messages persist as two records, while the replayed
+    ``docker:time=`` stream line (round-1 test) still dedupes to one.
+    """
+    from incidentlens_control_plane.remote_ops.fakes import FakeChangeTransport
+
+    service = build_test_log_service(tmp_path, target_registration)
+    session = await service._sessions.connect(target_registration)
+    session.transport = FakeChangeTransport()
+    session.transport.docker_logs[("payments-api-1", 50)] = (
+        b"2026-08-12T10:00:00Z ERROR same\n"
+        b"2026-08-12T10:00:00Z ERROR same\n"
+    )
+
+    records = await service.query(
+        LogQueryRequest(
+            project_id="payments",
+            target_id="dev-a",
+            service_name="payment-api",
+            source_kind=LogSourceKind.DOCKER,
+            scope=LogScope.CONTAINER,
+            source_ref="payments-api-1",
+            tail_lines=50,
+            persist=True,
+            create_evidence=False,
+        ),
+        now=datetime(2026, 8, 12, 10, 0, tzinfo=UTC),
+    )
+
+    assert len(records) == 2
+    assert len({record.dedupe_key for record in records}) == 2
+    stored = service._store.search(
+        LogSearchFilters(project_id="payments"), limit=10
+    )
+    assert len(stored) == 2
+
