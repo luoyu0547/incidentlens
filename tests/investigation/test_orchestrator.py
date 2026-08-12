@@ -60,12 +60,14 @@ from incidentlens_control_plane.remote_ops.transport import RemoteTimeoutError
 from investigation.test_tool_executor import (
     CONTAINER,
     CONTAINER_ROOT,
+    LOG_PATH,
     PROJECT_ID,
     SERVICE,
     TARGET_ID,
     HarnessTransportFactory,
     build_harness,
     make_scope,
+    seed_host_log_file,
     tool_request,
 )
 
@@ -281,6 +283,64 @@ async def test_ungrounded_conclusion_pauses_missing_evidence(tmp_path: Any) -> N
     )
 
 
+async def test_completed_stop_without_conclusion_pauses_missing_evidence(tmp_path: Any) -> None:
+    """I4: a COMPLETED stop with zero conclusions must not complete ungrounded."""
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(harness, status=InvestigationStatus.RUNNING)
+    _make_parent_run(harness)
+    registry.set_script(
+        "run-1",
+        [
+            StopStep(
+                stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="done")
+            )
+        ],
+    )
+    orchestrator, service, _ = build_orchestrator(harness, registry)
+
+    final = await orchestrator.run("run-1")
+
+    assert final.status is AgentRunStatus.PAUSED_MISSING_EVIDENCE
+    assert final.stop_reason is StopReason.MISSING_EVIDENCE
+    assert (
+        service.get_investigation("inv-1").status is InvestigationStatus.PAUSED_MISSING_EVIDENCE
+    )
+
+
+async def test_no_new_evidence_round_top_stop_reason_is_budget_no_new_evidence(
+    tmp_path: Any,
+) -> None:
+    """M6: the round-top no-new-evidence pause is not mislabelled as evidence."""
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(harness, status=InvestigationStatus.RUNNING)
+    _make_parent_run(
+        harness,
+        status=AgentRunStatus.RUNNING,
+        budget=AgentBudget(max_no_new_evidence_rounds=2),
+    )
+    run = harness.investigations.get_agent_run("run-1")
+    run = run.model_copy(
+        update={"usage": UsageCounters(consecutive_no_new_evidence_rounds=2)}
+    )
+    harness.investigations.update_agent_run(run)
+    registry.set_script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=(tool_request("registry_info", "registry-call"),)
+            )
+        ],
+    )
+    orchestrator, service, _ = build_orchestrator(harness, registry)
+
+    final = await orchestrator.run("run-1")
+
+    assert final.status is AgentRunStatus.PAUSED_MISSING_EVIDENCE
+    assert final.stop_reason is StopReason.BUDGET_NO_NEW_EVIDENCE
+
+
 async def test_round_budget_exhaustion_pauses(tmp_path: Any) -> None:
     harness = build_harness(tmp_path)
     registry = FakeProviderRegistry()
@@ -476,7 +536,7 @@ async def test_delegate_child_tool_spawns_child(tmp_path: Any) -> None:
     registry.set_script(
         "child-1",
         [
-            RequestToolsStep(tool_requests=(tool_request("registry_info", "call-1"),)),
+            RequestToolsStep(tool_requests=(tool_request("registry_info", "child-call-1"),)),
             StopStep(
                 stop_signal=StopSignal(
                     stop_reason=StopReason.COMPLETED, summary="child done"
@@ -510,13 +570,18 @@ async def test_parent_receives_child_report_and_closes_container_session(tmp_pat
                     scope=_container_scope(),
                 )
             ),
+            # A registry round gives the parent its own evidence so the COMPLETED
+            # stop is grounded even before the child report is drained.
+            RequestToolsStep(
+                tool_requests=(tool_request("registry_info", "parent-registry-call"),)
+            ),
             StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="done")),
         ],
     )
     registry.set_script(
         "child-1",
         [
-            RequestToolsStep(tool_requests=(tool_request("registry_info", "call-1"),)),
+            RequestToolsStep(tool_requests=(tool_request("registry_info", "child-call-1"),)),
             StopStep(
                 stop_signal=StopSignal(
                     stop_reason=StopReason.COMPLETED, summary="child done"
@@ -636,14 +701,21 @@ async def test_parent_delegates_two_children_concurrently(tmp_path: Any) -> None
                     scope=_container_scope(),
                 )
             ),
+            RequestToolsStep(
+                tool_requests=(tool_request("registry_info", "parent-registry-call"),)
+            ),
             StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="done")),
         ],
     )
-    for child_id in ("child-1", "child-2"):
+    for index, child_id in enumerate(("child-1", "child-2")):
         registry.set_script(
             child_id,
             [
-                RequestToolsStep(tool_requests=(tool_request("registry_info", "call-1"),)),
+                RequestToolsStep(
+                    tool_requests=(
+                        tool_request("registry_info", f"child-{index}-call"),
+                    ),
+                ),
                 StopStep(
                     stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="child done")
                 ),
@@ -783,8 +855,7 @@ async def test_resume_from_checkpoint_reenters_round_idempotently(tmp_path: Any)
         "run-1",
         [
             RequestToolsStep(
-                tool_requests=(tool_request("log_search", "call-1",
-                                            service_name=SERVICE, text="timeout"),)
+                tool_requests=(tool_request("registry_info", "registry-call"),)
             ),
             StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="done")),
         ],
@@ -838,7 +909,12 @@ async def test_service_create_and_start(tmp_path: Any) -> None:
     _make_parent_run(harness, run_id="run-1", investigation_id=investigation.investigation_id)
     registry.set_script(
         "run-1",
-        [StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="done"))],
+        [
+            RequestToolsStep(
+                tool_requests=(tool_request("registry_info", "registry-call"),)
+            ),
+            StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="done")),
+        ],
     )
     final = await service.start(investigation.investigation_id, make_scope())
 
@@ -857,6 +933,192 @@ async def test_service_start_terminal_investigation_raises(tmp_path: Any) -> Non
 
     with pytest.raises(InvestigationAlreadyTerminal):
         await service.start(investigation.investigation_id, make_scope())
+
+
+# ---------------------------------------------------------------------------
+# Evidence / output / tool-call budget enforcement (I1 / I2) and lost updates
+# ---------------------------------------------------------------------------
+
+
+async def test_run_evidence_budget_exhaustion_pauses(tmp_path: Any) -> None:
+    harness = build_harness(tmp_path)
+    await seed_host_log_file(harness, "line one\nerror line two\nline three\n")
+    registry = FakeProviderRegistry()
+    _make_investigation(harness, status=InvestigationStatus.RUNNING)
+    _make_parent_run(harness, budget=AgentBudget(max_evidence=1))
+    registry.set_script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=(
+                    tool_request(
+                        "log_query", "log-call-1", service_name=SERVICE,
+                        source_kind="file", source_ref=str(LOG_PATH),
+                    ),
+                )
+            )
+        ],
+    )
+    orchestrator, service, _ = build_orchestrator(harness, registry)
+
+    final = await orchestrator.run("run-1")
+
+    assert final.status is AgentRunStatus.PAUSED_BUDGET
+    assert final.stop_reason is StopReason.BUDGET_EVIDENCE
+    # The paused run never exceeded its evidence cap.
+    assert final.usage.evidence_count <= final.budget.max_evidence
+
+
+async def test_investigation_evidence_budget_exhaustion_pauses(tmp_path: Any) -> None:
+    harness = build_harness(tmp_path)
+    await seed_host_log_file(harness, "line one\nerror line two\nline three\n")
+    registry = FakeProviderRegistry()
+    _make_investigation(
+        harness,
+        status=InvestigationStatus.RUNNING,
+        budget=InvestigationBudget(max_evidence=1),
+    )
+    _make_parent_run(harness)
+    registry.set_script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=(
+                    tool_request(
+                        "log_query", "log-call-1", service_name=SERVICE,
+                        source_kind="file", source_ref=str(LOG_PATH),
+                    ),
+                )
+            )
+        ],
+    )
+    orchestrator, service, _ = build_orchestrator(harness, registry)
+
+    final = await orchestrator.run("run-1")
+
+    assert final.status is AgentRunStatus.PAUSED_BUDGET
+    assert final.stop_reason is StopReason.BUDGET_EVIDENCE
+    inv = service.get_investigation("inv-1")
+    assert inv.usage.evidence_count <= inv.budget.max_evidence
+
+
+async def test_investigation_tool_call_budget_exhaustion_pauses(tmp_path: Any) -> None:
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(
+        harness,
+        status=InvestigationStatus.RUNNING,
+        budget=InvestigationBudget(max_tool_calls=1),
+    )
+    _make_parent_run(harness)
+    registry.set_script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=(
+                    tool_request("registry_info", "registry-call-1"),
+                    tool_request("registry_info", "registry-call-2"),
+                )
+            )
+        ],
+    )
+    orchestrator, service, _ = build_orchestrator(harness, registry)
+
+    final = await orchestrator.run("run-1")
+
+    assert final.status is AgentRunStatus.PAUSED_BUDGET
+    assert final.stop_reason is StopReason.BUDGET_TOOL_CALLS
+
+
+async def test_run_cumulative_output_budget_exhaustion_pauses(tmp_path: Any) -> None:
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(harness, status=InvestigationStatus.RUNNING)
+    _make_parent_run(harness, budget=AgentBudget(max_total_output_bytes=1))
+    registry.set_script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=(tool_request("registry_info", "registry-call"),)
+            )
+        ],
+    )
+    orchestrator, service, _ = build_orchestrator(harness, registry)
+
+    final = await orchestrator.run("run-1")
+
+    assert final.status is AgentRunStatus.PAUSED_BUDGET
+    assert final.stop_reason is StopReason.BUDGET_OUTPUT
+    assert final.usage.total_output_bytes <= final.budget.max_total_output_bytes
+
+
+async def test_investigation_output_budget_exhaustion_pauses(tmp_path: Any) -> None:
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(
+        harness,
+        status=InvestigationStatus.RUNNING,
+        budget=InvestigationBudget(max_total_output_bytes=1),
+    )
+    _make_parent_run(harness)
+    registry.set_script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=(tool_request("registry_info", "registry-call"),)
+            )
+        ],
+    )
+    orchestrator, service, _ = build_orchestrator(harness, registry)
+
+    final = await orchestrator.run("run-1")
+
+    assert final.status is AgentRunStatus.PAUSED_BUDGET
+    assert final.stop_reason is StopReason.BUDGET_OUTPUT
+    inv = service.get_investigation("inv-1")
+    assert inv.usage.total_output_bytes <= inv.budget.max_total_output_bytes
+
+
+async def test_child_usage_increments_not_clobbered_by_parent(tmp_path: Any) -> None:
+    """A child's investigation-usage increments survive the parent's writes."""
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(harness, status=InvestigationStatus.RUNNING)
+    _make_parent_run(harness)
+    registry.set_script(
+        "run-1",
+        [
+            DelegateChildStep(
+                delegation=ChildDelegationRequest(
+                    child_run_id="child-1", task_prompt="inspect the container",
+                    scope=_container_scope(),
+                )
+            ),
+            RequestToolsStep(
+                tool_requests=(tool_request("registry_info", "parent-registry-call"),)
+            ),
+            StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="done")),
+        ],
+    )
+    registry.set_script(
+        "child-1",
+        [
+            RequestToolsStep(tool_requests=(tool_request("registry_info", "child-call-1"),)),
+            StopStep(
+                stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="child done")
+            ),
+        ],
+    )
+    orchestrator, service, _ = build_orchestrator(harness, registry)
+
+    final = await orchestrator.run("run-1")
+
+    assert final.status is AgentRunStatus.COMPLETED
+    inv = service.get_investigation("inv-1")
+    # parent rounds (3) + child rounds (2) all counted, child tool call counted.
+    assert inv.usage.rounds == 5
+    assert inv.usage.tool_calls == 2  # parent registry_info + child registry_info
+    assert inv.usage.children == 1
 
 
 # ---------------------------------------------------------------------------

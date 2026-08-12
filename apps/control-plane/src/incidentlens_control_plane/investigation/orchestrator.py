@@ -94,6 +94,10 @@ class RunNotFound(Exception):
     """Raised when a requested agent run does not exist."""
 
 
+class _EvidenceBudgetExceeded(Exception):
+    """Raised when attaching evidence would exceed the run/investigation cap."""
+
+
 def _iso_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
@@ -162,224 +166,271 @@ class AgentOrchestrator:
         child_reports: list[ChildReport] = []
 
         while True:
-            # Yield once per iteration so a concurrent cancellation lands between
-            # rounds and background children make progress while the parent runs
-            # its own rounds (the parent never blocks on them until it stops).
-            await asyncio.sleep(0)
-
-            run = self._store.get_agent_run(agent_run_id)
-            investigation = self._store.get_investigation(run.investigation_id)
-            now = self._now()
-
-            # Drain child tasks that already finished (background concurrency).
-            if pending_children:
-                drained = self._drain_completed_children(run, pending_children, child_reports)
-                if drained is not None:
-                    run = drained
-                    self._store.update_agent_run(run)
-                    run = self._store.get_agent_run(agent_run_id)
-
-            # -- terminal / cancellation / waiting states --------------------
-            if AGENT_RUN_STATE_MACHINE.is_terminal(run.status):
-                if (
-                    run.kind is AgentRunKind.PARENT
-                    and run.status is AgentRunStatus.CANCELLED
-                    and investigation.status is InvestigationStatus.CANCEL_REQUESTED
-                ):
-                    # A run cancelled before its loop ran (e.g. a CREATED run
-                    # parked directly) still owns the investigation final state.
-                    self._transition_investigation(
-                        investigation, InvestigationStatus.CANCELLED,
-                        now=now, stop_reason=StopReason.CANCELLED,
-                    )
-                return run
-            if INVESTIGATION_STATE_MACHINE.is_terminal(investigation.status):
-                run = await self._drain_all_children(run, pending_children, child_reports, now)
-                return self._sync_run_to_investigation(run, investigation, now)
-            if run.status is AgentRunStatus.CANCEL_REQUESTED:
-                run = await self._drain_all_children(run, pending_children, child_reports, now)
-                self._transition_run(
-                    run, AgentRunStatus.CANCELLED, now=now, stop_reason=StopReason.CANCELLED
-                )
-                if investigation.status is InvestigationStatus.CANCEL_REQUESTED:
-                    self._transition_investigation(
-                        investigation, InvestigationStatus.CANCELLED,
-                        now=now, stop_reason=StopReason.CANCELLED,
-                    )
-                return self._store.get_agent_run(agent_run_id)
-            if run.status is AgentRunStatus.WAITING_APPROVAL:
-                # Approval decisions are Task 8's responsibility; a run blocked
-                # on approval stays paused until the decision resolves it.
-                return run
-            if run.status is AgentRunStatus.WAITING_CHILDREN:
-                run = await self._resume_waiting_children(run, pending_children, child_reports, now)
-                continue
-            if run.status in {
-                AgentRunStatus.PAUSED_BUDGET,
-                AgentRunStatus.PAUSED_MISSING_EVIDENCE,
-                AgentRunStatus.PAUSED_UNCERTAIN_STATE,
-            }:
-                # Resume re-evaluates the pause condition under current budgets.
-                run = self._transition_run(run, AgentRunStatus.RUNNING, now=now)
-                self._transition_investigation(
-                    investigation, InvestigationStatus.RUNNING, now=now
-                )
+            try:
+                outcome = await self._loop_step(agent_run_id, pending_children, child_reports)
+            except _EvidenceBudgetExceeded as exc:
+                # A child report could not be attached within the run's evidence
+                # budget: pause safely instead of silently exceeding the cap.
+                run = self._store.get_agent_run(agent_run_id)
                 investigation = self._store.get_investigation(run.investigation_id)
-                run = self._store.get_agent_run(agent_run_id)
-                continue
-            if run.status is AgentRunStatus.CREATED:
-                run = self._transition_run(run, AgentRunStatus.RUNNING, now=now)
-                run = self._store.get_agent_run(agent_run_id)
-
-            # -- budget checks (investigation level, then run level) ----------
-            ok, reason = self._guard.check_investigation_before_model_turn(
-                investigation, now=now
-            )
-            if not ok:
-                run = await self._drain_all_children(run, pending_children, child_reports, now)
-                self._pause(run, investigation, self._pause_status_for(reason), now=now,
-                            reason=reason, stop_reason=self._stop_reason_for(reason))
-                return self._store.get_agent_run(agent_run_id)
-
-            ok, reason = self._guard.check_before_model_turn(run, now=now)
-            if not ok:
-                run = await self._drain_all_children(run, pending_children, child_reports, now)
-                self._pause(run, investigation, self._pause_status_for(reason), now=now,
-                            reason=reason, stop_reason=self._stop_reason_for(reason))
-                return self._store.get_agent_run(agent_run_id)
-
-            # -- one bounded round -------------------------------------------
-            round_number = run.usage.rounds + 1
-            before_seq = 2 * round_number - 1
-            post_seq = 2 * round_number
-            self._write_checkpoint(run, sequence=before_seq, round_number=round_number, now=now)
-
-            request = self._build_request(run, investigation, round_number, child_reports)
-            try:
-                result = await self._call_provider(request)
-            except ProviderCrash as exc:
-                run = await self._drain_all_children(run, pending_children, child_reports, now)
-                return self._fail(run, investigation, now, reason=str(exc))
-            except ProviderError as exc:
-                run = await self._drain_all_children(run, pending_children, child_reports, now)
-                return self._fail(run, investigation, now, reason=str(exc))
-            except Exception as exc:  # noqa: BLE001 - a misbehaving provider must not crash the loop
-                run = await self._drain_all_children(run, pending_children, child_reports, now)
-                return self._fail(run, investigation, now, reason=str(exc))
-
-            run = self._bump_usage(run, rounds=run.usage.rounds + 1)
-            self._store.update_agent_run(run)
-            run = self._store.get_agent_run(agent_run_id)
-            self._append_round_summary(run, round_number, result.usage, now)
-
-            run = self._bump_usage(
-                run,
-                total_output_bytes=run.usage.total_output_bytes + result.usage.output_bytes,
-            )
-            self._store.update_agent_run(run)
-            run = self._store.get_agent_run(agent_run_id)
-
-            validator = ProviderOutputValidator(request, run)
-            try:
-                validator.validate(result)
-            except (ProviderOutputRejected, ProviderContextMismatch) as exc:
-                run = await self._drain_all_children(run, pending_children, child_reports, now)
-                return self._fail(run, investigation, now, reason=str(exc))
-
-            # Materialize and persist proposed hypotheses.
-            for proposal in result.hypotheses:
-                hypothesis = self._materialize_hypothesis(run, proposal, now)
-                self._store.create_hypothesis(hypothesis)
-                run = run.model_copy(
-                    update={"hypotheses": run.hypotheses + (hypothesis,)}
-                )
-
-            evidence_before = {ref.evidence_id for ref in run.evidence}
-
-            # Act on the validated turn: stop, delegate, tools, or continue.
-            if result.stop_signal is not None:
-                run = await self._drain_all_children(run, pending_children, child_reports, now)
-                run = self._handle_stop(
-                    run, investigation, result.stop_signal, result.conclusions, now
-                )
-                run, investigation = self._reload_pair(run)
-                run, investigation = self._finish_round_counters(
-                    run, investigation, evidence_before, now
-                )
-                self._store.update_agent_run(run)
-                self._store.update_investigation(investigation)
-                self._write_checkpoint(run, sequence=post_seq, round_number=round_number, now=now)
-                return self._store.get_agent_run(agent_run_id)
-
-            if result.child_delegation is not None:
-                run, stop = await self._delegate_child(
-                    run, investigation, result.child_delegation, pending_children, now
-                )
-                run, investigation = self._reload_pair(run)
-                run, investigation = self._finish_round_counters(
-                    run, investigation, evidence_before, now
-                )
-                self._store.update_agent_run(run)
-                self._store.update_investigation(investigation)
-                self._write_checkpoint(run, sequence=post_seq, round_number=round_number, now=now)
-                if stop:
-                    return self._store.get_agent_run(agent_run_id)
-                continue
-
-            if result.tool_requests:
-                run, investigation, stop = await self._execute_tools(
-                    run, investigation, result.tool_requests, now
-                )
-                run, investigation = self._reload_pair(run)
-                run, investigation = self._finish_round_counters(
-                    run, investigation, evidence_before, now
-                )
-                self._store.update_agent_run(run)
-                self._store.update_investigation(investigation)
-                self._write_checkpoint(run, sequence=post_seq, round_number=round_number, now=now)
-                if stop:
-                    return self._store.get_agent_run(agent_run_id)
-                # A ``delegate_child`` tool persisted a delegated-task package
-                # without spawning its loop; launch those children now.
-                self._spawn_delegated_packages(run, pending_children, now)
-                continue
-
-            # Hypotheses/conclusions with no stop, delegation or tool: an
-            # ungrounded conclusion is a missing-evidence signal; otherwise fold
-            # and continue (the no-new-evidence counter catches a stalled run).
-            ungrounded = any(not conclusion.evidence_ids for conclusion in result.conclusions)
-            for conclusion in result.conclusions:
-                self._persist_conclusion(run, conclusion, now)
-            if ungrounded:
-                run, investigation = self._finish_round_counters(
-                    run, investigation, evidence_before, now
-                )
-                self._store.update_agent_run(run)
-                self._store.update_investigation(investigation)
-                self._write_checkpoint(run, sequence=post_seq, round_number=round_number, now=now)
                 self._pause(
-                    run, investigation, AgentRunStatus.PAUSED_MISSING_EVIDENCE,
-                    now=now, reason="conclusion cites no evidence",
-                    stop_reason=StopReason.MISSING_EVIDENCE,
+                    run, investigation, AgentRunStatus.PAUSED_BUDGET,
+                    now=self._now(), reason=str(exc),
+                    stop_reason=StopReason.BUDGET_EVIDENCE,
                 )
                 return self._store.get_agent_run(agent_run_id)
+            if outcome is not None:
+                return outcome
+
+    async def _loop_step(
+        self,
+        agent_run_id: str,
+        pending_children: list[tuple[str, asyncio.Task]],
+        child_reports: list[ChildReport],
+    ) -> AgentRun | None:
+        """Run one bounded iteration; ``None`` means continue to the next round."""
+        # Yield once per iteration so a concurrent cancellation lands between
+        # rounds and background children make progress while the parent runs
+        # its own rounds (the parent never blocks on them until it stops).
+        await asyncio.sleep(0)
+
+        run = self._store.get_agent_run(agent_run_id)
+        investigation = self._store.get_investigation(run.investigation_id)
+        now = self._now()
+
+        # Drain child tasks that already finished (background concurrency).
+        if pending_children:
+            drained = self._drain_completed_children(
+                run, investigation, pending_children, child_reports, now
+            )
+            if drained is not None:
+                run, investigation = drained
+                self._store.update_agent_run(run)
+                self._store.update_investigation(investigation)
+                run = self._store.get_agent_run(agent_run_id)
+                investigation = self._store.get_investigation(run.investigation_id)
+
+        # -- terminal / cancellation / waiting states --------------------
+        if AGENT_RUN_STATE_MACHINE.is_terminal(run.status):
+            if (
+                run.kind is AgentRunKind.PARENT
+                and run.status is AgentRunStatus.CANCELLED
+                and investigation.status is InvestigationStatus.CANCEL_REQUESTED
+            ):
+                # A run cancelled before its loop ran (e.g. a CREATED run
+                # parked directly) still owns the investigation final state.
+                self._transition_investigation(
+                    investigation, InvestigationStatus.CANCELLED,
+                    now=now, stop_reason=StopReason.CANCELLED,
+                )
+            return run
+        if INVESTIGATION_STATE_MACHINE.is_terminal(investigation.status):
+            run, investigation = await self._drain_all_children(
+                run, investigation, pending_children, child_reports, now
+            )
+            return self._sync_run_to_investigation(run, investigation, now)
+        if run.status is AgentRunStatus.CANCEL_REQUESTED:
+            run, investigation = await self._drain_all_children(
+                run, investigation, pending_children, child_reports, now
+            )
+            self._transition_run(
+                run, AgentRunStatus.CANCELLED, now=now, stop_reason=StopReason.CANCELLED
+            )
+            if investigation.status is InvestigationStatus.CANCEL_REQUESTED:
+                self._transition_investigation(
+                    investigation, InvestigationStatus.CANCELLED,
+                    now=now, stop_reason=StopReason.CANCELLED,
+                )
+            return self._store.get_agent_run(agent_run_id)
+        if run.status is AgentRunStatus.WAITING_APPROVAL:
+            # Approval decisions are Task 8's responsibility; a run blocked
+            # on approval stays paused until the decision resolves it.
+            return run
+        if run.status is AgentRunStatus.WAITING_CHILDREN:
+            run, investigation = await self._resume_waiting_children(
+                run, investigation, pending_children, child_reports, now
+            )
+            return None
+        if run.status in {
+            AgentRunStatus.PAUSED_BUDGET,
+            AgentRunStatus.PAUSED_MISSING_EVIDENCE,
+            AgentRunStatus.PAUSED_UNCERTAIN_STATE,
+        }:
+            # Resume re-evaluates the pause condition under current budgets.
+            run = self._transition_run(run, AgentRunStatus.RUNNING, now=now)
+            self._transition_investigation(
+                investigation, InvestigationStatus.RUNNING, now=now
+            )
+            return None
+        if run.status is AgentRunStatus.CREATED:
+            run = self._transition_run(run, AgentRunStatus.RUNNING, now=now)
+            return None
+
+        # -- budget checks (investigation level, then run level) ----------
+        ok, reason = self._guard.check_investigation_before_model_turn(
+            investigation, now=now
+        )
+        if not ok:
+            run, investigation = await self._drain_all_children(
+                run, investigation, pending_children, child_reports, now
+            )
+            self._pause(run, investigation, self._pause_status_for(reason), now=now,
+                        reason=reason, stop_reason=self._stop_reason_for(reason))
+            return self._store.get_agent_run(agent_run_id)
+
+        ok, reason = self._guard.check_before_model_turn(run, now=now)
+        if not ok:
+            run, investigation = await self._drain_all_children(
+                run, investigation, pending_children, child_reports, now
+            )
+            self._pause(run, investigation, self._pause_status_for(reason), now=now,
+                        reason=reason, stop_reason=self._stop_reason_for(reason))
+            return self._store.get_agent_run(agent_run_id)
+
+        # -- one bounded round -------------------------------------------
+        round_number = run.usage.rounds + 1
+        before_seq = 2 * round_number - 1
+        post_seq = 2 * round_number
+        self._write_checkpoint(run, sequence=before_seq, round_number=round_number, now=now)
+
+        request = self._build_request(run, investigation, round_number, child_reports)
+        try:
+            result = await self._call_provider(request)
+        except ProviderCrash as exc:
+            run, investigation = await self._drain_all_children(
+                run, investigation, pending_children, child_reports, now
+            )
+            return self._fail(run, investigation, now, reason=str(exc))
+        except ProviderError as exc:
+            run, investigation = await self._drain_all_children(
+                run, investigation, pending_children, child_reports, now
+            )
+            return self._fail(run, investigation, now, reason=str(exc))
+        except Exception as exc:  # noqa: BLE001 - a misbehaving provider must not crash the loop
+            run, investigation = await self._drain_all_children(
+                run, investigation, pending_children, child_reports, now
+            )
+            return self._fail(run, investigation, now, reason=str(exc))
+
+        run = self._bump_usage(run, rounds=run.usage.rounds + 1)
+        self._store.update_agent_run(run)
+        run = self._store.get_agent_run(agent_run_id)
+        self._append_round_summary(run, round_number, result.usage, now)
+
+        run = self._bump_usage(
+            run,
+            total_output_bytes=run.usage.total_output_bytes + result.usage.output_bytes,
+        )
+        self._store.update_agent_run(run)
+        run = self._store.get_agent_run(agent_run_id)
+
+        validator = ProviderOutputValidator(request, run)
+        try:
+            validator.validate(result)
+        except (ProviderOutputRejected, ProviderContextMismatch) as exc:
+            run, investigation = await self._drain_all_children(
+                run, investigation, pending_children, child_reports, now
+            )
+            return self._fail(run, investigation, now, reason=str(exc))
+
+        # Materialize and persist proposed hypotheses.
+        for proposal in result.hypotheses:
+            hypothesis = self._materialize_hypothesis(run, proposal, now)
+            self._store.create_hypothesis(hypothesis)
+            run = run.model_copy(
+                update={"hypotheses": run.hypotheses + (hypothesis,)}
+            )
+
+        evidence_before = {ref.evidence_id for ref in run.evidence}
+
+        # Act on the validated turn: stop, delegate, tools, or continue.
+        if result.stop_signal is not None:
+            run, investigation = await self._drain_all_children(
+                run, investigation, pending_children, child_reports, now
+            )
+            run = self._handle_stop(
+                run, investigation, result.stop_signal, result.conclusions, now
+            )
+            run, investigation = self._reload_pair(run)
             run, investigation = self._finish_round_counters(
                 run, investigation, evidence_before, now
             )
             self._store.update_agent_run(run)
             self._store.update_investigation(investigation)
             self._write_checkpoint(run, sequence=post_seq, round_number=round_number, now=now)
+            return self._store.get_agent_run(agent_run_id)
 
-            if (
-                run.usage.consecutive_no_new_evidence_rounds
-                >= run.budget.max_no_new_evidence_rounds
-            ):
-                self._pause(
-                    run, investigation, AgentRunStatus.PAUSED_MISSING_EVIDENCE,
-                    now=now, reason="no-new-evidence budget exhausted",
-                    stop_reason=StopReason.BUDGET_NO_NEW_EVIDENCE,
-                )
+        if result.child_delegation is not None:
+            run, stop = await self._delegate_child(
+                run, investigation, result.child_delegation, pending_children, now
+            )
+            run, investigation = self._reload_pair(run)
+            run, investigation = self._finish_round_counters(
+                run, investigation, evidence_before, now
+            )
+            self._store.update_agent_run(run)
+            self._store.update_investigation(investigation)
+            self._write_checkpoint(run, sequence=post_seq, round_number=round_number, now=now)
+            if stop:
                 return self._store.get_agent_run(agent_run_id)
+            return None
+
+        if result.tool_requests:
+            run, investigation, stop = await self._execute_tools(
+                run, investigation, result.tool_requests, now
+            )
+            run, investigation = self._reload_pair(run)
+            run, investigation = self._finish_round_counters(
+                run, investigation, evidence_before, now
+            )
+            self._store.update_agent_run(run)
+            self._store.update_investigation(investigation)
+            self._write_checkpoint(run, sequence=post_seq, round_number=round_number, now=now)
+            if stop:
+                return self._store.get_agent_run(agent_run_id)
+            # A ``delegate_child`` tool persisted a delegated-task package
+            # without spawning its loop; launch those children now.
+            self._spawn_delegated_packages(run, pending_children, now)
+            return None
+
+        # Hypotheses/conclusions with no stop, delegation or tool: an
+        # ungrounded conclusion is a missing-evidence signal; otherwise fold
+        # and continue (the no-new-evidence counter catches a stalled run).
+        ungrounded = any(not conclusion.evidence_ids for conclusion in result.conclusions)
+        for conclusion in result.conclusions:
+            self._persist_conclusion(run, conclusion, now)
+        if ungrounded:
+            run, investigation = self._finish_round_counters(
+                run, investigation, evidence_before, now
+            )
+            self._store.update_agent_run(run)
+            self._store.update_investigation(investigation)
+            self._write_checkpoint(run, sequence=post_seq, round_number=round_number, now=now)
+            self._pause(
+                run, investigation, AgentRunStatus.PAUSED_MISSING_EVIDENCE,
+                now=now, reason="conclusion cites no evidence",
+                stop_reason=StopReason.MISSING_EVIDENCE,
+            )
+            return self._store.get_agent_run(agent_run_id)
+        run, investigation = self._finish_round_counters(
+            run, investigation, evidence_before, now
+        )
+        self._store.update_agent_run(run)
+        self._store.update_investigation(investigation)
+        self._write_checkpoint(run, sequence=post_seq, round_number=round_number, now=now)
+
+        if (
+            run.usage.consecutive_no_new_evidence_rounds
+            >= run.budget.max_no_new_evidence_rounds
+        ):
+            self._pause(
+                run, investigation, AgentRunStatus.PAUSED_MISSING_EVIDENCE,
+                now=now, reason="no-new-evidence budget exhausted",
+                stop_reason=StopReason.BUDGET_NO_NEW_EVIDENCE,
+            )
+            return self._store.get_agent_run(agent_run_id)
+
+        return None
 
     # -- provider -------------------------------------------------------------
 
@@ -443,12 +494,15 @@ class AgentOrchestrator:
     ) -> AgentRun:
         reason = stop_signal.stop_reason
         if reason is StopReason.COMPLETED:
-            # A conclusion that cites no evidence cannot ground completion; the
-            # loop pauses at missing evidence instead of fabricating a result.
-            if any(not conclusion.evidence_ids for conclusion in conclusions):
+            # Completion must be grounded: at least one conclusion citing run
+            # evidence.  A COMPLETED stop with no conclusions (or with an
+            # ungrounded one) is a missing-evidence signal, never a fabrication.
+            if not conclusions or any(
+                not conclusion.evidence_ids for conclusion in conclusions
+            ):
                 self._pause(
                     run, investigation, AgentRunStatus.PAUSED_MISSING_EVIDENCE,
-                    now=now, reason="conclusion cites no evidence",
+                    now=now, reason="completion requires an evidence-grounded conclusion",
                     stop_reason=StopReason.MISSING_EVIDENCE,
                 )
                 return self._store.get_agent_run(run.agent_run_id)
@@ -582,14 +636,14 @@ class AgentOrchestrator:
             return StopReason.BUDGET_TOOL_CALLS
         if "wall-clock" in reason or "wall clock" in reason:
             return StopReason.BUDGET_TIME
+        if "no-new-evidence" in reason or "no new evidence" in reason:
+            return StopReason.BUDGET_NO_NEW_EVIDENCE
         if "output" in reason:
             return StopReason.BUDGET_OUTPUT
         if "evidence budget" in reason:
             return StopReason.BUDGET_EVIDENCE
         if "child budget" in reason:
             return StopReason.BUDGET_CHILDREN
-        if "no-new-evidence" in reason or "no new evidence" in reason:
-            return StopReason.BUDGET_NO_NEW_EVIDENCE
         return StopReason.BUDGET_ROUNDS
 
     # -- tool execution -------------------------------------------------------
@@ -602,7 +656,22 @@ class AgentOrchestrator:
         now: datetime,
     ) -> tuple[AgentRun, Investigation, bool]:
         for request in tool_requests:
+            # I3: reload fresh before each tool so a concurrent child's
+            # investigation-usage increments are never clobbered by a stale copy.
+            run = self._store.get_agent_run(run.agent_run_id)
+            investigation = self._store.get_investigation(run.investigation_id)
+
             ok, reason = self._guard.check_before_tool_execution(run, now=now)
+            if not ok:
+                self._pause(
+                    run, investigation, self._pause_status_for(reason), now=now,
+                    reason=reason, stop_reason=self._stop_reason_for(reason),
+                )
+                return self._store.get_agent_run(run.agent_run_id), investigation, True
+
+            ok, reason = self._guard.check_investigation_before_tool_execution(
+                investigation, now=now
+            )
             if not ok:
                 self._pause(
                     run, investigation, self._pause_status_for(reason), now=now,
@@ -615,6 +684,11 @@ class AgentOrchestrator:
                 continue
 
             outcome = await self._executor.execute(request, run, now=now)
+
+            # I3: reload fresh after the tool await so a concurrent child's
+            # investigation-usage increments are never clobbered by a stale copy.
+            run = self._store.get_agent_run(run.agent_run_id)
+            investigation = self._store.get_investigation(run.investigation_id)
 
             if outcome.status is ToolCallStatus.WAITING_APPROVAL:
                 # A PLANNED tool call can move straight to WAITING_APPROVAL; the
@@ -632,13 +706,54 @@ class AgentOrchestrator:
                 )
                 return self._store.get_agent_run(run.agent_run_id), investigation, True
 
+            # I2: cumulative output budgets (run + investigation) before counting.
+            ok, reason = self._guard.can_accept_output(run, outcome.output_bytes)
+            if not ok:
+                self._transition_tool_call(
+                    tool_call, outcome.status, now=now,
+                    output_bytes=outcome.output_bytes,
+                    evidence_ids=tuple(ref.evidence_id for ref in outcome.evidence),
+                    error_redacted=outcome.error_redacted,
+                )
+                self._pause(
+                    run, investigation, AgentRunStatus.PAUSED_BUDGET,
+                    now=now, reason=reason, stop_reason=StopReason.BUDGET_OUTPUT,
+                )
+                return self._store.get_agent_run(run.agent_run_id), investigation, True
+            ok, reason = self._guard.can_investigation_accept_output(
+                investigation, outcome.output_bytes
+            )
+            if not ok:
+                self._transition_tool_call(
+                    tool_call, outcome.status, now=now,
+                    output_bytes=outcome.output_bytes,
+                    evidence_ids=tuple(ref.evidence_id for ref in outcome.evidence),
+                    error_redacted=outcome.error_redacted,
+                )
+                self._pause(
+                    run, investigation, AgentRunStatus.PAUSED_BUDGET,
+                    now=now, reason=reason, stop_reason=StopReason.BUDGET_OUTPUT,
+                )
+                return self._store.get_agent_run(run.agent_run_id), investigation, True
+
             self._transition_tool_call(
                 tool_call, outcome.status, now=now,
                 output_bytes=outcome.output_bytes,
                 evidence_ids=tuple(ref.evidence_id for ref in outcome.evidence),
                 error_redacted=outcome.error_redacted,
             )
-            run = self._append_evidence(run, outcome.evidence)
+            # I1: enforce the evidence budget (run + investigation) when attaching.
+            try:
+                run, new_evidence = self._append_evidence(
+                    run, investigation, outcome.evidence, now
+                )
+            except _EvidenceBudgetExceeded:
+                self._pause(
+                    run, investigation, AgentRunStatus.PAUSED_BUDGET,
+                    now=now, reason="evidence budget exhausted",
+                    stop_reason=StopReason.BUDGET_EVIDENCE,
+                )
+                return self._store.get_agent_run(run.agent_run_id), investigation, True
             run = self._bump_usage(
                 run,
                 tool_calls=run.usage.tool_calls + 1,
@@ -648,6 +763,7 @@ class AgentOrchestrator:
                 investigation,
                 tool_calls=investigation.usage.tool_calls + 1,
                 total_output_bytes=investigation.usage.total_output_bytes + outcome.output_bytes,
+                evidence_count=investigation.usage.evidence_count + new_evidence,
             )
             self._store.update_agent_run(run)
             self._store.update_investigation(investigation)
@@ -965,9 +1081,11 @@ class AgentOrchestrator:
     def _drain_completed_children(
         self,
         run: AgentRun,
+        investigation: Investigation,
         pending_children: list[tuple[str, asyncio.Task]],
         child_reports: list[ChildReport],
-    ) -> AgentRun | None:
+        now: datetime,
+    ) -> tuple[AgentRun, Investigation] | None:
         remaining: list[tuple[str, asyncio.Task]] = []
         changed = False
         for child_id, task in pending_children:
@@ -979,53 +1097,74 @@ class AgentOrchestrator:
                 report, ref = task.result()
             except BaseException:
                 continue
-            run = self._append_evidence(run, (ref,))
+            run, new_evidence = self._append_evidence(
+                run, investigation, (ref,), now
+            )
+            if new_evidence:
+                investigation = self._bump_investigation_usage(
+                    investigation,
+                    evidence_count=investigation.usage.evidence_count + new_evidence,
+                )
             child_reports.append(report)
         pending_children[:] = remaining
-        return run if changed else None
+        return (run, investigation) if changed else None
 
     async def _drain_all_children(
         self,
         run: AgentRun,
+        investigation: Investigation,
         pending_children: list[tuple[str, asyncio.Task]],
         child_reports: list[ChildReport],
         now: datetime,
-    ) -> AgentRun:
+    ) -> tuple[AgentRun, Investigation]:
         if not pending_children:
-            return run
+            return run, investigation
         was_running = run.status is AgentRunStatus.RUNNING
         if was_running:
             run = self._transition_run(run, AgentRunStatus.WAITING_CHILDREN, now=now)
         tasks = [task for _, task in pending_children]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         pending_children.clear()
+        # I3: reload fresh after the gather so a concurrent child's
+        # investigation-usage increments are never clobbered by a stale copy.
+        run = self._store.get_agent_run(run.agent_run_id)
+        investigation = self._store.get_investigation(run.investigation_id)
         for outcome in results:
             if isinstance(outcome, BaseException):
                 continue
             report, ref = outcome
-            run = self._append_evidence(run, (ref,))
+            run, new_evidence = self._append_evidence(
+                run, investigation, (ref,), now
+            )
+            if new_evidence:
+                investigation = self._bump_investigation_usage(
+                    investigation,
+                    evidence_count=investigation.usage.evidence_count + new_evidence,
+                )
             child_reports.append(report)
         # Persist the appended child-report evidence before the next status
         # transition (which would otherwise discard the in-memory append).
         self._store.update_agent_run(run)
+        self._store.update_investigation(investigation)
         if was_running:
             run = self._transition_run(run, AgentRunStatus.RUNNING, now=now)
-        return self._store.get_agent_run(run.agent_run_id)
+        return self._store.get_agent_run(run.agent_run_id), investigation
 
     async def _resume_waiting_children(
         self,
         run: AgentRun,
+        investigation: Investigation,
         pending_children: list[tuple[str, asyncio.Task]],
         child_reports: list[ChildReport],
         now: datetime,
-    ) -> AgentRun:
+    ) -> tuple[AgentRun, Investigation]:
         # Re-discover child runs that were in flight when the process died and
         # re-spawn their loops so a WAITING_CHILDREN parent can make progress.
         if pending_children:
             unfinished = [task for _, task in pending_children if not task.done()]
             if unfinished:
                 await asyncio.wait(unfinished, return_when=asyncio.FIRST_COMPLETED)
-            return run
+            return run, investigation
         for child in self._store.list_agent_runs(parent_run_id=run.agent_run_id):
             if AGENT_RUN_STATE_MACHINE.is_terminal(child.status):
                 continue
@@ -1035,8 +1174,9 @@ class AgentOrchestrator:
                 continue
             self._spawn_child_from_package(package, run, pending_children, now)
         if not pending_children:
-            return self._transition_run(run, AgentRunStatus.RUNNING, now=now)
-        return run
+            run = self._transition_run(run, AgentRunStatus.RUNNING, now=now)
+            return run, investigation
+        return run, investigation
 
     def _sync_run_to_investigation(
         self, run: AgentRun, investigation: Investigation, now: datetime
@@ -1111,14 +1251,35 @@ class AgentOrchestrator:
         self._store.create_conclusion(run.agent_run_id, run.investigation_id, conclusion, now=now)
 
     def _append_evidence(
-        self, run: AgentRun, refs: tuple[EvidenceReference, ...]
-    ) -> AgentRun:
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        refs: tuple[EvidenceReference, ...],
+        now: datetime,
+    ) -> tuple[AgentRun, int]:
+        """Attach new evidence refs, enforcing run + investigation budgets.
+
+        Returns ``(run, new_count)``.  Raises ``_EvidenceBudgetExceeded`` when
+        attaching would push either the run or the investigation over its
+        ``max_evidence`` cap, so the caller can pause safely.  The
+        investigation's cumulative ``evidence_count`` is *not* bumped here --
+        callers merge ``new_count`` into a freshly reloaded investigation so a
+        concurrent child's increments are never clobbered (last-writer-wins).
+        """
         known = {ref.evidence_id for ref in run.evidence}
         new_refs = tuple(ref for ref in refs if ref.evidence_id not in known)
         if not new_refs:
-            return run
+            return run, 0
+        if run.usage.evidence_count + len(new_refs) > run.budget.max_evidence:
+            raise _EvidenceBudgetExceeded("evidence budget exhausted")
+        if (
+            investigation.usage.evidence_count + len(new_refs)
+            > investigation.budget.max_evidence
+        ):
+            raise _EvidenceBudgetExceeded("investigation evidence budget exhausted")
         run = run.model_copy(update={"evidence": run.evidence + new_refs})
-        return self._bump_usage(run, evidence_count=len(run.evidence))
+        run = self._bump_usage(run, evidence_count=len(run.evidence))
+        return run, len(new_refs)
 
     def _reload_pair(self, run: AgentRun) -> tuple[AgentRun, Investigation]:
         """Reload a run and its investigation after a status transition.
