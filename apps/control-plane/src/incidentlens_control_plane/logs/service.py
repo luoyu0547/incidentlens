@@ -18,7 +18,11 @@ from incidentlens_control_plane.logs.correlation import extract_correlation_key
 from incidentlens_control_plane.logs.parser import parse_log_line
 from incidentlens_control_plane.logs.redaction import redact_message
 from incidentlens_control_plane.logs.signals import detect_normal_signal
-from incidentlens_control_plane.logs.sources import DockerLogSource, FileLogSource
+from incidentlens_control_plane.logs.sources import (
+    DockerLogSource,
+    FileLogSource,
+    LogSourceUnavailable,
+)
 from incidentlens_control_plane.logs.store import LogStore
 from incidentlens_control_plane.logs.types import (
     LogQueryRequest,
@@ -34,8 +38,13 @@ from incidentlens_control_plane.project_registry.types import (
     ServiceRegistration,
     TargetRegistration,
 )
-from incidentlens_control_plane.remote_ops.policy import RemotePathDenied
+from incidentlens_control_plane.remote_ops.policy import (
+    RemotePathDenied,
+    RemotePathPolicy,
+)
 from incidentlens_control_plane.remote_ops.sessions import SessionManager
+from incidentlens_control_plane.remote_ops.transport import RemoteTransport
+from incidentlens_control_plane.remote_ops.types import HostScope
 
 
 class LogService:
@@ -64,6 +73,12 @@ class LogService:
         records = tuple(self._to_record(request, raw, now) for raw in raw_lines)
         if request.persist:
             self._store.append_batch(records)
+            # Re-query by dedupe key so the returned records ARE the stored
+            # rows.  append_batch dedupes on dedupe_key, so a re-poll must not
+            # return freshly-generated log_ids that were never inserted.
+            return self._store.records_by_dedupe_keys(
+                tuple(record.dedupe_key for record in records)
+            )
         return records
 
     # --- internals ---
@@ -83,15 +98,32 @@ class LogService:
             source = DockerLogSource(lambda _target: session.transport)
             return await source.query(request, target)
         if request.source_kind == LogSourceKind.FILE:
-            path = self._authorize_file_path(svc, request)
+            if request.scope == LogScope.CONTAINER:
+                # Container file reads require a docker-exec file backend that
+                # is not wired into LogService yet; the host SFTP transport
+                # must not read a container path.
+                raise LogSourceUnavailable("container file reads are not supported")
+            session = await self._sessions.connect(target)
+            path = await self._authorize_file_path(svc, request, session.transport)
             source = FileLogSource(self._sessions)
             return await source.query(request, target, path)
         raise ValueError(f"unsupported source kind: {request.source_kind}")
 
-    def _authorize_file_path(
-        self, svc: ServiceRegistration, request: LogQueryRequest
+    async def _authorize_file_path(
+        self,
+        svc: ServiceRegistration,
+        request: LogQueryRequest,
+        transport: RemoteTransport,
     ) -> PurePosixPath:
-        """Return the requested file path if it stays within an allowed root."""
+        """Return the canonical path if the requested file is authorized.
+
+        When ``allowed_log_paths`` is non-empty (the plan-mandated log
+        allowlist) the path must stay under one of those roots, and the
+        canonical (realpath-resolved) path must stay under that root and not be
+        a symlink.  Otherwise the check falls back to ``RemotePathPolicy``,
+        which authorizes against ``allowed_host_paths`` / ``allowed_container_paths``
+        with the same canonical checks.
+        """
         path = PurePosixPath(request.source_ref)
         if not path.is_absolute():
             raise RemotePathDenied(f"path is not absolute: {path}")
@@ -99,15 +131,48 @@ class LogService:
             raise RemotePathDenied(f"path contains '..': {path}")
 
         if svc.allowed_log_paths:
-            roots = tuple(PurePosixPath(root) for root in svc.allowed_log_paths)
-        elif request.scope == LogScope.HOST:
-            roots = svc.allowed_host_paths
-        else:
-            roots = svc.allowed_container_paths
+            matched_root = self._match_log_path_root(path, svc.allowed_log_paths)
+            if matched_root is None:
+                raise RemotePathDenied(
+                    f"path {path} is outside allowed log paths {svc.allowed_log_paths}"
+                )
+            return await self._canonicalize_against_root(path, matched_root, transport)
 
-        if not any(path.is_relative_to(root) for root in roots):
-            raise RemotePathDenied(f"path {path} is outside allowed roots {roots}")
-        return path
+        if request.scope == LogScope.CONTAINER:
+            # Defensive: container file reads are rejected in _collect_raw_lines.
+            raise RemotePathDenied("container file reads are not supported")
+        policy = RemotePathPolicy(svc)
+        return await policy.authorize(
+            HostScope(), path, write=False, transport=transport
+        )
+
+    @staticmethod
+    def _match_log_path_root(
+        path: PurePosixPath, allowed_log_paths: tuple[str, ...]
+    ) -> PurePosixPath | None:
+        """Return the first allowed log-path root containing *path*, or None."""
+        for root_str in allowed_log_paths:
+            root = PurePosixPath(root_str)
+            if path.is_relative_to(root):
+                return root
+        return None
+
+    @staticmethod
+    async def _canonicalize_against_root(
+        path: PurePosixPath,
+        root: PurePosixPath,
+        transport: RemoteTransport,
+    ) -> PurePosixPath:
+        """Resolve *path* via the transport and deny escapes and symlinks."""
+        canonical = await transport.realpath(path)
+        if not canonical.is_relative_to(root):
+            raise RemotePathDenied(
+                f"resolved path {canonical} escapes allowed root {root}"
+            )
+        meta = await transport.lstat(canonical)
+        if meta.is_symlink:
+            raise RemotePathDenied(f"symlink detected at {canonical}")
+        return canonical
 
     def _to_record(
         self, request: LogQueryRequest, raw: RawLogLine, now: datetime

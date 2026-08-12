@@ -261,6 +261,28 @@ class LogStore:
             conn.commit()
             return tuple(inserted)
 
+    def records_by_dedupe_keys(self, keys: tuple[str, ...]) -> tuple[LogRecord, ...]:
+        """Return the stored records for the given dedupe keys, in ``keys`` order.
+
+        Used to return store-consistent results after ``append_batch`` (which
+        dedupes by ``dedupe_key``), so re-polled queries see the stored rows
+        with their stable ``log_id`` values rather than freshly generated ones.
+        """
+        if not keys:
+            return ()
+        placeholders = ", ".join("?" for _ in keys)
+        with self._connection_factory() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {", ".join(_RECORD_COLUMNS)}
+                FROM log_records
+                WHERE dedupe_key IN ({placeholders})
+                """,
+                tuple(keys),
+            ).fetchall()
+        found = {record.dedupe_key: record for record in map(_record_from_row, rows)}
+        return tuple(found[key] for key in keys)
+
     def search(self, filters: LogSearchFilters, limit: int = 100) -> tuple[LogRecord, ...]:
         """Search log records, optionally restricting by filters and an FTS text match."""
         if not (1 <= limit <= 1000):
