@@ -8,6 +8,10 @@ class UnregisteredLogContainer(Exception):
     """Raised when a docker/container-scope query names an unregistered container."""
 
 
+class InvalidSubscriptionTransition(Exception):
+    """Raised when a log subscription state transition is not permitted."""
+
+
 class TargetNotFound(Exception):
     """Raised when a query names a target that is not registered for the project."""
 

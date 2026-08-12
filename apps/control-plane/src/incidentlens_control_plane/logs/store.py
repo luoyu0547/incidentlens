@@ -8,6 +8,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict
 
 from incidentlens_control_plane.logs.types import (
+    InvalidSubscriptionTransition,
     LogCursor,
     LogRecord,
     LogScope,
@@ -463,13 +464,84 @@ class LogStore:
         return subscription
 
     def pause_subscription(self, subscription_id: str, now: datetime) -> LogSubscription:
-        return self._set_subscription_status(subscription_id, LogSubscriptionStatus.PAUSED, now)
+        return self._transition_status(
+            subscription_id,
+            LogSubscriptionStatus.PAUSED,
+            now,
+            allowed_from=(LogSubscriptionStatus.ACTIVE,),
+        )
 
     def resume_subscription(self, subscription_id: str, now: datetime) -> LogSubscription:
-        return self._set_subscription_status(subscription_id, LogSubscriptionStatus.ACTIVE, now)
+        return self._transition_status(
+            subscription_id,
+            LogSubscriptionStatus.ACTIVE,
+            now,
+            allowed_from=(
+                LogSubscriptionStatus.PAUSED,
+                LogSubscriptionStatus.ERROR,
+            ),
+        )
 
     def delete_subscription(self, subscription_id: str, now: datetime) -> LogSubscription:
         return self._set_subscription_status(subscription_id, LogSubscriptionStatus.DELETED, now)
+
+    def _transition_status(
+        self,
+        subscription_id: str,
+        status: LogSubscriptionStatus,
+        now: datetime,
+        allowed_from: tuple[LogSubscriptionStatus, ...],
+    ) -> LogSubscription:
+        """Atomically move a subscription from an allowed status to ``status``.
+
+        The conditional UPDATE makes the check-and-set atomic, so no
+        check-then-write race can resurrect or mis-transition a row.  Raises
+        ``KeyError`` when the subscription does not exist and
+        ``InvalidSubscriptionTransition`` when its current status is not one of
+        ``allowed_from``.
+        """
+        placeholders = ", ".join("?" for _ in allowed_from)
+        with self._connection_factory() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE log_subscriptions
+                SET status = ?, updated_at = ?
+                WHERE subscription_id = ? AND status IN ({placeholders})
+                """,
+                (
+                    status.value,
+                    now.isoformat(),
+                    subscription_id,
+                    *(entry.value for entry in allowed_from),
+                ),
+            )
+            conn.commit()
+            if cursor.rowcount == 0:
+                row = conn.execute(
+                    f"""
+                    SELECT {", ".join(_SUBSCRIPTION_COLUMNS)}
+                    FROM log_subscriptions
+                    WHERE subscription_id = ?
+                    """,
+                    (subscription_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(f"subscription not found: {subscription_id}")
+                current = _subscription_from_row(row)
+                raise InvalidSubscriptionTransition(
+                    f"cannot transition subscription {subscription_id} "
+                    f"from {current.status.value} to {status.value}"
+                )
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(_SUBSCRIPTION_COLUMNS)}
+                FROM log_subscriptions
+                WHERE subscription_id = ?
+                """,
+                (subscription_id,),
+            ).fetchone()
+        assert row is not None
+        return _subscription_from_row(row)
 
     def _set_subscription_status(
         self, subscription_id: str, status: LogSubscriptionStatus, now: datetime

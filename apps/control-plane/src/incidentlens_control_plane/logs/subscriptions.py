@@ -404,6 +404,11 @@ class LogSubscriptionManager:
             raw_lines, now=now, subscription=subscription
         )
         self._store.append_batch(records)
+        # Notify live WebSocket subscribers only AFTER the durable write so a
+        # subscriber that receives a live record can always find it in the
+        # store (e.g. on replay of a later reconnect).
+        for record in records:
+            self._publish_live(record)
         latest = batch[-1]
         self._store.upsert_cursor(
             subscription_id=subscription.subscription_id,
@@ -495,9 +500,19 @@ class LogSubscriptionManager:
                 if not queues:
                     self._live_queues.pop(subscription_id, None)
 
+    def live_subscriber_count(self, subscription_id: str) -> int:
+        """Return the number of live WebSocket queues registered for a subscription.
+
+        Exposed for tests to assert that a disconnect unregisters the session's
+        queue.
+        """
+        return len(self._live_queues.get(subscription_id, ()))
+
     def _publish_live(self, record: LogRecord) -> None:
         """Fan out a live record to every subscribed queue for its subscription.
 
+        This is the production live-notification path: the writer calls it after
+        each durable batch, and ``publish_live_for_test`` routes through it too.
         Never blocks: a full queue drops its oldest record, mirroring the
         runtime event broker's backpressure behavior.
         """
@@ -521,7 +536,7 @@ class LogSubscriptionManager:
         """Test hook: publish a live record to the subscription's live queues.
 
         No-op when no WebSocket is subscribed.  Uses the same ``_publish_live``
-        fan-out the writer uses to notify live subscribers, so the WebSocket
+        fan-out the writer calls after each durable batch, so the WebSocket
         dedupe logic is exercised against the real publish path.
         """
         self._publish_live(record)

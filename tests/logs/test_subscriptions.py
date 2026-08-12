@@ -12,7 +12,11 @@ from incidentlens_control_plane.logs.subscriptions import (
     LogSubscriptionManager,
     TooManyActiveSubscriptions,
 )
-from incidentlens_control_plane.logs.types import LogScope, LogSourceKind
+from incidentlens_control_plane.logs.types import (
+    InvalidSubscriptionTransition,
+    LogScope,
+    LogSourceKind,
+)
 
 _APP_LOG = PurePosixPath("/var/log/payment/app.log")
 
@@ -365,3 +369,73 @@ async def test_errored_subscription_resume_restarts_and_resets_failures(
         subscription.subscription_id, RuntimeError("one more")
     )
     assert store.get_subscription(subscription.subscription_id).status.value == "active"
+
+
+@pytest.mark.asyncio
+async def test_writer_publishes_live_records_to_subscribers(
+    manager: LogSubscriptionManager, store, target_registration
+) -> None:
+    session = await manager._service._sessions.connect(target_registration)
+    session.transport._files[_APP_LOG] = b"live line\n"
+    manager._poll_interval = 0.01
+
+    subscription = store.create_subscription(
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.FILE,
+        scope=LogScope.HOST,
+        source_ref="/var/log/payment/app.log",
+        opt_in_streaming=True,
+        created_by="alice",
+        now=datetime(2026, 8, 12, tzinfo=UTC),
+    )
+
+    async with manager.subscribe_records(subscription.subscription_id) as queue:
+        await manager.start_active_opt_in()
+        await _await_cursor(store, subscription.subscription_id, "file:offset=10")
+        record = await asyncio.wait_for(queue.get(), timeout=2)
+
+    assert record.message_redacted == "live line"
+    assert record.subscription_id == subscription.subscription_id
+
+
+@pytest.mark.asyncio
+async def test_pause_rejects_already_paused_subscription(
+    manager: LogSubscriptionManager, store
+) -> None:
+    subscription = store.create_subscription(
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.FILE,
+        scope=LogScope.HOST,
+        source_ref="/var/log/payment/app.log",
+        opt_in_streaming=True,
+        created_by="alice",
+        now=datetime(2026, 8, 12, tzinfo=UTC),
+    )
+    await manager.pause(subscription.subscription_id)
+
+    with pytest.raises(InvalidSubscriptionTransition):
+        await manager.pause(subscription.subscription_id)
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_active_subscription(
+    manager: LogSubscriptionManager, store
+) -> None:
+    subscription = store.create_subscription(
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.FILE,
+        scope=LogScope.HOST,
+        source_ref="/var/log/payment/app.log",
+        opt_in_streaming=True,
+        created_by="alice",
+        now=datetime(2026, 8, 12, tzinfo=UTC),
+    )
+
+    with pytest.raises(InvalidSubscriptionTransition):
+        await manager.resume(subscription.subscription_id)

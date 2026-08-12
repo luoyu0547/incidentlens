@@ -9,6 +9,7 @@ details are fixed safe strings that never echo credentials or raw log text.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import cast
 
@@ -28,6 +29,7 @@ from incidentlens_control_plane.logs.subscriptions import (
     TooManyActiveSubscriptions,
 )
 from incidentlens_control_plane.logs.types import (
+    InvalidSubscriptionTransition,
     LogQueryRequest,
     LogRecord,
     LogScope,
@@ -269,11 +271,12 @@ async def pause_subscription(
 ) -> dict[str, object]:
     """Pause a subscription, preserving its stored cursor."""
     runtime = get_runtime(request)
-    _require_transitionable_subscription(runtime, subscription_id)
     try:
         subscription = await runtime.subscriptions.pause(subscription_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Subscription not found")
+    except InvalidSubscriptionTransition:
+        raise HTTPException(status_code=409, detail="Subscription is not active")
     return _subscription_view(subscription)
 
 
@@ -283,11 +286,12 @@ async def resume_subscription(
 ) -> dict[str, object]:
     """Resume a paused subscription from its stored cursor."""
     runtime = get_runtime(request)
-    _require_transitionable_subscription(runtime, subscription_id)
     try:
         subscription = await runtime.subscriptions.resume(subscription_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Subscription not found")
+    except InvalidSubscriptionTransition:
+        raise HTTPException(status_code=409, detail="Subscription is not paused")
     return _subscription_view(subscription)
 
 
@@ -320,20 +324,6 @@ async def list_subscription_records(
     return [_record_view(record) for record in records]
 
 
-def _require_transitionable_subscription(
-    runtime: RuntimeServices, subscription_id: str
-) -> None:
-    """Reject unknown and deleted subscriptions for pause/resume transitions.
-
-    A deleted subscription must never be resurrected by a later pause/resume.
-    """
-    subscription = runtime.log_store.get_subscription(subscription_id)
-    if subscription is None:
-        raise HTTPException(status_code=404, detail="Subscription not found")
-    if subscription.status == LogSubscriptionStatus.DELETED:
-        raise HTTPException(status_code=409, detail="Subscription is deleted")
-
-
 @router.websocket("/subscriptions/{subscription_id}/ws")
 async def subscription_websocket(
     websocket: WebSocket, subscription_id: str
@@ -344,7 +334,8 @@ async def subscription_websocket(
     missed between the two phases, then streams live records, skipping any whose
     ``dedupe_key`` was already sent during replay.  A skipped duplicate is
     acknowledged with a ``{"event": "heartbeat"}`` frame.  On disconnect only
-    the socket loop exits; the subscription itself is left untouched.
+    the socket loop exits (unregistering the live queue); the subscription
+    itself is left untouched.
     """
     await websocket.accept()
     runtime = cast(RuntimeServices, websocket.app.state.runtime)
@@ -369,13 +360,64 @@ async def subscription_websocket(
                     seen_dedupe_keys.add(record.dedupe_key)
                 after_cursor = records[-1].cursor
 
-            # Stream live records, skipping duplicates already sent.
-            while True:
-                record = await queue.get()
-                if record.dedupe_key in seen_dedupe_keys:
-                    await websocket.send_json({"event": "heartbeat"})
-                else:
-                    await websocket.send_json(record.model_dump(mode="json"))
-                    seen_dedupe_keys.add(record.dedupe_key)
+            # Stream live records, skipping duplicates already sent.  The read
+            # races queue.get against a disconnect signal so the async-with
+            # block exits (unregistering the live queue) even on a quiet
+            # disconnect.
+            disconnected = asyncio.Event()
+            watch_task = asyncio.create_task(_watch_disconnect(websocket, disconnected))
+            try:
+                while True:
+                    record = await _next_live_record_or_disconnect(
+                        queue, disconnected
+                    )
+                    if record is None:
+                        break
+                    if record.dedupe_key in seen_dedupe_keys:
+                        await websocket.send_json({"event": "heartbeat"})
+                    else:
+                        await websocket.send_json(record.model_dump(mode="json"))
+                        seen_dedupe_keys.add(record.dedupe_key)
+            finally:
+                watch_task.cancel()
+                await asyncio.gather(watch_task, return_exceptions=True)
     except WebSocketDisconnect:
         pass
+
+
+async def _watch_disconnect(
+    websocket: WebSocket, disconnected: asyncio.Event
+) -> None:
+    """Set ``disconnected`` when the client closes the WebSocket.
+
+    Runs for the whole live-stream phase.  ``websocket.receive()`` raises
+    ``WebSocketDisconnect`` when the peer closes; a cancelled watch is re-raised
+    so teardown is clean.
+    """
+    try:
+        while True:
+            await websocket.receive()
+    except WebSocketDisconnect:
+        disconnected.set()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        disconnected.set()
+
+
+async def _next_live_record_or_disconnect(
+    queue: asyncio.Queue[LogRecord], disconnected: asyncio.Event
+) -> LogRecord | None:
+    """Return the next live record, or None once the client disconnects."""
+    get_task = asyncio.create_task(queue.get())
+    wait_task = asyncio.create_task(disconnected.wait())
+    done, pending = await asyncio.wait(
+        {get_task, wait_task}, return_when=asyncio.FIRST_COMPLETED
+    )
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    if wait_task in done:
+        return None
+    return get_task.result()

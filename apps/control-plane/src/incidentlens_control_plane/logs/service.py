@@ -247,6 +247,7 @@ class LogService:
         source_kind: LogSourceKind,
         scope: LogScope,
         source_ref: str,
+        subscription_id: str | None = None,
     ) -> LogRecord:
         parsed = parse_log_line(raw.text)
         redacted = redact_message(parsed.message)
@@ -276,7 +277,7 @@ class LogService:
         )
         return LogRecord(
             log_id=f"log-{uuid.uuid4().hex[:12]}",
-            subscription_id=None,
+            subscription_id=subscription_id,
             project_id=project_id,
             target_id=target_id,
             service_name=service_name,
@@ -319,6 +320,7 @@ class LogService:
                 source_kind=subscription.source_kind,
                 scope=subscription.scope,
                 source_ref=subscription.source_ref,
+                subscription_id=subscription.subscription_id,
             )
             for raw in raw_lines
         )
