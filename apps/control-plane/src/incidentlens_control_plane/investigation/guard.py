@@ -14,7 +14,9 @@ from datetime import UTC, datetime
 
 from incidentlens_control_plane.investigation.state_machine import (
     AGENT_RUN_STATE_MACHINE,
+    INVESTIGATION_STATE_MACHINE,
     AgentRunStatus,
+    InvestigationStatus,
 )
 from incidentlens_control_plane.investigation.types import (
     AgentRun,
@@ -61,6 +63,75 @@ class InvestigationGuard:
         if run.usage.tool_calls >= run.budget.max_tool_calls:
             return False, "tool-call budget exhausted"
         return self._check_wall_clock(run, now)
+
+    # -- investigation-level pre-execution checks -----------------------------
+
+    def check_investigation_before_model_turn(
+        self,
+        investigation: Investigation,
+        *,
+        now: datetime,
+    ) -> tuple[bool, str]:
+        """Refuse a provider call when the investigation's global budgets are gone."""
+        status = self._check_investigation_executable(investigation)
+        if status[0] is False:
+            return status
+        if investigation.usage.rounds >= investigation.budget.max_rounds:
+            return False, "investigation round budget exhausted"
+        stalled = self.is_investigation_stalled_no_new_evidence(investigation)
+        if stalled[0] is False:
+            return stalled
+        return self._check_investigation_wall_clock(investigation, now)
+
+    def check_investigation_before_tool_execution(
+        self,
+        investigation: Investigation,
+        *,
+        now: datetime,
+    ) -> tuple[bool, str]:
+        """Refuse a tool call when the investigation's global budgets are gone."""
+        status = self._check_investigation_executable(investigation)
+        if status[0] is False:
+            return status
+        if investigation.usage.tool_calls >= investigation.budget.max_tool_calls:
+            return False, "investigation tool-call budget exhausted"
+        return self._check_investigation_wall_clock(investigation, now)
+
+    def can_investigation_accept_output(
+        self,
+        investigation: Investigation,
+        output_bytes: int,
+    ) -> tuple[bool, str]:
+        """Bound the cumulative output across all runs of the investigation."""
+        if output_bytes < 0:
+            return False, "output_bytes must not be negative"
+        if (
+            investigation.usage.total_output_bytes + output_bytes
+            > investigation.budget.max_total_output_bytes
+        ):
+            return False, "investigation cumulative output budget exceeded"
+        return True, "investigation output within budget"
+
+    def can_investigation_accept_new_evidence(
+        self,
+        investigation: Investigation,
+    ) -> tuple[bool, str]:
+        """Refuse to grow the investigation's evidence set past its budget."""
+        if investigation.usage.evidence_count >= investigation.budget.max_evidence:
+            return False, "investigation evidence budget exhausted"
+        return True, "investigation evidence budget available"
+
+    def is_investigation_stalled_no_new_evidence(
+        self,
+        investigation: Investigation,
+    ) -> tuple[bool, str]:
+        """Signal the missing-evidence pause once global dry rounds pass the cap."""
+        if (
+            investigation.usage.consecutive_no_new_evidence_rounds
+            >= investigation.budget.max_no_new_evidence_rounds
+        ):
+            return False, "investigation no-new-evidence budget exhausted"
+        return True, "investigation no-new-evidence budget available"
 
     # -- budget checks --------------------------------------------------------
 
@@ -152,6 +223,29 @@ class InvestigationGuard:
             if elapsed >= run.budget.max_wall_clock_seconds:
                 return False, "wall-clock budget exhausted"
         return True, "wall-clock budget available"
+
+    def _check_investigation_executable(
+        self, investigation: Investigation
+    ) -> tuple[bool, str]:
+        if INVESTIGATION_STATE_MACHINE.is_terminal(investigation.status):
+            return False, "investigation is terminal"
+        if investigation.status is not InvestigationStatus.RUNNING:
+            return False, (
+                f"investigation is not executable in status "
+                f"{investigation.status.value!r}"
+            )
+        return True, "investigation is executable"
+
+    def _check_investigation_wall_clock(
+        self, investigation: Investigation, now: datetime
+    ) -> tuple[bool, str]:
+        if investigation.started_at is not None:
+            elapsed = (
+                now.astimezone(UTC) - investigation.started_at.astimezone(UTC)
+            ).total_seconds()
+            if elapsed >= investigation.budget.max_wall_clock_seconds:
+                return False, "investigation wall-clock budget exhausted"
+        return True, "investigation wall-clock budget available"
 
     def _validate_citations(
         self,

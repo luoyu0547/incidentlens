@@ -261,7 +261,9 @@ class StateMachine(Generic[StatusT]):
     The transition table is supplied at construction time; ``can_transition``
     answers membership, ``assert_transition`` raises on illegal moves and
     ``assert_not_terminal`` refuses to execute further operations on a terminal
-    state. Instances are immutable after construction.
+    state. All three reject statuses from a different enum (shared ``StrEnum``
+    values such as ``COMPLETED`` compare equal across enums, so type identity
+    is checked explicitly). Instances are immutable after construction.
     """
 
     def __init__(
@@ -273,6 +275,17 @@ class StateMachine(Generic[StatusT]):
             status: frozenset(targets) for status, targets in transitions.items()
         }
         self._terminal: frozenset[StatusT] = frozenset(terminal)
+        first_transition = next(iter(transitions), None)
+        first_terminal = next(iter(terminal), None)
+        self._status_type: type[StatusT] | None = (
+            type(first_transition)
+            if first_transition is not None
+            else type(first_terminal) if first_terminal is not None else None
+        )
+
+    def _is_foreign(self, status: StatusT) -> bool:
+        """Return True when ``status`` belongs to a different enum."""
+        return self._status_type is not None and type(status) is not self._status_type
 
     def can_transition(self, current: StatusT, target: StatusT) -> bool:
         """Return True only when ``current -> target`` is in the table.
@@ -281,7 +294,7 @@ class StateMachine(Generic[StatusT]):
         share a value (for example ``COMPLETED`` on several enums) compare
         equal, so membership alone would leak cross-enum moves.
         """
-        if type(current) is not type(target):
+        if self._is_foreign(current) or self._is_foreign(target):
             return False
         return target in self._transitions.get(current, frozenset())
 
@@ -294,11 +307,17 @@ class StateMachine(Generic[StatusT]):
         return target
 
     def is_terminal(self, status: StatusT) -> bool:
-        """Return True for absorbing terminal states."""
+        """Return True for absorbing terminal states of this enum."""
+        if self._is_foreign(status):
+            return False
         return status in self._terminal
 
     def assert_not_terminal(self, status: StatusT) -> None:
-        """Raise when ``status`` is terminal and must not execute operations."""
+        """Raise when ``status`` is terminal or belongs to a different enum."""
+        if self._is_foreign(status):
+            raise IllegalTransition(
+                f"status {status.value!r} does not belong to this state machine"
+            )
         if status in self._terminal:
             raise IllegalTransition(
                 f"terminal state cannot execute operations: {status.value!r}"

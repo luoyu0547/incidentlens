@@ -249,3 +249,55 @@ def test_custom_state_machine_obeys_its_table():
     machine.assert_not_terminal(Color.RED)
     with pytest.raises(IllegalTransition):
         machine.assert_not_terminal(Color.BLUE)
+
+
+# -- cross-enum type guards ---------------------------------------------------
+# StrEnum members that share a value (e.g. COMPLETED on several enums) compare
+# equal, so is_terminal/assert_not_terminal must reject a status from a
+# different enum instead of treating it as this machine's terminal state.
+
+
+@pytest.mark.parametrize(
+    ("machine", "foreign"),
+    [
+        (AGENT_RUN_STATE_MACHINE, InvestigationStatus.COMPLETED),
+        (AGENT_RUN_STATE_MACHINE, InvestigationStatus.FAILED),
+        (AGENT_RUN_STATE_MACHINE, ToolCallStatus.SUCCEEDED),
+        (INVESTIGATION_STATE_MACHINE, AgentRunStatus.COMPLETED),
+        (INVESTIGATION_STATE_MACHINE, ToolCallStatus.CANCELLED),
+        (TOOL_CALL_STATE_MACHINE, AgentRunStatus.COMPLETED),
+        (TOOL_CALL_STATE_MACHINE, InvestigationStatus.FAILED),
+    ],
+    ids=[
+        "run_inv_completed",
+        "run_inv_failed",
+        "run_tool_succeeded",
+        "inv_run_completed",
+        "inv_tool_cancelled",
+        "tool_run_completed",
+        "tool_inv_failed",
+    ],
+)
+def test_is_terminal_rejects_foreign_enum_status(machine, foreign):
+    assert machine.is_terminal(foreign) is False
+
+
+def test_assert_not_terminal_rejects_foreign_enum_status():
+    with pytest.raises(IllegalTransition):
+        AGENT_RUN_STATE_MACHINE.assert_not_terminal(InvestigationStatus.COMPLETED)
+    with pytest.raises(IllegalTransition):
+        INVESTIGATION_STATE_MACHINE.assert_not_terminal(AgentRunStatus.CANCELLED)
+    with pytest.raises(IllegalTransition):
+        TOOL_CALL_STATE_MACHINE.assert_not_terminal(AgentRunStatus.COMPLETED)
+
+
+def test_is_terminal_still_recognizes_same_enum_terminal_after_guard():
+    assert AGENT_RUN_STATE_MACHINE.is_terminal(AgentRunStatus.COMPLETED) is True
+    assert INVESTIGATION_STATE_MACHINE.is_terminal(InvestigationStatus.FAILED) is True
+    assert TOOL_CALL_STATE_MACHINE.is_terminal(ToolCallStatus.CANCELLED) is True
+
+
+def test_assert_not_terminal_still_allows_active_same_enum_status():
+    AGENT_RUN_STATE_MACHINE.assert_not_terminal(AgentRunStatus.WAITING_CHILDREN)
+    INVESTIGATION_STATE_MACHINE.assert_not_terminal(InvestigationStatus.PAUSED_BUDGET)
+    TOOL_CALL_STATE_MACHINE.assert_not_terminal(ToolCallStatus.PLANNED)

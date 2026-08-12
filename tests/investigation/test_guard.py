@@ -405,3 +405,174 @@ def test_parent_run_must_not_link_a_parent():
 def test_child_run_requires_parent_link():
     with pytest.raises(ValidationError):
         make_run(kind=AgentRunKind.CHILD)
+
+
+# -- investigation-level budgets (orchestrator-facing) ------------------------
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        (UsageCounters(rounds=31), True),
+        (UsageCounters(rounds=32), False),
+    ],
+    ids=["inv_round_below_limit", "inv_round_at_limit"],
+)
+def test_investigation_model_turn_round_budget_boundary(usage, expected):
+    allowed, _ = GUARD.check_investigation_before_model_turn(
+        make_investigation(usage=usage), now=NOW
+    )
+
+    assert allowed is expected
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        (UsageCounters(tool_calls=63), True),
+        (UsageCounters(tool_calls=64), False),
+    ],
+    ids=["inv_tool_calls_below_limit", "inv_tool_calls_at_limit"],
+)
+def test_investigation_tool_execution_tool_budget_boundary(usage, expected):
+    allowed, _ = GUARD.check_investigation_before_tool_execution(
+        make_investigation(usage=usage), now=NOW
+    )
+
+    assert allowed is expected
+
+
+@pytest.mark.parametrize(
+    ("started_offset", "expected"),
+    [
+        (None, True),
+        (timedelta(seconds=7_199), True),
+        (timedelta(seconds=7_200), False),
+    ],
+    ids=["inv_never_started", "inv_under_time_budget", "inv_at_time_budget"],
+)
+def test_investigation_wall_clock_budget_boundary(started_offset, expected):
+    started_at = None if started_offset is None else NOW - started_offset
+    allowed, _ = GUARD.check_investigation_before_model_turn(
+        make_investigation(started_at=started_at), now=NOW
+    )
+
+    assert allowed is expected
+
+
+@pytest.mark.parametrize(
+    ("budget", "usage", "output_bytes", "expected"),
+    [
+        (
+            InvestigationBudget(max_total_output_bytes=100),
+            UsageCounters(total_output_bytes=99),
+            1,
+            True,
+        ),
+        (
+            InvestigationBudget(max_total_output_bytes=100),
+            UsageCounters(total_output_bytes=100),
+            0,
+            True,
+        ),
+        (
+            InvestigationBudget(max_total_output_bytes=100),
+            UsageCounters(total_output_bytes=100),
+            1,
+            False,
+        ),
+    ],
+    ids=[
+        "inv_output_under_limit",
+        "inv_output_at_limit_zero_incoming",
+        "inv_output_at_limit_one_incoming",
+    ],
+)
+def test_investigation_cumulative_output_budget_boundary(budget, usage, output_bytes, expected):
+    allowed, _ = GUARD.can_investigation_accept_output(
+        make_investigation(budget=budget, usage=usage), output_bytes
+    )
+
+    assert allowed is expected
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        (UsageCounters(evidence_count=299), True),
+        (UsageCounters(evidence_count=300), False),
+    ],
+    ids=["inv_evidence_below_limit", "inv_evidence_at_limit"],
+)
+def test_investigation_evidence_budget_boundary(usage, expected):
+    allowed, _ = GUARD.can_investigation_accept_new_evidence(
+        make_investigation(usage=usage)
+    )
+
+    assert allowed is expected
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        (UsageCounters(consecutive_no_new_evidence_rounds=2), True),
+        (UsageCounters(consecutive_no_new_evidence_rounds=3), False),
+    ],
+    ids=["inv_no_new_evidence_below_limit", "inv_no_new_evidence_at_limit"],
+)
+def test_investigation_no_new_evidence_budget_boundary(usage, expected):
+    allowed, _ = GUARD.is_investigation_stalled_no_new_evidence(
+        make_investigation(usage=usage)
+    )
+
+    assert allowed is expected
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (InvestigationStatus.COMPLETED, "investigation is terminal"),
+        (InvestigationStatus.CANCELLED, "investigation is terminal"),
+        (InvestigationStatus.CREATED, "investigation is not executable in status 'created'"),
+        (
+            InvestigationStatus.PAUSED_BUDGET,
+            "investigation is not executable in status 'paused_budget'",
+        ),
+        (
+            InvestigationStatus.WAITING_APPROVAL,
+            "investigation is not executable in status 'waiting_approval'",
+        ),
+    ],
+    ids=[
+        "inv_completed",
+        "inv_cancelled",
+        "inv_created",
+        "inv_paused_budget",
+        "inv_waiting_approval",
+    ],
+)
+def test_investigation_model_turn_refused_for_non_running_status(status, reason):
+    allowed, got = GUARD.check_investigation_before_model_turn(
+        make_investigation(status=status), now=NOW
+    )
+
+    assert allowed is False
+    assert got == reason
+
+
+def test_investigation_budget_exhaustion_stops_model_turn_even_when_run_is_fine():
+    investigation = make_investigation(usage=UsageCounters(rounds=32))
+    allowed, reason = GUARD.check_investigation_before_model_turn(investigation, now=NOW)
+
+    assert allowed is False
+    assert reason == "investigation round budget exhausted"
+
+
+def test_investigation_model_turn_refused_when_stalled_no_new_evidence():
+    investigation = make_investigation(
+        usage=UsageCounters(consecutive_no_new_evidence_rounds=3)
+    )
+    allowed, reason = GUARD.check_investigation_before_model_turn(investigation, now=NOW)
+
+    assert allowed is False
+    assert reason == "investigation no-new-evidence budget exhausted"
