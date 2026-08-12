@@ -716,6 +716,9 @@ class ToolExecutor:
             candidates.append(f"container:{container}")
             candidates.extend(f"container-path:{hint}" for hint in svc.container_path_hints)
         elif path_str is not None:
+            # A path-based discovery lists a HOST directory; a container-pinned
+            # run must never be able to enumerate the host through this branch.
+            self._assert_run_scope(ctx, LogScope.HOST)
             path = self._parse_path(path_str)
             self._validate_path_in_scope(ctx, path, scope=LogScope.HOST)
             entries = await self._gateway.list_dir(

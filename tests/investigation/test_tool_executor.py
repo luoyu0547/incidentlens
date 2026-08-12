@@ -766,6 +766,28 @@ async def test_container_run_host_read_is_rejected(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_container_run_source_discover_path_cannot_enumerate_host(
+    tmp_path: Path,
+) -> None:
+    """A container run's path-based source discovery must not list the host."""
+    harness = build_harness(tmp_path)
+    run = _new_run(harness.investigations, scope=make_scope(scope_kind=LogScope.CONTAINER))
+    outcome = await harness.executor.execute(
+        tool_request(
+            TOOL_SOURCE_DISCOVER,
+            service_name=SERVICE,
+            path=str(HOST_ROOT / "secret.txt"),
+        ),
+        run,
+        now=NOW,
+    )
+    assert outcome.status is ToolCallStatus.FAILED
+    assert "only operate inside its own container" in outcome.error_redacted
+    # No host directory listing was ever attempted.
+    assert harness.factory.transports == []
+
+
+@pytest.mark.asyncio
 async def test_container_run_may_only_query_its_own_service_logs(tmp_path: Path) -> None:
     harness = build_harness(tmp_path)
     run = _new_run(harness.investigations, scope=make_scope(scope_kind=LogScope.CONTAINER))
