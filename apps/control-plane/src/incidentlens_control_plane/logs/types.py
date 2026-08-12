@@ -48,6 +48,32 @@ class RedactionResult(BaseModel):
     truncated: bool = False
 
 
+class ProcessedLogLine(BaseModel):
+    """A parsed and redacted pipeline result for a single raw log line."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    raw: RawLogLine
+    parsed: ParsedLogLine
+    message_redacted: str
+    redaction_summary: dict[str, int]
+    normal_signal: str | None = None
+    correlation_key: str | None = None
+
+
+class LogQueryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    project_id: str = Field(min_length=1, max_length=80)
+    target_id: str = Field(min_length=1, max_length=80)
+    service_name: str = Field(min_length=1, max_length=120)
+    source_kind: LogSourceKind
+    scope: LogScope
+    source_ref: str = Field(min_length=1, max_length=500)
+    tail_lines: int = Field(default=100, ge=1, le=1000)
+    persist: bool = False
+    create_evidence: bool = False
+    incident_id: str | None = Field(default=None, max_length=120)
+
+
 class LogRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     log_id: str = Field(min_length=1, max_length=120)

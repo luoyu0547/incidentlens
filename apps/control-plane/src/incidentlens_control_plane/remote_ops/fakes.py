@@ -129,13 +129,23 @@ class FakeTransport:
 
 @dataclass
 class FakeTransportFactory:
-    """Tracks ``connect`` calls and created transports for assertion."""
+    """Tracks ``connect`` calls and created transports for assertion.
+
+    Connecting to a target returns the existing *live* transport for that
+    target, mirroring how ``SessionManager`` keeps one host connection per
+    target.  A dead transport is replaced with a fresh one.
+    """
 
     connect_calls: list[TargetRegistration] = field(default_factory=list)
     transports: list[FakeTransport] = field(default_factory=list)
+    _live: dict[str, FakeTransport] = field(default_factory=dict, repr=False)
 
     async def connect(self, target: TargetRegistration) -> FakeTransport:
+        existing = self._live.get(target.target_id)
+        if existing is not None and existing.alive:
+            return existing
         transport = FakeTransport(target=target)
+        self._live[target.target_id] = transport
         self.connect_calls.append(target)
         self.transports.append(transport)
         return transport
@@ -162,6 +172,7 @@ class FakeChangeTransport:
     symlinks: set[PurePosixPath] = field(default_factory=set)
     container_files: dict[PurePosixPath, bytes] = field(default_factory=dict)
     container_symlinks: set[PurePosixPath] = field(default_factory=set)
+    docker_logs: dict[tuple[str, int], bytes] = field(default_factory=dict)
     run_argv_calls: list[tuple[str, ...]] = field(default_factory=list)
     _fail_renames: set[PurePosixPath] = field(default_factory=set)
     _fail_copies: set[PurePosixPath] = field(default_factory=set)
@@ -287,6 +298,20 @@ class FakeChangeTransport:
         self, argv: tuple[str, ...]
     ) -> CommandResult | None:
         """Simulate fixed container file-operation argv templates."""
+        if (
+            len(argv) >= 7
+            and argv[0] == "docker"
+            and argv[1] == "logs"
+            and argv[2] == "--timestamps"
+            and argv[3] == "--tail"
+            and argv[5] == "--"
+        ):
+            container = argv[6]
+            return CommandResult(
+                exit_status=0,
+                stdout=self.docker_logs.get((container, int(argv[4])), b""),
+                stderr=b"",
+            )
         if len(argv) >= 4 and argv[0] == "docker" and argv[1] == "exec":
             container = argv[2]
             cmd = argv[3]
