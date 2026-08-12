@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime
 from pathlib import PurePosixPath
 
+from incidentlens_control_plane.evidence.store import EvidenceStore
 from incidentlens_control_plane.logs.correlation import extract_correlation_key
 from incidentlens_control_plane.logs.parser import parse_log_line
 from incidentlens_control_plane.logs.redaction import redact_message
@@ -56,14 +57,26 @@ class LogService:
         projects: ProjectRegistryStore,
         store: LogStore,
         sessions: SessionManager,
+        evidence: EvidenceStore | None = None,
     ) -> None:
         self._projects = projects
         self._store = store
         self._sessions = sessions
+        self._evidence = evidence
 
     async def query(
         self, request: LogQueryRequest, *, now: datetime
     ) -> tuple[LogRecord, ...]:
+        if request.create_evidence:
+            if not request.persist:
+                raise ValueError("persist is required when create_evidence is True")
+            if request.incident_id is None:
+                raise ValueError("incident_id is required")
+            if self._evidence is None:
+                raise RuntimeError(
+                    "evidence store is not configured for create_evidence"
+                )
+
         project = self._projects.get(request.project_id)
         target = self._resolve_target(project, request.target_id)
         svc = self._resolve_service(project, request.service_name)
@@ -76,9 +89,24 @@ class LogService:
             # Re-query by dedupe key so the returned records ARE the stored
             # rows.  append_batch dedupes on dedupe_key, so a re-poll must not
             # return freshly-generated log_ids that were never inserted.
-            return self._store.records_by_dedupe_keys(
+            stored = self._store.records_by_dedupe_keys(
                 tuple(record.dedupe_key for record in records)
             )
+            if request.create_evidence:
+                return tuple(
+                    record.model_copy(
+                        update={
+                            "evidence_ref_id": self._evidence.create_from_log_record(
+                                record,
+                                incident_id=request.incident_id,
+                                created_by="service",
+                                now=now,
+                            ).evidence_ref_id
+                        }
+                    )
+                    for record in stored
+                )
+            return stored
         return records
 
     # --- internals ---
