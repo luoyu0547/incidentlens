@@ -66,6 +66,7 @@ class RuntimeServices:
     source_discovery: SourceDiscoveryService
     fake_provider: FakeProviderRegistry
     recovery: RecoveryService
+    reports: object  # ReportService — 前向引用避免循环导入
 
 
 def build_runtime(
@@ -221,6 +222,15 @@ def build_runtime(
         broker=broker,
     )
 
+    from incidentlens_control_plane.reports.service import ReportService
+
+    report_dir = settings.report_output_dir or (settings.data_dir / "reports")
+    reports = ReportService(
+        investigations=investigation_store,
+        evidence=evidence,
+        output_dir=report_dir,
+    )
+
     return RuntimeServices(
         projects=projects,
         events=events,
@@ -242,4 +252,5 @@ def build_runtime(
         source_discovery=source_discovery,
         fake_provider=fake_provider,
         recovery=recovery,
+        reports=reports,
     )

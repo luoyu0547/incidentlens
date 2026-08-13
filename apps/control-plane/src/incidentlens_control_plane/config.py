@@ -69,12 +69,16 @@ class RuntimeSettings(BaseModel):
     # cancellation request and drain before it force-cancels and sweeps.
     shutdown_grace_seconds: float = Field(default=10.0, ge=0.5, le=300.0)
 
+    # -- reports ---------------------------------------------------------------
+    report_output_dir: Path | None = None
+
     @classmethod
     def from_environment(cls) -> RuntimeSettings:
         """Create settings from the INCIDENTLENS_DATA_DIR environment variable."""
         configured = os.environ.get("INCIDENTLENS_DATA_DIR")
         data_dir = Path(configured).expanduser() if configured else Path.home() / ".incidentlens"
-        return cls(data_dir=data_dir.resolve())
+        report_output_dir = data_dir.resolve() / "reports"
+        return cls(data_dir=data_dir.resolve(), report_output_dir=report_output_dir)
 
     def default_run_budget(self) -> AgentBudget:
         """The bounded default budget applied to a run without an explicit one."""
