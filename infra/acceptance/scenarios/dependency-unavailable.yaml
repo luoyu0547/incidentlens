@@ -1,0 +1,21 @@
+# infra/acceptance/scenarios/dependency-unavailable.yaml
+name: dependency-unavailable
+description: Inventory service completely unavailable
+fault_injection:
+  service: inventory-service
+  env_var: FAULT_DEPENDENCY
+  value: "true"
+trigger_condition: "inventory-service /health returns 503"
+normal_behavior:
+  - "Inventory service responds to /inventory/reserve"
+fault_behavior:
+  - "Inventory service returns 503 for all requests"
+  - "GET /health returns 503"
+expected_diagnosis:
+  - "Agent should discover inventory service is down"
+  - "Root cause: inventory service dependency failure"
+  - "Evidence: inventory-service 503, health check failure"
+verification_points:
+  - "Agent checks inventory-service health"
+  - "Agent identifies inventory service as single point of failure"
+  - "Report recommends inventory service recovery"

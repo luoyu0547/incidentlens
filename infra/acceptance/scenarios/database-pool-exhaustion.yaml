@@ -1,0 +1,21 @@
+# infra/acceptance/scenarios/database-pool-exhaustion.yaml
+name: database-pool-exhaustion
+description: PostgreSQL connection pool exhausted under load
+fault_injection:
+  service: order-service
+  env_var: FAULT_DB_POOL
+  value: "true"
+normal_behavior:
+  - "POST /orders creates order and calls payment/inventory"
+  - "GET /orders/{id} returns order details"
+fault_behavior:
+  - "POST /orders returns 503 with 'database connection pool exhausted'"
+  - "order-service logs: ERROR: Cannot acquire database connection - pool exhausted"
+expected_diagnosis:
+  - "Agent should identify database connection pool exhaustion from logs"
+  - "Root cause: insufficient pool size or connection leak"
+  - "Evidence: order-service ERROR logs, PostgreSQL connection count"
+verification_points:
+  - "Agent reads order-service logs and finds pool exhaustion errors"
+  - "Agent checks PostgreSQL connection status"
+  - "Report identifies connection pool as root cause"

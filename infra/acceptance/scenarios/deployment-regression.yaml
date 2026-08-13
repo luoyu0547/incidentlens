@@ -1,0 +1,21 @@
+# infra/acceptance/scenarios/deployment-regression.yaml
+name: deployment-regression
+description: Simulates a bad deployment causing intermittent errors
+fault_injection:
+  service: payment-service
+  env_var: FAULT_DEPENDENCY
+  value: "true"
+trigger_condition: "payment-service returns 503 for all requests"
+normal_behavior:
+  - "Payment service processes payments normally"
+fault_behavior:
+  - "Payment service returns 503 for all payment requests"
+  - "order-service sees 502 from payment-service"
+expected_diagnosis:
+  - "Agent should identify payment-service as source of errors"
+  - "Root cause: payment-service deployment regression"
+  - "Evidence: payment-service 503 responses, order-service 502 errors"
+verification_points:
+  - "Agent checks payment-service health endpoint"
+  - "Agent correlates order-service errors with payment-service failures"
+  - "Report identifies payment-service regression"

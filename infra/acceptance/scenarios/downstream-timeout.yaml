@@ -1,0 +1,20 @@
+# infra/acceptance/scenarios/downstream-timeout.yaml
+name: downstream-timeout
+description: Payment service response timeout causes order failures
+fault_injection:
+  service: order-service
+  env_var: FAULT_PAYMENT_TIMEOUT
+  value: "true"
+normal_behavior:
+  - "POST /orders creates order, payment processed within 5s"
+fault_behavior:
+  - "POST /orders returns 504 with 'payment service timeout'"
+  - "order-service logs: ERROR: Payment service timeout after 0.001s"
+expected_diagnosis:
+  - "Agent should trace order → payment call chain"
+  - "Root cause: payment service unreachable or misconfigured timeout"
+  - "Evidence: order-service timeout logs, payment-service health"
+verification_points:
+  - "Agent identifies timeout in order-service logs"
+  - "Agent checks payment-service connectivity"
+  - "Report identifies payment service as bottleneck"
