@@ -256,8 +256,13 @@ TOOL_CALL_TRANSITIONS: dict[ToolCallStatus, frozenset[ToolCallStatus]] = {
             ToolCallStatus.CANCELLED,
         }
     ),
+    # RUNNING -> WAITING_APPROVAL lets the executor stamp a call RUNNING before
+    # it runs and still park on approval: the call is persisted as RUNNING for
+    # the whole execution attempt, and a tool that turns out to need approval
+    # moves to WAITING_APPROVAL instead of being left unclassifiable.
     ToolCallStatus.RUNNING: frozenset(
         {
+            ToolCallStatus.WAITING_APPROVAL,
             ToolCallStatus.SUCCEEDED,
             ToolCallStatus.FAILED,
             ToolCallStatus.UNCERTAIN,

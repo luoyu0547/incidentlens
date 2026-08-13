@@ -148,16 +148,50 @@ class RecoveryService:
         self._accepting = True
         self._investigations.accepting = True
         pending = len(self._store.list_non_terminal_investigations())
+        # C2/M1: finalise crash-mid-cancel runs FIRST (sweeping their in-flight
+        # tool calls) so a decided approval can never re-execute a dangerous
+        # operation against a run the operator cancelled.
+        cancel_finalised = self._finalise_cancel_requested()
         reconciled = await self._reconcile_decided_approvals()
-        scanned = self._scan_investigations()
+        scanned = self._classify_in_flight_runs()
+        scanned = replace(
+            scanned,
+            reconciled_approvals=reconciled,
+            cancel_finalised=cancel_finalised,
+        )
         # Only audit a recovery that actually did something; an empty startup
         # is a no-op and must not inject recovery.* events into the stream.
-        if self._events_pub is not None and (pending or reconciled):
+        if self._events_pub is not None and (
+            pending or reconciled or cancel_finalised
+        ):
             self._events_pub.recovery_started(count=pending, occurred_at=self._now())
             self._events_pub.recovery_completed(
                 count=scanned.scanned_investigations, occurred_at=self._now()
             )
-        return replace(scanned, reconciled_approvals=reconciled)
+        return scanned
+
+    def _finalise_cancel_requested(self) -> int:
+        """Finalise every CANCEL_REQUESTED run/investigation and sweep its calls.
+
+        Runs the per-run tool-call sweep (a dangerous RUNNING call becomes
+        UNCERTAIN with evidence, waiting/planned calls are cancelled) before
+        moving the run and its parent investigation to CANCELLED.  Returns the
+        number of investigations finalised.
+        """
+        count = 0
+        for investigation in self._store.list_non_terminal_investigations():
+            for run in self._store.list_agent_runs(
+                investigation_id=investigation.investigation_id
+            ):
+                if run.status is not AgentRunStatus.CANCEL_REQUESTED:
+                    continue
+                self._sweep_run_tool_calls(run, investigation)
+                self._transition_run_to_cancelled(run)
+            current = self._store.get_investigation(investigation.investigation_id)
+            if current.status is InvestigationStatus.CANCEL_REQUESTED:
+                if self._transition_investigation_to_cancelled(current):
+                    count += 1
+        return count
 
     async def _reconcile_decided_approvals(self) -> int:
         """Resolve approvals decided before the restart but never handled.
@@ -186,8 +220,13 @@ class RecoveryService:
                 reconciled += 1
         return reconciled
 
-    def _scan_investigations(self) -> RecoverySummary:
-        """Scan non-terminal investigations and classify every in-flight run."""
+    def _classify_in_flight_runs(self) -> RecoverySummary:
+        """Classify the in-flight tool calls of every surviving non-terminal run.
+
+        ``CANCEL_REQUESTED`` runs were already finalised by
+        ``_finalise_cancel_requested`` before this pass; every other run is
+        left parked and only its RUNNING tool calls are repaired.
+        """
         summary = RecoverySummary()
         for investigation in self._store.list_non_terminal_investigations():
             summary = replace(
@@ -198,13 +237,6 @@ class RecoveryService:
                 investigation_id=investigation.investigation_id
             ):
                 if _is_terminal_run(run.status):
-                    continue
-                if run.status is AgentRunStatus.CANCEL_REQUESTED:
-                    if self._finalise_cancel(run, investigation):
-                        summary = replace(
-                            summary,
-                            cancel_finalised=summary.cancel_finalised + 1,
-                        )
                     continue
                 parked, repaired = self._classify_in_flight(run, investigation)
                 if parked:
@@ -254,38 +286,6 @@ class RecoveryService:
             self._park_uncertain(run, investigation)
         return len(dangerous), len(safe)
 
-    def _finalise_cancel(
-        self, run: AgentRun, investigation: Investigation
-    ) -> bool:
-        """Finalise a CANCEL_REQUESTED run (and its investigation) to CANCELLED.
-
-        Returns True when the run was moved.  A crash mid-cancel leaves the
-        request parked; startup honours the operator's cancellation request.
-        """
-        now = self._now()
-        try:
-            self._store.transition_agent_run_status(
-                run.agent_run_id,
-                AgentRunStatus.CANCELLED,
-                now=now,
-                stop_reason=StopReason.CANCELLED,
-            )
-        except IllegalTransition:
-            return False
-        if run.kind is AgentRunKind.PARENT:
-            current = self._store.get_investigation(investigation.investigation_id)
-            if current.status is InvestigationStatus.CANCEL_REQUESTED:
-                try:
-                    self._store.transition_investigation_status(
-                        current.investigation_id,
-                        InvestigationStatus.CANCELLED,
-                        now=now,
-                        stop_reason=StopReason.CANCELLED,
-                    )
-                except IllegalTransition:
-                    pass
-        return True
-
     # -- shutdown -------------------------------------------------------------
 
     async def shutdown(self) -> int:
@@ -316,41 +316,52 @@ class RecoveryService:
             ):
                 if _is_terminal_run(run.status):
                     continue
-                # In-flight calls whose outcome can no longer be confirmed.
-                for call in self._store.list_tool_calls(
-                    agent_run_id=run.agent_run_id, status=ToolCallStatus.RUNNING
-                ):
-                    if call.tool_name in _DANGEROUS_TOOLS:
-                        self._mark_tool_uncertain(
-                            call,
-                            run,
-                            investigation,
-                            "shutdown interrupted execution; outcome cannot be confirmed",
-                        )
-                    else:
-                        self._mark_tool_failed_retryable(call)
-                # Calls that were never going to run after shutdown.
-                for call in self._store.list_tool_calls(
-                    agent_run_id=run.agent_run_id,
-                    status=ToolCallStatus.WAITING_APPROVAL,
-                ):
-                    self._transition_tool_call(
-                        call, ToolCallStatus.CANCELLED,
-                        error_redacted="shutdown before the approval decision",
-                    )
-                for call in self._store.list_tool_calls(
-                    agent_run_id=run.agent_run_id, status=ToolCallStatus.PLANNED
-                ):
-                    self._transition_tool_call(
-                        call, ToolCallStatus.CANCELLED,
-                        error_redacted="shutdown before execution",
-                    )
+                self._sweep_run_tool_calls(run, investigation)
                 self._transition_run_to_cancelled(run)
             current = self._store.get_investigation(investigation.investigation_id)
             if not _is_terminal_investigation(current.status):
                 if self._transition_investigation_to_cancelled(current):
                     cancelled += 1
         return cancelled
+
+    def _sweep_run_tool_calls(
+        self, run: AgentRun, investigation: Investigation
+    ) -> None:
+        """Mark every non-terminal tool call of *run* terminal.
+
+        A RUNNING dangerous call (execution was in progress when the process
+        died / was interrupted) becomes UNCERTAIN with UNCERTAIN_STATE evidence
+        -- its outcome cannot be confirmed and it is never replayed.  A RUNNING
+        safe read-only call is failed (retryable); waiting/planned calls that
+        never ran are cancelled.
+        """
+        for call in self._store.list_tool_calls(
+            agent_run_id=run.agent_run_id, status=ToolCallStatus.RUNNING
+        ):
+            if call.tool_name in _DANGEROUS_TOOLS:
+                self._mark_tool_uncertain(
+                    call,
+                    run,
+                    investigation,
+                    "interrupted execution; outcome cannot be confirmed and is never replayed",
+                )
+            else:
+                self._mark_tool_failed_retryable(call)
+        for call in self._store.list_tool_calls(
+            agent_run_id=run.agent_run_id,
+            status=ToolCallStatus.WAITING_APPROVAL,
+        ):
+            self._transition_tool_call(
+                call, ToolCallStatus.CANCELLED,
+                error_redacted="stopped before the approval decision",
+            )
+        for call in self._store.list_tool_calls(
+            agent_run_id=run.agent_run_id, status=ToolCallStatus.PLANNED
+        ):
+            self._transition_tool_call(
+                call, ToolCallStatus.CANCELLED,
+                error_redacted="stopped before execution",
+            )
 
     def _transition_run_to_cancelled(self, run: AgentRun) -> bool:
         """Move *run* to CANCELLED through the legal transitions."""

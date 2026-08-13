@@ -747,6 +747,14 @@ class AgentOrchestrator:
             tool_call = self._load_or_create_tool_call(run, request, now)
             if TOOL_CALL_STATE_MACHINE.is_terminal(tool_call.status):
                 continue
+            # C1: persist the execution before the executor runs, so a crash
+            # mid-tool leaves a RUNNING call that startup recovery can
+            # classify (a dangerous call is parked UNCERTAIN, never replayed).
+            # A pre-existing RUNNING call is a resume re-entry, left untouched.
+            if tool_call.status is not ToolCallStatus.RUNNING:
+                tool_call = self._transition_tool_call(
+                    tool_call, ToolCallStatus.RUNNING, now=now
+                )
 
             outcome = await self._executor.execute(request, run, now=now)
 
@@ -756,9 +764,9 @@ class AgentOrchestrator:
             investigation = self._store.get_investigation(run.investigation_id)
 
             if outcome.status is ToolCallStatus.WAITING_APPROVAL:
-                # A PLANNED tool call can move straight to WAITING_APPROVAL; the
-                # executor decides approval dynamically so we never pre-stamp
-                # RUNNING (RUNNING -> WAITING_APPROVAL is not a legal move).
+                # The call is already RUNNING (stamped before the executor ran);
+                # the executor decided approval dynamically, so the call parks
+                # on WAITING_APPROVAL until the decision lands.
                 self._transition_tool_call(
                     tool_call, ToolCallStatus.WAITING_APPROVAL, now=now,
                     approval_id=outcome.approval_id,

@@ -49,6 +49,7 @@ from incidentlens_control_plane.investigation.types import (
     Hypothesis,
     Investigation,
     InvestigationBudget,
+    RegistryProposalStatus,
     RegistryUpdateProposal,
     StopReason,
     ToolCall,
@@ -428,10 +429,34 @@ class InvestigationService:
                 action="noop",
             )
         run = self._store.get_agent_run(tool_call.agent_run_id)
+        if self._run_cancel_pending(run):
+            # C2: an approval landing after the run was cancelled must never
+            # re-execute the tool; park the call and let the cancel finalise.
+            self._store.transition_tool_call_status(
+                tool_call.tool_call_id,
+                ToolCallStatus.CANCELLED,
+                now=now,
+                error_redacted="run cancelled before the approval could execute",
+            )
+            return ApprovalDecisionOutcome(
+                approval_id=approval.approval_id,
+                matched="tool_call",
+                tool_call_id=tool_call.tool_call_id,
+                run_id=tool_call.agent_run_id,
+                action="cancelled",
+            )
         request = ToolRequest(
             tool_call_id=tool_call.tool_call_id,
             tool_name=tool_call.tool_name,
             arguments=tool_call.arguments,
+        )
+        # C1: persist the re-execution before the executor runs so a crash
+        # mid-execution leaves a RUNNING call for startup recovery to classify
+        # (a dangerous call is parked UNCERTAIN, never replayed).
+        self._store.transition_tool_call_status(
+            tool_call.tool_call_id,
+            ToolCallStatus.RUNNING,
+            now=now,
         )
         outcome = await self._executor.execute(
             request, run, approval_id=tool_call.approval_id, now=now
@@ -446,14 +471,8 @@ class InvestigationService:
                 error_redacted=outcome.error_redacted or "approval could not be consumed",
             )
         else:
-            # WAITING_APPROVAL -> SUCCEEDED/FAILED/UNCERTAIN is not a legal
-            # move, so the call re-enters RUNNING first (stamping started_at)
-            # and then lands on the executed outcome.
-            self._store.transition_tool_call_status(
-                tool_call.tool_call_id,
-                ToolCallStatus.RUNNING,
-                now=now,
-            )
+            # The call was stamped RUNNING before execution; land it on the
+            # executed outcome.
             self._store.transition_tool_call_status(
                 tool_call.tool_call_id,
                 outcome.status,
@@ -483,6 +502,19 @@ class InvestigationService:
         now: datetime,
     ) -> ApprovalDecisionOutcome:
         assert self._registry_proposals is not None
+        run = self._store.get_agent_run(proposal.agent_run_id)
+        if self._run_cancel_pending(run):
+            # C2: never apply a registry write for a run the operator cancelled.
+            self._store.transition_proposal_status(
+                proposal.proposal_id, RegistryProposalStatus.STALE, now=now
+            )
+            return ApprovalDecisionOutcome(
+                approval_id=approval.approval_id,
+                matched="registry_proposal",
+                proposal_id=proposal.proposal_id,
+                run_id=proposal.agent_run_id,
+                action="cancelled",
+            )
         outcome = await self._registry_proposals.handle_approval_decision(
             proposal, approval, now=now
         )
@@ -494,6 +526,19 @@ class InvestigationService:
             run_id=proposal.agent_run_id,
             action=outcome.decision or "noop",
             applied=outcome.applied,
+        )
+
+    @staticmethod
+    def _run_cancel_pending(run: AgentRun) -> bool:
+        """Return True when an approval decision must not execute for *run*.
+
+        A run parked for cancellation (or already terminal) must never have an
+        approval re-execute a dangerous tool or apply a registry write: the
+        operator's cancel wins over the approval decision.
+        """
+        return (
+            run.status is AgentRunStatus.CANCEL_REQUESTED
+            or AGENT_RUN_STATE_MACHINE.is_terminal(run.status)
         )
 
     async def _resume_after_decision(self, agent_run_id: str, now: datetime) -> AgentRun:

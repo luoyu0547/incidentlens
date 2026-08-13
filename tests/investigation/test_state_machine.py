@@ -126,7 +126,7 @@ TOOL_CALL_CASES = [
     (ToolCallStatus.RUNNING, ToolCallStatus.FAILED, True),
     (ToolCallStatus.RUNNING, ToolCallStatus.UNCERTAIN, True),
     (ToolCallStatus.RUNNING, ToolCallStatus.CANCELLED, True),
-    (ToolCallStatus.RUNNING, ToolCallStatus.WAITING_APPROVAL, False),
+    (ToolCallStatus.RUNNING, ToolCallStatus.WAITING_APPROVAL, True),
     (ToolCallStatus.SUCCEEDED, ToolCallStatus.RUNNING, False),
     (ToolCallStatus.SUCCEEDED, ToolCallStatus.CANCELLED, False),
     (ToolCallStatus.FAILED, ToolCallStatus.RUNNING, False),

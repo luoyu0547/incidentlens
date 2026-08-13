@@ -423,7 +423,13 @@ def _is_in_flight(status: ToolCallStatus) -> bool:
 async def test_shutdown_drains_active_loop_and_marks_interrupted_tool_uncertain(
     tmp_path: Any,
 ) -> None:
-    """An active loop is drained within grace; a hung dangerous tool is swept."""
+    """An active loop is drained within grace; a hung dangerous tool is swept.
+
+    The tool call is stamped RUNNING by the orchestrator before the executor
+    runs (C1), so when shutdown interrupts the hung execution the sweep sees a
+    RUNNING dangerous call and marks it UNCERTAIN -- never left dangling and
+    never replayed.
+    """
     harness = build_harness(
         tmp_path,
         transport_factory=HarnessTransportFactory(hang_shell=True),
@@ -431,14 +437,6 @@ async def test_shutdown_drains_active_loop_and_marks_interrupted_tool_uncertain(
     registry = FakeProviderRegistry()
     _make_investigation(harness)
     _make_run(harness)
-    # The call is already RUNNING (the process died mid-execution), so shutdown
-    # cannot confirm its outcome and must mark it UNCERTAIN, never left dangling.
-    _make_tool_call(
-        harness,
-        tool_call_id="call-1",
-        tool_name="shell_exec",
-        status=ToolCallStatus.RUNNING,
-    )
     registry.set_script(
         "run-1",
         [
@@ -462,6 +460,11 @@ async def test_shutdown_drains_active_loop_and_marks_interrupted_tool_uncertain(
     loop_task = asyncio.create_task(orchestrator.run("run-1"))
     await asyncio.sleep(0.2)  # let the loop begin executing the hung tool
     assert not loop_task.done()
+    # C1: the executing call is persisted RUNNING, not PLANNED.
+    assert (
+        harness.investigations.get_tool_call("call-1").status
+        is ToolCallStatus.RUNNING
+    )
 
     cancelled = await recovery.shutdown()
 
@@ -473,6 +476,7 @@ async def test_shutdown_drains_active_loop_and_marks_interrupted_tool_uncertain(
     # as a dangling RUNNING row.
     tool_call = harness.investigations.get_tool_call("call-1")
     assert tool_call.status is ToolCallStatus.UNCERTAIN
+    assert "never replayed" in tool_call.error_redacted
 
 
 @pytest.mark.asyncio
@@ -492,6 +496,197 @@ async def test_shutdown_is_idempotent_and_cancels_created_investigations(
     assert second == 0
     assert service.get_investigation("inv-1").status is InvestigationStatus.CANCELLED
     assert service.get_run("run-1").status is AgentRunStatus.CANCELLED
+
+
+# ---------------------------------------------------------------------------
+# C1/C2 regressions: RUNNING persistence, cancel-vs-approval, cancel sweep
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_real_execution_crash_marks_dangerous_in_flight_uncertain(
+    tmp_path: Any,
+) -> None:
+    """A crash under the real execution model leaves RUNNING -> UNCERTAIN.
+
+    The orchestrator persists the tool call as RUNNING before the executor
+    runs (C1), so a crash mid-execution leaves a RUNNING dangerous call that
+    startup recovery parks UNCERTAIN -- it is never replayed on resume.
+    """
+    harness = build_harness(
+        tmp_path,
+        transport_factory=HarnessTransportFactory(hang_shell=True),
+    )
+    registry = FakeProviderRegistry()
+    _make_investigation(harness)
+    _make_run(harness)
+    registry.set_script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=(
+                    tool_request(
+                        "shell_exec",
+                        tool_call_id="call-1",
+                        service_name=SERVICE,
+                        command="docker ps",
+                        timeout_seconds=30,
+                    ),
+                )
+            )
+        ],
+    )
+    orchestrator, service, recovery = build_recovery(harness, registry)
+
+    # Crash mid-execution: kill the loop without any orderly shutdown.
+    loop_task = asyncio.create_task(orchestrator.run("run-1"))
+    await asyncio.sleep(0.2)
+    loop_task.cancel()
+    await asyncio.gather(loop_task, return_exceptions=True)
+    # C1: the dangerous call is persisted RUNNING after the crash.
+    assert (
+        harness.investigations.get_tool_call("call-1").status
+        is ToolCallStatus.RUNNING
+    )
+
+    # Restart recovery classifies it: parked UNCERTAIN, never replayed.
+    summary = await recovery.startup()
+    assert summary.dangerous_parked == 1
+    assert service.get_run("run-1").status is AgentRunStatus.PAUSED_UNCERTAIN_STATE
+    assert (
+        service.get_investigation("inv-1").status
+        is InvestigationStatus.PAUSED_UNCERTAIN_STATE
+    )
+    tool_call = harness.investigations.get_tool_call("call-1")
+    assert tool_call.status is ToolCallStatus.UNCERTAIN
+    assert "never replayed" in tool_call.error_redacted
+
+
+@pytest.mark.asyncio
+async def test_approval_after_cancel_does_not_execute_tool(tmp_path: Any) -> None:
+    """An approval landing after the run was cancelled never re-executes."""
+    harness = build_harness(
+        tmp_path,
+        transport_factory=HarnessTransportFactory(
+            shell_output=b"restarted", shell_status=0
+        ),
+    )
+    registry = FakeProviderRegistry()
+    _make_investigation(harness)
+    _make_run(harness)
+    registry.set_script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=(
+                    tool_request(
+                        "shell_exec",
+                        tool_call_id="call-1",
+                        service_name=SERVICE,
+                        command="systemctl restart mysql",
+                    ),
+                )
+            )
+        ],
+    )
+    _, service, _ = build_recovery(harness, registry)
+
+    parked = await service.resume_run("run-1")
+    assert parked.status is AgentRunStatus.WAITING_APPROVAL
+    approval = harness.approvals.list()[0]
+    await harness.approvals.approve(approval.approval_id)
+
+    # The operator cancels the investigation after the approval was granted.
+    await service.cancel("inv-1")
+    assert service.get_run("run-1").status is AgentRunStatus.CANCEL_REQUESTED
+
+    outcome = await service.handle_approval_decision(approval.approval_id)
+
+    assert outcome.action == "cancelled"
+    assert outcome.applied is False
+    # No transport contact: the dangerous tool was never re-executed.
+    assert harness.factory.transports == []
+    assert (
+        harness.investigations.get_tool_call("call-1").status
+        is ToolCallStatus.CANCELLED
+    )
+
+
+@pytest.mark.asyncio
+async def test_startup_does_not_reexecute_approved_tool_on_cancelled_run(
+    tmp_path: Any,
+) -> None:
+    """Startup finalises cancels before reconciling, so nothing re-executes."""
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(harness, status=InvestigationStatus.CANCEL_REQUESTED)
+    _make_run(harness, status=AgentRunStatus.CANCEL_REQUESTED)
+    approval = await harness.approvals.request({"kind": "shell", "target_id": TARGET_ID})
+    await harness.approvals.approve(approval.approval_id)
+    # A WAITING_APPROVAL tool call linked to the approved approval, as a crash
+    # would leave it.
+    call = ToolCall(
+        tool_call_id="call-1",
+        agent_run_id="run-1",
+        tool_name="shell_exec",
+        status=ToolCallStatus.PLANNED,
+        idempotency_key="call-1",
+        planned_at=NOW,
+    )
+    harness.investigations.create_tool_call(call)
+    harness.investigations.transition_tool_call_status(
+        "call-1",
+        ToolCallStatus.WAITING_APPROVAL,
+        now=NOW,
+        approval_id=approval.approval_id,
+    )
+
+    _, service, recovery = build_recovery(harness, registry)
+    summary = await recovery.startup()
+
+    assert summary.cancel_finalised == 1
+    assert summary.reconciled_approvals == 0
+    assert service.get_run("run-1").status is AgentRunStatus.CANCELLED
+    assert service.get_investigation("inv-1").status is InvestigationStatus.CANCELLED
+    # The tool was swept to CANCELLED (M1), never re-executed.
+    assert (
+        harness.investigations.get_tool_call("call-1").status
+        is ToolCallStatus.CANCELLED
+    )
+    assert harness.factory.transports == []
+
+
+@pytest.mark.asyncio
+async def test_startup_finalises_cancel_sweeps_in_flight_tool_calls(
+    tmp_path: Any,
+) -> None:
+    """A crash-mid-cancel run's in-flight calls are swept before finalisation."""
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(harness, status=InvestigationStatus.CANCEL_REQUESTED)
+    _make_run(harness, status=AgentRunStatus.CANCEL_REQUESTED)
+    _make_tool_call(harness, tool_call_id="call-danger", tool_name="docker_action")
+    _make_tool_call(
+        harness, tool_call_id="call-waiting", tool_name="shell_exec",
+        status=ToolCallStatus.WAITING_APPROVAL,
+    )
+    _make_tool_call(
+        harness, tool_call_id="call-planned", tool_name="host_read",
+        status=ToolCallStatus.PLANNED,
+    )
+
+    _, service, recovery = build_recovery(harness, registry)
+    summary = await recovery.startup()
+
+    assert summary.cancel_finalised == 1
+    store = harness.investigations
+    assert store.get_tool_call("call-danger").status is ToolCallStatus.UNCERTAIN
+    assert store.get_tool_call("call-waiting").status is ToolCallStatus.CANCELLED
+    assert store.get_tool_call("call-planned").status is ToolCallStatus.CANCELLED
+    assert service.get_run("run-1").status is AgentRunStatus.CANCELLED
+    # UNCERTAIN_STATE evidence was recorded for the dangerous in-flight call.
+    stored = harness.evidence_store.query(agent_run_id="run-1")
+    assert any(item.evidence_kind is EvidenceKind.UNCERTAIN_STATE for item in stored)
 
 
 # ---------------------------------------------------------------------------
