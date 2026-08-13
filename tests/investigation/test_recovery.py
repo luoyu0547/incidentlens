@@ -613,6 +613,95 @@ async def test_approval_after_cancel_does_not_execute_tool(tmp_path: Any) -> Non
 
 
 @pytest.mark.asyncio
+async def test_approval_on_waiting_approval_run_under_cancelled_investigation_skipped(
+    tmp_path: Any,
+) -> None:
+    """A decision on a WAITING_APPROVAL run under a CANCELLED investigation is
+    skipped: ``_run_cancel_pending`` checks the owning investigation, so a
+    crash-mid-cancel orphan can never re-execute a dangerous tool."""
+    harness = build_harness(
+        tmp_path,
+        transport_factory=HarnessTransportFactory(
+            shell_output=b"restarted", shell_status=0
+        ),
+    )
+    registry = FakeProviderRegistry()
+    _make_investigation(harness, status=InvestigationStatus.CANCELLED)
+    _make_run(harness, status=AgentRunStatus.WAITING_APPROVAL)
+    approval = await harness.approvals.request({"kind": "shell", "target_id": TARGET_ID})
+    await harness.approvals.approve(approval.approval_id)
+    call = ToolCall(
+        tool_call_id="call-1",
+        agent_run_id="run-1",
+        tool_name="shell_exec",
+        status=ToolCallStatus.PLANNED,
+        idempotency_key="call-1",
+        planned_at=NOW,
+    )
+    harness.investigations.create_tool_call(call)
+    harness.investigations.transition_tool_call_status(
+        "call-1",
+        ToolCallStatus.WAITING_APPROVAL,
+        now=NOW,
+        approval_id=approval.approval_id,
+    )
+
+    _, service, _ = build_recovery(harness, registry)
+    outcome = await service.handle_approval_decision(approval.approval_id)
+
+    assert outcome.action == "cancelled"
+    assert outcome.applied is False
+    assert harness.factory.transports == []
+    assert (
+        harness.investigations.get_tool_call("call-1").status
+        is ToolCallStatus.CANCELLED
+    )
+
+
+@pytest.mark.asyncio
+async def test_startup_cancelled_investigation_sweeps_waiting_approval_run(
+    tmp_path: Any,
+) -> None:
+    """A crash-mid-cancel leaves a WAITING_APPROVAL run under a cancelled
+    investigation; startup sweeps the run and never re-executes the approved
+    tool (C2 residual fix)."""
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(harness, status=InvestigationStatus.CANCEL_REQUESTED)
+    _make_run(harness, status=AgentRunStatus.WAITING_APPROVAL)
+    approval = await harness.approvals.request({"kind": "shell", "target_id": TARGET_ID})
+    await harness.approvals.approve(approval.approval_id)
+    call = ToolCall(
+        tool_call_id="call-1",
+        agent_run_id="run-1",
+        tool_name="shell_exec",
+        status=ToolCallStatus.PLANNED,
+        idempotency_key="call-1",
+        planned_at=NOW,
+    )
+    harness.investigations.create_tool_call(call)
+    harness.investigations.transition_tool_call_status(
+        "call-1",
+        ToolCallStatus.WAITING_APPROVAL,
+        now=NOW,
+        approval_id=approval.approval_id,
+    )
+
+    _, service, recovery = build_recovery(harness, registry)
+    summary = await recovery.startup()
+
+    assert summary.cancel_finalised == 1
+    assert summary.reconciled_approvals == 0
+    assert service.get_investigation("inv-1").status is InvestigationStatus.CANCELLED
+    assert service.get_run("run-1").status is AgentRunStatus.CANCELLED
+    assert (
+        harness.investigations.get_tool_call("call-1").status
+        is ToolCallStatus.CANCELLED
+    )
+    assert harness.factory.transports == []
+
+
+@pytest.mark.asyncio
 async def test_startup_does_not_reexecute_approved_tool_on_cancelled_run(
     tmp_path: Any,
 ) -> None:

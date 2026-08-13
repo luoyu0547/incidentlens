@@ -38,6 +38,7 @@ from incidentlens_control_plane.investigation.state_machine import (
 from incidentlens_control_plane.investigation.store import (
     AgentRound,
     Checkpoint,
+    InvestigationNotFound,
     InvestigationStore,
 )
 from incidentlens_control_plane.investigation.tool_executor import ToolExecutor
@@ -528,17 +529,28 @@ class InvestigationService:
             applied=outcome.applied,
         )
 
-    @staticmethod
-    def _run_cancel_pending(run: AgentRun) -> bool:
+    def _run_cancel_pending(self, run: AgentRun) -> bool:
         """Return True when an approval decision must not execute for *run*.
 
-        A run parked for cancellation (or already terminal) must never have an
-        approval re-execute a dangerous tool or apply a registry write: the
-        operator's cancel wins over the approval decision.
+        A run parked for cancellation, a run whose owning investigation is
+        parked for cancellation or already terminal, and any terminal run must
+        never have an approval re-execute a dangerous tool or apply a registry
+        write: the operator's cancel wins over the approval decision.  A crash
+        mid-cancel can leave a WAITING_APPROVAL run underneath a CANCELLED or
+        CANCEL_REQUESTED investigation, so the investigation is checked too.
         """
+        if run.status is AgentRunStatus.CANCEL_REQUESTED:
+            return True
+        if AGENT_RUN_STATE_MACHINE.is_terminal(run.status):
+            return True
+        try:
+            investigation = self._store.get_investigation(run.investigation_id)
+        except InvestigationNotFound:
+            # A run with no owning investigation must never execute a mutation.
+            return True
         return (
-            run.status is AgentRunStatus.CANCEL_REQUESTED
-            or AGENT_RUN_STATE_MACHINE.is_terminal(run.status)
+            investigation.status is InvestigationStatus.CANCEL_REQUESTED
+            or INVESTIGATION_STATE_MACHINE.is_terminal(investigation.status)
         )
 
     async def _resume_after_decision(self, agent_run_id: str, now: datetime) -> AgentRun:

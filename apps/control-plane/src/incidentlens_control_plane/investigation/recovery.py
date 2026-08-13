@@ -171,19 +171,26 @@ class RecoveryService:
         return scanned
 
     def _finalise_cancel_requested(self) -> int:
-        """Finalise every CANCEL_REQUESTED run/investigation and sweep its calls.
+        """Finalise every cancelled investigation and its runs; sweep their calls.
 
-        Runs the per-run tool-call sweep (a dangerous RUNNING call becomes
-        UNCERTAIN with evidence, waiting/planned calls are cancelled) before
-        moving the run and its parent investigation to CANCELLED.  Returns the
-        number of investigations finalised.
+        A crash mid-cancel can leave the investigation parked CANCEL_REQUESTED
+        while some runs are still WAITING_APPROVAL/PAUSED/RUNNING (the cancel
+        parks the investigation before it parks every run).  Every non-terminal
+        run of a CANCEL_REQUESTED investigation is therefore swept (a dangerous
+        RUNNING call becomes UNCERTAIN with evidence, waiting/planned calls are
+        cancelled) and finalised to CANCELLED, so a decided approval can never
+        re-execute a dangerous operation underneath a cancelled investigation.
+        Returns the number of investigations finalised.
         """
         count = 0
         for investigation in self._store.list_non_terminal_investigations():
+            cancelled = investigation.status is InvestigationStatus.CANCEL_REQUESTED
             for run in self._store.list_agent_runs(
                 investigation_id=investigation.investigation_id
             ):
-                if run.status is not AgentRunStatus.CANCEL_REQUESTED:
+                if _is_terminal_run(run.status):
+                    continue
+                if run.status is not AgentRunStatus.CANCEL_REQUESTED and not cancelled:
                     continue
                 self._sweep_run_tool_calls(run, investigation)
                 self._transition_run_to_cancelled(run)
