@@ -1,0 +1,21 @@
+/* apps/control-plane/src/incidentlens_control_plane/web/static/css/custom.css */
+:root {
+    --il-primary: #3b5998;
+    --il-success: #28a745;
+    --il-warning: #ffc107;
+    --il-danger: #dc3545;
+}
+
+/* Status badges */
+mark {
+    background: var(--il-warning);
+    color: #000;
+    padding: 0.1em 0.4em;
+    border-radius: 3px;
+    font-size: 0.85em;
+}
+
+/* Table zebra striping */
+tbody tr:nth-child(even) {
+    background: rgba(0, 0, 0, 0.02);
+}

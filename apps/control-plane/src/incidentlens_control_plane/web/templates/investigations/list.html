@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Investigations — IncidentLens{% endblock %}
+{% block content %}
+<h2>Investigations</h2>
+<table>
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Symptom</th>
+            <th>Status</th>
+            <th>Service</th>
+            <th>Created</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for inv in investigations %}
+        <tr>
+            <td><a href="/web/investigations/{{ inv.investigation_id }}">{{ inv.investigation_id[:16] }}</a></td>
+            <td>{{ inv.symptom[:80] }}</td>
+            <td><mark>{{ inv.status.value }}</mark></td>
+            <td>{{ inv.service }}</td>
+            <td>{{ inv.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="5">No investigations found.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}
