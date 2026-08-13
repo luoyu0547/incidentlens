@@ -119,6 +119,7 @@ class AgentOrchestrator:
         sessions: SessionManager,
         guard: InvestigationGuard | None = None,
         global_child_limit: int = 8,
+        default_budget: AgentBudget | None = None,
         max_provider_retries: int = 2,
         now: Callable[[], datetime] | None = None,
         events: RuntimeEventStore | None = None,
@@ -134,6 +135,7 @@ class AgentOrchestrator:
         self._sessions = sessions
         self._guard = guard or InvestigationGuard()
         self._global_child_limit = global_child_limit
+        self._default_budget = default_budget or AgentBudget()
         self._max_provider_retries = max_provider_retries
         self._now = now or (lambda: datetime.now(UTC))
         self._events_pub = (
@@ -145,6 +147,10 @@ class AgentOrchestrator:
         # orchestrator.  The per-investigation cap is enforced by the guard's
         # ``can_spawn_child`` (``investigation.budget.max_children``).
         self._child_semaphore = asyncio.Semaphore(global_child_limit)
+        # Every active parent/child loop task, tracked so the recovery service
+        # can request an orderly drain on shutdown.  The store remains the
+        # source of truth; this registry only lets shutdown cancel stragglers.
+        self._active_loop_tasks: set[asyncio.Task] = set()
 
     # -- public entry points --------------------------------------------------
 
@@ -169,9 +175,48 @@ class AgentOrchestrator:
         self._store.get_agent_run(agent_run_id)  # fail fast when unknown
         return await self._run_loop(agent_run_id)
 
+    async def drain_active_loops(self, timeout: float) -> int:
+        """Wait up to *timeout* for active loops, then cancel the stragglers.
+
+        Shutdown path: after the recovery service parks every run as
+        ``CANCEL_REQUESTED``, this gives the live loops a grace window to
+        observe the request and finalise.  Loops still running after the grace
+        window are cancelled so the process can exit; their runs are swept to a
+        terminal state by the recovery service.
+        """
+        tasks = [task for task in list(self._active_loop_tasks) if not task.done()]
+        if not tasks:
+            return 0
+        _, pending = await asyncio.wait(tasks, timeout=timeout)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        return len(tasks)
+
+    async def cancel_active_loops(self) -> int:
+        """Cancel every tracked active loop task and await it (shutdown path)."""
+        tasks = [task for task in list(self._active_loop_tasks) if not task.done()]
+        if not tasks:
+            return 0
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        return len(tasks)
+
     # -- the shared loop ------------------------------------------------------
 
     async def _run_loop(self, agent_run_id: str) -> AgentRun:
+        task = asyncio.current_task()
+        if task is not None:
+            self._active_loop_tasks.add(task)
+        try:
+            return await self._run_loop_inner(agent_run_id)
+        finally:
+            if task is not None:
+                self._active_loop_tasks.discard(task)
+
+    async def _run_loop_inner(self, agent_run_id: str) -> AgentRun:
         pending_children: list[tuple[str, asyncio.Task]] = []
         child_reports: list[ChildReport] = []
 
@@ -1290,7 +1335,7 @@ class AgentOrchestrator:
             kind=AgentRunKind.PARENT,
             scope=parent_scope,
             status=AgentRunStatus.CREATED,
-            budget=parent_budget or AgentBudget(),
+            budget=parent_budget or self._default_budget,
             usage=UsageCounters(),
             created_at=now,
             updated_at=now,

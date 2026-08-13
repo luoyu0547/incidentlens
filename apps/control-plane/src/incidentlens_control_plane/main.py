@@ -28,18 +28,39 @@ async def _lifespan(
     services = build_runtime(settings, transport_factory=transport_factory)
     app.state.runtime = services
     try:
-        # Restore active opt-in log subscriptions.  A single failing
-        # subscription must not prevent startup: the manager isolates
-        # per-subscription reader errors, and this guard covers any
+        # Restore active opt-in log subscriptions before any request is served.
+        # A single failing subscription must not prevent startup: the manager
+        # isolates per-subscription reader errors, and this guard covers any
         # unexpected store/setup failure.
         try:
             await services.subscriptions.start_active_opt_in()
         except Exception:
             logger.exception("failed to restore active log subscriptions")
+        # Then reconcile decided-but-unhandled approvals and scan the
+        # investigations/checkpoints left over from a previous process, so a
+        # restart never replays a dangerous in-flight operation.
+        try:
+            await services.recovery.startup()
+        except Exception:
+            logger.exception("failed to run investigation startup recovery")
         yield
     finally:
-        await services.subscriptions.close_all()
-        await services.sessions.close_all()
+        # Orderly shutdown: stop accepting new investigations, request active
+        # loops to checkpoint/cancel/drain and sweep unconfirmable dangerous
+        # calls to UNCERTAIN, then close investigations/children, then log
+        # subscriptions, and only then the host sessions.
+        try:
+            await services.recovery.shutdown()
+        except Exception:
+            logger.exception("failed to shut down investigations")
+        try:
+            await services.subscriptions.close_all()
+        except Exception:
+            logger.exception("failed to close log subscriptions")
+        try:
+            await services.sessions.close_all()
+        except Exception:
+            logger.exception("failed to close host sessions")
         app.state.runtime = None  # type: ignore[assignment]
 
 

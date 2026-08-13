@@ -20,6 +20,7 @@ from incidentlens_control_plane.investigation.fake_provider import (
     FakeProviderRegistry,
 )
 from incidentlens_control_plane.investigation.orchestrator import AgentOrchestrator
+from incidentlens_control_plane.investigation.recovery import RecoveryService
 from incidentlens_control_plane.investigation.registry_proposals import (
     RegistryProposalService,
 )
@@ -64,19 +65,23 @@ class RuntimeServices:
     registry_proposals: RegistryProposalService
     source_discovery: SourceDiscoveryService
     fake_provider: FakeProviderRegistry
+    recovery: RecoveryService
 
 
 def build_runtime(
     settings: RuntimeSettings,
     *,
     transport_factory: RemoteTransportFactory | None = None,
+    fake_provider_registry: FakeProviderRegistry | None = None,
 ) -> RuntimeServices:
     """Build and initialize the local runtime services.
 
     Creates the data directory, initializes SQLite databases, and runs migrations
     for all stores.  Services are constructed in dependency order: stores and the
     event broker first, then the approval service, session manager, change
-    manager, and the remote-tool gateway.
+    manager, and the remote-tool gateway, then the Phase 4 evidence/provider/tool
+    stack, the orchestrator, the investigation service, and finally the recovery
+    service (which owns startup recovery and orderly shutdown).
     """
     settings.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     settings.data_dir.chmod(0o700)
@@ -164,7 +169,7 @@ def build_runtime(
         investigations=investigation_store,
         approvals=approvals,
     )
-    fake_provider = FakeProviderRegistry()
+    fake_provider = fake_provider_registry or FakeProviderRegistry()
     orchestrator = AgentOrchestrator(
         store=investigation_store,
         provider=FakeProvider(fake_provider),
@@ -172,6 +177,8 @@ def build_runtime(
         evidence=evidence_service,
         projects=projects,
         sessions=sessions,
+        global_child_limit=settings.max_active_children,
+        default_budget=settings.default_run_budget(),
         events=events,
         broker=broker,
     )
@@ -200,6 +207,18 @@ def build_runtime(
         registry_proposals=registry_proposals,
         events=events,
         broker=broker,
+        default_investigation_budget=settings.default_investigation_budget(),
+        max_active_investigations=settings.max_active_investigations,
+    )
+    recovery = RecoveryService(
+        store=investigation_store,
+        investigations=investigation_service,
+        orchestrator=orchestrator,
+        evidence=evidence_service,
+        approvals=approvals,
+        shutdown_grace_seconds=settings.shutdown_grace_seconds,
+        events=events,
+        broker=broker,
     )
 
     return RuntimeServices(
@@ -222,4 +241,5 @@ def build_runtime(
         registry_proposals=registry_proposals,
         source_discovery=source_discovery,
         fake_provider=fake_provider,
+        recovery=recovery,
     )

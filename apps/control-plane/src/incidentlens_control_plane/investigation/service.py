@@ -82,13 +82,24 @@ class InvestigationService:
         registry_proposals: RegistryProposalService | None = None,
         events: RuntimeEventStore | None = None,
         broker: RuntimeEventBroker | None = None,
+        default_investigation_budget: InvestigationBudget | None = None,
+        max_active_investigations: int = 4,
     ) -> None:
+        if max_active_investigations < 1:
+            raise ValueError("max_active_investigations must be >= 1")
         self._store = store
         self._orchestrator = orchestrator
         self._now = now or (lambda: datetime.now(UTC))
         self._approvals = approvals
         self._executor = executor
         self._registry_proposals = registry_proposals
+        self._default_investigation_budget = (
+            default_investigation_budget or InvestigationBudget()
+        )
+        self._max_active_investigations = max_active_investigations
+        # The recovery service flips this off during an orderly shutdown so no
+        # new investigation can be created while active loops are draining.
+        self.accepting: bool = True
         self._events_pub = (
             InvestigationEventPublisher(events, broker)
             if events is not None and broker is not None
@@ -107,7 +118,22 @@ class InvestigationService:
         incident_id: str | None = None,
         budget: InvestigationBudget | None = None,
     ) -> Investigation:
-        """Persist a new investigation in the CREATED state."""
+        """Persist a new investigation in the CREATED state.
+
+        Refuses to create while the runtime is shutting down and enforces the
+        bounded ``max_active_investigations`` cap over non-terminal
+        investigations, so an unbounded fleet can never be launched.
+        """
+        if not self.accepting:
+            raise NotAcceptingInvestigations(
+                "runtime is shutting down; no new investigations are accepted"
+            )
+        if len(self._store.list_non_terminal_investigations()) >= (
+            self._max_active_investigations
+        ):
+            raise TooManyActiveInvestigations(
+                f"active investigations exceed max_active={self._max_active_investigations}"
+            )
         now = self._now()
         investigation = Investigation(
             investigation_id=f"inv-{uuid.uuid4().hex[:16]}",
@@ -117,7 +143,7 @@ class InvestigationService:
             service=service,
             symptom=symptom,
             status=InvestigationStatus.CREATED,
-            budget=budget or InvestigationBudget(),
+            budget=budget or self._default_investigation_budget,
             usage=_empty_usage(),
             created_at=now,
             updated_at=now,
@@ -227,6 +253,20 @@ class InvestigationService:
             run.agent_run_id, AgentRunStatus.CANCEL_REQUESTED, now=now,
             stop_reason=StopReason.CANCELLED,
         )
+
+    async def cancel_all_active(self, *, now: datetime | None = None) -> int:
+        """Park every non-terminal investigation (and its runs) for cancellation.
+
+        Used by the recovery service on shutdown.  Returns how many
+        investigations were parked.  Idempotent: terminal investigations and
+        already-parked runs are left untouched.
+        """
+        now = now or self._now()
+        count = 0
+        for investigation in self._store.list_non_terminal_investigations():
+            await self.cancel(investigation.investigation_id)
+            count += 1
+        return count
 
     # -- read queries ---------------------------------------------------------
 
@@ -540,6 +580,14 @@ class InvestigationAlreadyTerminal(Exception):
     """Raised when ``start`` targets an investigation in a terminal state."""
 
 
+class TooManyActiveInvestigations(Exception):
+    """Raised when creating an investigation would exceed the active cap."""
+
+
+class NotAcceptingInvestigations(Exception):
+    """Raised when the runtime is shutting down and refuses new investigations."""
+
+
 def _empty_usage():
     from incidentlens_control_plane.investigation.types import UsageCounters
 
@@ -550,4 +598,6 @@ __all__ = [
     "ApprovalDecisionOutcome",
     "InvestigationAlreadyTerminal",
     "InvestigationService",
+    "NotAcceptingInvestigations",
+    "TooManyActiveInvestigations",
 ]

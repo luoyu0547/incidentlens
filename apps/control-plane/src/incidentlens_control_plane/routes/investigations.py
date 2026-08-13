@@ -17,6 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from incidentlens_control_plane.investigation.service import (
     InvestigationAlreadyTerminal,
+    NotAcceptingInvestigations,
+    TooManyActiveInvestigations,
 )
 from incidentlens_control_plane.investigation.state_machine import (
     AgentRunStatus,
@@ -136,6 +138,10 @@ async def create_investigation(
         )
     except AlreadyExists:
         raise HTTPException(status_code=409, detail="Investigation already exists")
+    except TooManyActiveInvestigations as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except NotAcceptingInvestigations as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     return record.model_dump(mode="json")
 
 
