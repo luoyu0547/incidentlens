@@ -44,6 +44,11 @@ Add the Claude Code-style interactive CLI, local visual Web UI, shared investiga
 
 Exit criterion: all ten MVP acceptance criteria in the approved specification pass in an end-to-end local demonstration.
 
+**Status: PLANNING (2026-08-13).**
+
+Detailed plan: `docs/superpowers/plans/2026-08-13-cli-web-reports-phase-5.md`
+Design spec: `docs/superpowers/specs/2026-08-13-cli-web-reports-phase-5-design.md`
+
 ## Cross-Phase Rules
 
 - Each phase receives its own detailed implementation plan and review before code changes begin.
