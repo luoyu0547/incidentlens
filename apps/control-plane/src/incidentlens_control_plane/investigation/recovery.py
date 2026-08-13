@@ -206,11 +206,15 @@ class RecoveryService:
                             cancel_finalised=summary.cancel_finalised + 1,
                         )
                     continue
-                if run.status is AgentRunStatus.RUNNING:
-                    parked, repaired = self._classify_in_flight(run, investigation)
+                parked, repaired = self._classify_in_flight(run, investigation)
+                if parked:
                     summary = replace(
                         summary,
                         dangerous_parked=summary.dangerous_parked + parked,
+                    )
+                if repaired:
+                    summary = replace(
+                        summary,
                         safe_repaired=summary.safe_repaired + repaired,
                     )
                 # WAITING_APPROVAL / WAITING_CHILDREN / PAUSED_* / CREATED runs
@@ -222,16 +226,19 @@ class RecoveryService:
     def _classify_in_flight(
         self, run: AgentRun, investigation: Investigation
     ) -> tuple[int, int]:
-        """Repair the in-flight tool calls of a RUNNING run found after restart.
+        """Repair the in-flight tool calls of a run found after restart.
 
-        Returns ``(dangerous_parked, safe_repaired)``.  Dangerous in-flight
-        calls are marked UNCERTAIN (with UNCERTAIN_STATE evidence) and the run
-        is parked PAUSED_UNCERTAIN_STATE — never replayed.  Safe read-only
-        in-flight calls are marked FAILED and the run stays resumable.
+        Returns ``(dangerous_parked, safe_repaired)``.  A dangerous in-flight
+        call is marked UNCERTAIN (with UNCERTAIN_STATE evidence); when the run
+        itself was RUNNING (mid-loop when the process died) it is also parked
+        PAUSED_UNCERTAIN_STATE — never replayed.  A safe read-only in-flight
+        call is marked FAILED (retryable) and a RUNNING run stays resumable.
         """
         in_flight = self._store.list_tool_calls(
             agent_run_id=run.agent_run_id, status=ToolCallStatus.RUNNING
         )
+        if not in_flight:
+            return 0, 0
         dangerous = [call for call in in_flight if call.tool_name in _DANGEROUS_TOOLS]
         safe = [call for call in in_flight if call.tool_name not in _DANGEROUS_TOOLS]
         for call in dangerous:
@@ -241,10 +248,10 @@ class RecoveryService:
                 investigation,
                 "interrupted by restart; outcome cannot be confirmed and is never replayed",
             )
-        if dangerous:
-            self._park_uncertain(run, investigation)
         for call in safe:
             self._mark_tool_failed_retryable(call, run)
+        if dangerous and run.status is AgentRunStatus.RUNNING:
+            self._park_uncertain(run, investigation)
         return len(dangerous), len(safe)
 
     def _finalise_cancel(
@@ -292,12 +299,16 @@ class RecoveryService:
         """
         self._accepting = False
         self._investigations.accepting = False
-        await self._investigations.cancel_all_active(now=self._now())
+        parked = await self._investigations.cancel_all_active(now=self._now())
         await self._orchestrator.drain_active_loops(self._shutdown_grace_seconds)
-        return self._sweep_shutdown()
+        self._sweep_shutdown()
+        return parked
 
     def _sweep_shutdown(self) -> int:
-        """Finalise every remaining non-terminal investigation/run."""
+        """Finalise every remaining non-terminal investigation/run.
+
+        Returns the number of investigations finalised to a terminal state.
+        """
         cancelled = 0
         for investigation in self._store.list_non_terminal_investigations():
             for run in self._store.list_agent_runs(
@@ -334,8 +345,7 @@ class RecoveryService:
                         call, ToolCallStatus.CANCELLED,
                         error_redacted="shutdown before execution",
                     )
-                if self._transition_run_to_cancelled(run):
-                    cancelled += 1
+                self._transition_run_to_cancelled(run)
             current = self._store.get_investigation(investigation.investigation_id)
             if not _is_terminal_investigation(current.status):
                 if self._transition_investigation_to_cancelled(current):

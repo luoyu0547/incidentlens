@@ -11,11 +11,19 @@ from pathlib import Path
 import incidentlens_control_plane.main as main_module
 import pytest
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from incidentlens_control_plane.config import RuntimeSettings
+from incidentlens_control_plane.investigation.state_machine import (
+    AgentRunStatus,
+    InvestigationStatus,
+    ToolCallStatus,
+)
 from incidentlens_control_plane.logs.types import LogScope, LogSourceKind
+from incidentlens_control_plane.main import create_app
+from incidentlens_control_plane.remote_ops.fakes import FakeTransportFactory
 from incidentlens_control_plane.runtime import build_runtime
 
-from web.conftest import make_subscription_record
+from web.conftest import make_subscription_record, seed_in_flight_run
 
 
 def _subscription_payload() -> dict[str, object]:
@@ -187,9 +195,10 @@ def test_lifespan_restores_subscriptions_before_requests_and_closes_before_sessi
     """Drive the real lifespan and assert startup/shutdown ordering.
 
     The lifespan must restore active log subscriptions before any request is
-    served (``subscriptions.start``) and, on shutdown, close subscriptions
-    before closing SSH sessions (``subscriptions.close`` then
-    ``sessions.close``).
+    served (``subscriptions.start``) and run the investigation startup recovery
+    after them; on shutdown it must run the recovery teardown first, then close
+    subscriptions, then close SSH sessions (``recovery`` -> ``subscriptions`` ->
+    ``sessions``).
     """
     calls: list[str] = []
 
@@ -204,6 +213,14 @@ def test_lifespan_restores_subscriptions_before_requests_and_closes_before_sessi
         async def close_all(self) -> None:
             calls.append("sessions.close")
 
+    class TrackingRecovery:
+        async def startup(self) -> None:
+            calls.append("recovery.startup")
+
+        async def shutdown(self) -> int:
+            calls.append("recovery.shutdown")
+            return 0
+
     settings = RuntimeSettings(data_dir=tmp_path / "data")
     services = build_runtime(settings)
     # ``RuntimeServices`` is a frozen slots dataclass, so tracking stubs are
@@ -212,6 +229,7 @@ def test_lifespan_restores_subscriptions_before_requests_and_closes_before_sessi
         services,
         subscriptions=TrackingSubscriptions(),  # type: ignore[arg-type]
         sessions=TrackingSessions(),  # type: ignore[arg-type]
+        recovery=TrackingRecovery(),  # type: ignore[arg-type]
     )
 
     # Inject the tracking-stub runtime into the REAL lifespan so startup and
@@ -231,4 +249,41 @@ def test_lifespan_restores_subscriptions_before_requests_and_closes_before_sessi
 
     asyncio.run(drive())
 
-    assert calls == ["subscriptions.start", "subscriptions.close", "sessions.close"]
+    assert calls == [
+        "subscriptions.start",
+        "recovery.startup",
+        "recovery.shutdown",
+        "subscriptions.close",
+        "sessions.close",
+    ]
+
+
+def test_lifespan_recovers_in_flight_run_after_restart(tmp_path: Path) -> None:
+    """A fresh process recovers a dangerous in-flight run left by a crash.
+
+    The seeded data dir (an investigation + RUNNING run + RUNNING dangerous
+    tool call) is what a crashed process would leave behind.  Startup recovery
+    must park the run PAUSED_UNCERTAIN_STATE and mark the call UNCERTAIN --
+    never replay it.
+    """
+    settings = RuntimeSettings(data_dir=tmp_path / "data")
+    # Simulate the earlier process: build once to seed crash-time state, then
+    # abandon it (a crash never runs the orderly shutdown).
+    seeded = build_runtime(settings, transport_factory=FakeTransportFactory())
+    seed_in_flight_run(seeded.investigation_store)
+
+    app = create_app(settings, transport_factory=FakeTransportFactory())
+    with TestClient(app) as client:
+        runtime = client.app.state.runtime
+        store = runtime.investigation_store
+        assert (
+            store.get_agent_run("run-restart-1").status
+            is AgentRunStatus.PAUSED_UNCERTAIN_STATE
+        )
+        assert (
+            store.get_investigation("inv-restart-1").status
+            is InvestigationStatus.PAUSED_UNCERTAIN_STATE
+        )
+        tool_call = store.get_tool_call("call-restart-1")
+        assert tool_call.status is ToolCallStatus.UNCERTAIN
+        assert "never replayed" in tool_call.error_redacted

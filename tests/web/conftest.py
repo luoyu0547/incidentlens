@@ -17,6 +17,22 @@ import pytest
 from fastapi.testclient import TestClient
 from incidentlens_control_plane.changes.types import ChangeSetStatus, FileChange
 from incidentlens_control_plane.config import RuntimeSettings
+from incidentlens_control_plane.investigation.state_machine import (
+    AgentRunStatus,
+    InvestigationStatus,
+    ToolCallStatus,
+)
+from incidentlens_control_plane.investigation.store import InvestigationStore
+from incidentlens_control_plane.investigation.types import (
+    AgentBudget,
+    AgentRun,
+    AgentRunKind,
+    AgentScope,
+    Investigation,
+    InvestigationBudget,
+    ToolCall,
+    UsageCounters,
+)
 from incidentlens_control_plane.logs.types import (
     LogRecord,
     LogScope,
@@ -94,6 +110,66 @@ def make_subscription_record(subscription_id: str, cursor: str) -> LogRecord:
         correlation_key=None,
         evidence_ref_id=None,
         created_at=now,
+    )
+
+
+def seed_in_flight_run(
+    store: InvestigationStore,
+    *,
+    investigation_id: str = "inv-restart-1",
+    run_id: str = "run-restart-1",
+    tool_call_id: str = "call-restart-1",
+    tool_name: str = "shell_exec",
+) -> None:
+    """Seed a dangerous in-flight run, as if the process crashed mid-execution.
+
+    Used by the restart-recovery tests: the rows are written directly so they
+    survive into a fresh process, where startup recovery must classify them.
+    """
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    store.create_investigation(
+        Investigation(
+            investigation_id=investigation_id,
+            incident_id="inc-restart-1",
+            project_id="payments",
+            target_id="dev-a",
+            service="payment-api",
+            symptom="restart recovery",
+            status=InvestigationStatus.RUNNING,
+            budget=InvestigationBudget(),
+            usage=UsageCounters(),
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    store.create_agent_run(
+        AgentRun(
+            agent_run_id=run_id,
+            investigation_id=investigation_id,
+            parent_run_id=None,
+            kind=AgentRunKind.PARENT,
+            scope=AgentScope(
+                project_id="payments",
+                target_id="dev-a",
+                scope=LogScope.HOST,
+                allowed_host_paths=(Path("/opt/payments"),),
+            ),
+            status=AgentRunStatus.RUNNING,
+            budget=AgentBudget(),
+            usage=UsageCounters(),
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    store.create_tool_call(
+        ToolCall(
+            tool_call_id=tool_call_id,
+            agent_run_id=run_id,
+            tool_name=tool_name,
+            status=ToolCallStatus.RUNNING,
+            idempotency_key=tool_call_id,
+            planned_at=now,
+        )
     )
 
 
