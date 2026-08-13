@@ -75,6 +75,59 @@ The fixture skips with a clear reason when the variable is absent or Docker is
 unavailable. See [Phase 3 Verification Guide](docs/phase-3-hybrid-log-evidence-verification.md)
 for the full offline and opt-in live command set.
 
+## Phase 4: Bounded Agent Runtime
+
+Phase 4 adds a bounded investigation agent runtime over the same registered
+targets. It is provider-neutral: the orchestrator drives a `ModelProvider`
+contract, and the only provider in the repository is a deterministic scripted
+`FakeProvider` — no real model is ever contacted. Every agent-visible external
+fact comes from the append-only, redacted evidence store, and every remote call
+stays behind the Phase 2/3 policy, approval, session and gateway gates.
+
+### Features
+
+- **Provider-neutral model contract** — a provider may only propose tool calls,
+  child delegations, hypotheses, conclusions and a stop signal; it never
+  executes tools, writes stores or sees raw transcripts
+  (`ProviderOutputValidator` rejects un-allowlisted, out-of-scope or
+  ungrounded output)
+- **Bounded parent / container-child loops** — per-run and per-investigation
+  budgets on rounds, tool calls, wall-clock, output bytes, evidence and
+  no-new-evidence rounds; a parent can concurrently delegate independent
+  container-scoped children, each with its own scope/session/evidence package
+- **Checkpoints, cancel, resume and restart recovery** — runs resume from their
+  latest checkpoint; startup recovery marks a dangerous in-flight call
+  `UNCERTAIN` and never replays it, while a safe read-only call is repaired and
+  resumable; shutdown is ordered investigations → subscriptions → sessions
+- **Evidence-grounded structured output** — hypotheses, conclusions and child
+  reports may only cite evidence the run actually owns; empty citations are a
+  missing-evidence pause, never a fabrication
+- **Approval pause/resume** — shell/PTTY, file mutations and docker actions that
+  policy classifies as approval-required park the run `WAITING_APPROVAL`;
+  approving re-executes the exact single-use intent once
+- **Source discovery and registry proposals** — discovery stays inside
+  registered bounds; unregistered containers/paths are surfaced as candidates
+  with the evidence that exposed them, and only an approved proposal widens the
+  registry after re-validation
+- **Investigation REST API and durable/live events** — `/api/investigations`,
+  `/api/evidence` and shared `/api/events`; payloads carry IDs, statuses and
+  bounded redacted summaries only
+
+### Quick Start (live verification)
+
+The live agent acceptance test is opt-in and skipped by default:
+
+```bash
+UV_CACHE_DIR=.uv-cache uv run pytest tests/investigation tests/evidence tests/remote_ops tests/logs tests/events tests/web tests/test_app.py -q
+INCIDENTLENS_RUN_LIVE_AGENT_TESTS=1 UV_CACHE_DIR=.uv-cache uv run pytest tests/integration/test_live_agent_runtime.py -q
+```
+
+The fixture skips with a clear reason when the variable is absent or Docker is
+unavailable. See [Phase 4 Verification Guide](docs/phase-4-agent-runtime-verification.md)
+for the full offline and opt-in live command set, including how the parent
+delegates container children, approval pause/resume, restart checkpoints and
+the uncertain no-replay recovery path.
+
 ## Phase 1: Local Runtime and Project Registry
 
 Phase 1 provides a **local-only runtime** and the **project registry** that
@@ -162,13 +215,18 @@ uv run ruff check .
 ### Code Structure
 
 - `apps/control-plane/src/incidentlens_control_plane/` - Main application
-  - `main.py` - Application entry point
-  - `runtime.py` - Runtime lifecycle management
-  - `routes.py` - HTTP/WebSocket endpoints
-  - `registry.py` - Project registry
-  - `events.py` - Event store and fan-out
-  - `state.py` - Application state
-  - `types.py` - Pydantic models
+  - `main.py` - FastAPI entry point and lifespan (startup recovery, shutdown order)
+  - `runtime.py` - `RuntimeServices` container and `build_runtime()` assembly
+  - `config.py` - Bounded `RuntimeSettings` (log subscription + agent budget caps)
+  - `project_registry/` - Project/target/service/path registry store and types
+  - `remote_ops/` - AsyncSSH transport, `SessionManager`, `RemoteToolGateway`, command policy, persistent shell, session lifecycle
+  - `logs/` - Log parsing, redaction, signals, correlation, store (FTS5), service, subscriptions
+  - `evidence/` - Typed append-only redacted evidence store and service
+  - `approvals/` - Exact single-use approval service and store
+  - `changes/` - Two-location backup ChangeSet manager and encrypted vault
+  - `events/` - Durable runtime event store and live broker
+  - `investigation/` - Phase 4 bounded agent runtime: provider contract, Fake Provider, tool registry/executor, orchestrator, service, source discovery, registry proposals, recovery, events
+  - `routes/` - HTTP/WebSocket endpoints (projects, remote-sessions, logs, evidence, investigations, approvals, changes, events)
 
 ## Phase 1 Scope
 

@@ -32,6 +32,12 @@ Add provider-neutral model interfaces, the bounded investigation loop, structure
 
 Exit criterion: a parent investigation can delegate a container-scoped task with independent context, receive an evidence-grounded report, and stop safely on budget exhaustion, missing evidence, approval, or uncertain remote state.
 
+**Status: COMPLETE (2026-08-12).** The runtime is driven by the deterministic `FakeProvider` (no real model is contacted), ships an investigation REST API + durable/live events, and is covered by startup recovery / orderly shutdown and an opt-in live SSH/Docker acceptance test (`INCIDENTLENS_RUN_LIVE_AGENT_TESTS=1`).
+
+Detailed plan: `docs/superpowers/plans/2026-08-12-agent-runtime-phase-4.md`
+Design spec: `docs/superpowers/specs/2026-08-12-agent-runtime-design.md`
+Verification: `docs/phase-4-agent-runtime-verification.md`
+
 ## Phase 5: CLI, Web UI, Reports, and End-to-End Acceptance
 
 Add the Claude Code-style interactive CLI, local visual Web UI, shared investigation event timeline, log views, approval and diff screens, source-path management, final reports, recovery flows, and the complete Docker Compose acceptance environment.
