@@ -106,9 +106,19 @@ class ProjectRegistryStore:
         return tuple(ProjectRecord.model_validate_json(row[0]) for row in rows)
 
     def replace(
-        self, registration: ProjectRegistration, *, now: datetime
+        self,
+        registration: ProjectRegistration,
+        *,
+        now: datetime,
+        expected_updated_at: datetime | None = None,
     ) -> ProjectRecord:
-        """Replace an existing project record. Raises ProjectNotFound if not found."""
+        """Replace an existing project record. Raises ProjectNotFound if not found.
+
+        When ``expected_updated_at`` is given, the UPDATE is conditional on the
+        stored ``updated_at`` matching it, so a concurrent writer that moved the
+        record first surfaces as ``RegistryUpdateConflict`` instead of a silent
+        lost update.
+        """
         with self._connection_factory() as conn:
             # First, get the existing record to preserve created_at
             cursor = conn.execute(
@@ -133,15 +143,36 @@ class ProjectRegistryStore:
             record_json = record.model_dump_json()
             updated_at_str = record.updated_at.isoformat()
 
-            conn.execute(
-                """
-                UPDATE projects
-                SET record_json = ?, created_at = ?, updated_at = ?
-                WHERE project_id = ?
-                """,
-                (record_json, created_at_str, updated_at_str, registration.project_id),
-            )
+            if expected_updated_at is None:
+                cursor = conn.execute(
+                    """
+                    UPDATE projects
+                    SET record_json = ?, created_at = ?, updated_at = ?
+                    WHERE project_id = ?
+                    """,
+                    (record_json, created_at_str, updated_at_str, registration.project_id),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE projects
+                    SET record_json = ?, created_at = ?, updated_at = ?
+                    WHERE project_id = ? AND updated_at = ?
+                    """,
+                    (
+                        record_json,
+                        created_at_str,
+                        updated_at_str,
+                        registration.project_id,
+                        expected_updated_at.isoformat(),
+                    ),
+                )
             conn.commit()
+
+            if cursor.rowcount == 0:
+                raise RegistryUpdateConflict(
+                    f"project '{registration.project_id}' was modified concurrently"
+                )
 
         return record
 

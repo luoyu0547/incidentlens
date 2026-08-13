@@ -182,3 +182,38 @@ def test_derive_registration_feeds_atomic_replace(tmp_path: Path) -> None:
     assert replaced.updated_at == created_at + timedelta(minutes=5)
     svc = replaced.services[0]
     assert "payments-api-2" in svc.container_names
+
+
+def test_replace_expected_updated_at_conflicts_on_stale_snapshot(
+    tmp_path: Path,
+) -> None:
+    """I2: replace() guarded by expected_updated_at rejects a write built from a
+    stale snapshot instead of silently clobbering a concurrent update."""
+    store = ProjectRegistryStore(connection_factory(tmp_path / "runtime.db"))
+    store.migrate()
+    created_at = datetime(2026, 8, 10, tzinfo=UTC)
+    created = store.create(_full_registration(tmp_path), now=created_at)
+    original_updated = created.updated_at
+
+    # First writer lands its container from the original snapshot.
+    first = store.derive_registration_with_updates(
+        created, service_name="payment-api", container="payments-api-2"
+    )
+    store.replace(first, now=created_at + timedelta(minutes=1))
+
+    # A second writer still working from the stale snapshot must conflict,
+    # not overwrite the first writer's container.
+    second = store.derive_registration_with_updates(
+        created, service_name="payment-api", container="payments-api-3"
+    )
+    with pytest.raises(RegistryUpdateConflict):
+        store.replace(
+            second,
+            now=created_at + timedelta(minutes=2),
+            expected_updated_at=original_updated,
+        )
+
+    live = store.get("payments")
+    svc = next(s for s in live.services if s.compose_service == "payment-api")
+    assert "payments-api-2" in svc.container_names
+    assert "payments-api-3" not in svc.container_names

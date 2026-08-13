@@ -55,6 +55,15 @@ class ApprovalService:
         """List approval records, optionally filtered by status."""
         return self._approvals.list(status)
 
+    def get(self, approval_id: str) -> ApprovalRecord | None:
+        """Return the persisted approval record by id, or ``None``.
+
+        Decision handlers must read from here rather than trusting a caller
+        supplied record, so a forged or expired ``ApprovalRecord`` can never
+        authorize a mutation.
+        """
+        return self._approvals.get(approval_id)
+
     async def request(
         self,
         intent: dict[str, JsonValue],

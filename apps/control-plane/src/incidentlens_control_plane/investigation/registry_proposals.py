@@ -17,6 +17,8 @@ never be replayed against a different shape of change.
 
 from __future__ import annotations
 
+import asyncio
+import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -63,6 +65,7 @@ from incidentlens_control_plane.remote_ops.sessions import SessionManager
 from incidentlens_control_plane.remote_ops.transport import RemotePathError
 
 _IDENTITY_TIMEOUT = 30.0
+_CONTAINER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
 class RegistryProposalError(Exception):
@@ -142,6 +145,7 @@ class RegistryProposalService:
         self._gateway = gateway
         self._sessions = sessions
         self._now = now or (lambda: datetime.now(UTC))
+        self._decision_locks: dict[str, asyncio.Lock] = {}
 
     # -- proposal creation ----------------------------------------------------
 
@@ -167,6 +171,10 @@ class RegistryProposalService:
             if not container:
                 raise RegistryProposalError(
                     "container_registration requires a candidate container"
+                )
+            if not _CONTAINER_NAME_RE.match(container):
+                raise RegistryProposalError(
+                    f"invalid container name: {container!r}"
                 )
         else:
             if not paths:
@@ -232,13 +240,29 @@ class RegistryProposalService:
     ) -> ProposalDecisionOutcome:
         """Resolve an approved or rejected approval against *proposal*.
 
-        Only a PENDING proposal is decided; calling this twice for the same
-        proposal is a no-op that returns the already-decided state.  An
-        approved proposal is applied atomically (verify identity -> canonicalize
-        -> ``replace()`` -> audit event -> consume approval).  A rejected or
-        stale decision is returned as evidence without touching the registry.
+        Decisions are serialized per proposal (an in-process ``asyncio.Lock``)
+        so two concurrent calls cannot double-apply a write or double-consume an
+        approval: the second caller re-reads the proposal status and becomes a
+        no-op.  Only a PENDING proposal is decided.  An approved proposal is
+        applied as verify identity -> canonicalize -> ``replace()`` (guarded by
+        the project's ``updated_at`` so a concurrent registry write is caught)
+        -> audit event -> consume approval.  The approval is re-read from the
+        store before any mutation, so a forged or expired caller-supplied record
+        can never authorize a registry write; consumption is terminal accounting
+        and a failure there does not roll back an already-completed write.
+        A rejected or stale decision is returned as evidence without touching
+        the registry.
         """
         now = now or self._now()
+        async with self._decision_lock(proposal.proposal_id):
+            return await self._decide(proposal, approval, now)
+
+    async def _decide(
+        self,
+        proposal: RegistryUpdateProposal,
+        approval: ApprovalRecord,
+        now: datetime,
+    ) -> ProposalDecisionOutcome:
         current = self._investigations.get_proposal(proposal.proposal_id)
         if current.status is not RegistryProposalStatus.PENDING:
             return ProposalDecisionOutcome(
@@ -248,16 +272,21 @@ class RegistryProposalService:
                 reason=f"proposal already decided as {current.status.value}",
             )
 
-        if approval.status is ApprovalStatus.REJECTED:
-            return await self._reject(proposal, approval, now)
-
-        if approval.status is not ApprovalStatus.APPROVED:
-            raise RegistryProposalError(
-                f"approval {approval.approval_id} is not decided: {approval.status.value}"
+        # Never trust the caller-supplied record: re-read the persisted approval
+        # so a forged/expired record cannot authorize a mutation (I1).
+        stored = self._approvals.get(approval.approval_id)
+        if stored is None:
+            raise ApprovalNotFound(f"Approval '{approval.approval_id}' not found")
+        if stored.status is ApprovalStatus.REJECTED:
+            return await self._reject(proposal, stored, now)
+        if stored.status is not ApprovalStatus.APPROVED:
+            raise ApprovalUnavailable(
+                f"approval {approval.approval_id} is {stored.status.value}, "
+                "not approved"
             )
 
         intent = registry_update_intent(proposal)
-        if intent_sha256(intent) != approval.intent_sha256:
+        if intent_sha256(intent) != stored.intent_sha256:
             raise ApprovalMismatch(
                 "approval intent does not match the proposal's registry update"
             )
@@ -267,7 +296,7 @@ class RegistryProposalService:
             project = self._projects.get(proposal.proposed_project_id)
         except Exception as exc:  # noqa: BLE001 - ProjectNotFound maps to stale
             return await self._stale(
-                proposal, approval, f"project no longer registered: {exc}", now
+                proposal, stored, f"project no longer registered: {exc}", now
             )
 
         canonical_paths: tuple[PurePosixPath, ...] = proposal.proposed_paths
@@ -275,7 +304,7 @@ class RegistryProposalService:
             if not await self._verify_container_identity(project, proposal, now):
                 return await self._stale(
                     proposal,
-                    approval,
+                    stored,
                     f"container {proposal.proposed_container_name!r} is not running",
                     now,
                 )
@@ -283,26 +312,39 @@ class RegistryProposalService:
             resolved = await self._canonicalize_host_paths(project, proposal, now)
             if resolved is None:
                 return await self._stale(
-                    proposal, approval, "a proposed path no longer exists", now
+                    proposal, stored, "a proposed path no longer exists", now
                 )
             canonical_paths = resolved
 
         try:
             derived = self._derive_registration(project, proposal, canonical_paths)
         except RegistryUpdateConflict as exc:
-            return await self._stale(proposal, approval, str(exc), now)
+            return await self._stale(proposal, stored, str(exc), now)
         except Exception as exc:  # noqa: BLE001 - service/target gone maps to stale
-            return await self._stale(proposal, approval, str(exc), now)
+            return await self._stale(proposal, stored, str(exc), now)
 
-        updated = self._projects.replace(derived, now=now)
+        # Optimistic writeback: conditional on the project's updated_at as read
+        # above, so a concurrent registry update is a conflict, never a lost
+        # update (I2).
+        try:
+            updated = self._projects.replace(
+                derived, now=now, expected_updated_at=project.updated_at
+            )
+        except RegistryUpdateConflict as exc:
+            return await self._stale(proposal, stored, str(exc), now)
         await self._emit_registry_updated(updated, proposal, now)
-        # The writeback succeeded; consume the exact single-use approval.
-        await self._approvals.consume(approval.approval_id, intent)
+        # The writeback succeeded; consume the exact single-use approval as
+        # terminal accounting.  A failure here never rolls back the completed
+        # write (I1).
+        try:
+            await self._approvals.consume(approval.approval_id, intent)
+        except (ApprovalNotFound, ApprovalUnavailable, ApprovalMismatch):
+            pass
         decided = self._investigations.transition_proposal_status(
             proposal.proposal_id, RegistryProposalStatus.APPROVED, now=now
         )
         ref = self._record_approval_decision(
-            proposal, approval, "approved", now, source_ref=str(updated.project_id)
+            proposal, stored, "approved", now, source_ref=str(updated.project_id)
         )
         return ProposalDecisionOutcome(
             proposal=decided,
@@ -312,6 +354,13 @@ class RegistryProposalService:
             decision="approved",
             reason="registry scope widened",
         )
+
+    def _decision_lock(self, proposal_id: str) -> asyncio.Lock:
+        lock = self._decision_locks.get(proposal_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._decision_locks[proposal_id] = lock
+        return lock
 
     # -- rejection / stale ----------------------------------------------------
 

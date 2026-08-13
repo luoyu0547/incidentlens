@@ -10,6 +10,7 @@ writeback paths without touching the network.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -19,7 +20,10 @@ from typing import Any
 
 import pytest
 from incidentlens_control_plane.approvals.service import ApprovalService
-from incidentlens_control_plane.approvals.store import ApprovalStore
+from incidentlens_control_plane.approvals.store import (
+    ApprovalStore,
+    ApprovalUnavailable,
+)
 from incidentlens_control_plane.approvals.types import ApprovalStatus
 from incidentlens_control_plane.changes.backup import EncryptedBackupVault
 from incidentlens_control_plane.changes.manager import ChangeManager
@@ -949,3 +953,88 @@ async def test_path_extension_intent_has_no_container_key(tmp_path: Path) -> Non
     assert intent["update_kind"] == "path_extension"
     assert intent["paths"] == ["/srv/ghost-data"]
     assert "container" not in intent
+
+
+@pytest.mark.asyncio
+async def test_expired_or_consumed_approval_cannot_authorize_registry_write(
+    tmp_path: Path,
+) -> None:
+    """I1: a caller-supplied APPROVED record cannot mutate the registry once the
+    persisted approval has moved on (consumed/expired); the decision must fail
+    closed before any writeback."""
+    harness = build_harness(tmp_path, transport=_ghost_transport())
+    run = _new_run(harness.investigations)
+    proposed = await harness.proposals.propose(
+        run,
+        discovery_evidence_id="ev-discovery-i1",
+        kind=RegistryUpdateKind.CONTAINER_REGISTRATION,
+        service_name=SERVICE,
+        container="ghost-worker-1",
+        now=NOW,
+    )
+    await harness.approvals.approve(proposed.approval.approval_id)
+    # Capture the caller-side record while it still reads APPROVED...
+    approval = _approval_for(harness, proposed.approval.approval_id)
+    assert approval.status is ApprovalStatus.APPROVED
+    # ...then consume it out from under the decision (TTL expiry / prior use).
+    await harness.approvals.consume(
+        proposed.approval.approval_id, registry_update_intent(proposed.proposal)
+    )
+
+    with pytest.raises(ApprovalUnavailable):
+        await harness.proposals.handle_approval_decision(
+            proposed.proposal, approval, now=NOW
+        )
+
+    # The registry was never widened and the proposal stays undecided.
+    service = next(
+        s
+        for s in harness.projects.get(PROJECT_ID).services
+        if s.compose_service == SERVICE
+    )
+    assert "ghost-worker-1" not in service.container_names
+    stored = harness.investigations.get_proposal(proposed.proposal.proposal_id)
+    assert stored.status is RegistryProposalStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_concurrent_double_decision_applies_once(tmp_path: Path) -> None:
+    """I3: two concurrent decisions for the same proposal serialize on the
+    per-proposal lock; exactly one write, one approval consume, and one audit
+    event result."""
+    harness = build_harness(tmp_path, transport=_ghost_transport())
+    run = _new_run(harness.investigations)
+    proposed = await harness.proposals.propose(
+        run,
+        discovery_evidence_id="ev-discovery-i3",
+        kind=RegistryUpdateKind.CONTAINER_REGISTRATION,
+        service_name=SERVICE,
+        container="ghost-worker-1",
+        now=NOW,
+    )
+    await harness.approvals.approve(proposed.approval.approval_id)
+    approval = _approval_for(harness, proposed.approval.approval_id)
+
+    outcomes = await asyncio.gather(
+        harness.proposals.handle_approval_decision(
+            proposed.proposal, approval, now=NOW
+        ),
+        harness.proposals.handle_approval_decision(
+            proposed.proposal, approval, now=NOW
+        ),
+    )
+
+    assert [outcome.applied for outcome in outcomes].count(True) == 1
+    stored = harness.investigations.get_proposal(proposed.proposal.proposal_id)
+    assert stored.status is RegistryProposalStatus.APPROVED
+    assert (
+        _approval_for(harness, proposed.approval.approval_id).status
+        is ApprovalStatus.CONSUMED
+    )
+    audit_events = [
+        event
+        for event in harness.events.list_after(0)
+        if event.event_type is RuntimeEventType.PROJECT_UPDATED
+        and event.payload.get("proposal_id") == proposed.proposal.proposal_id
+    ]
+    assert len(audit_events) == 1
