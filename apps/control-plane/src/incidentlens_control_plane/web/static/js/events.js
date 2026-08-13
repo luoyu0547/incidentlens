@@ -6,7 +6,7 @@ document.addEventListener("DOMContentLoaded", function() {
         source.onmessage = function(event) {
             // HTMX integration: trigger refresh on relevant elements
             var data = JSON.parse(event.data);
-            if (data.type && data.type.startsWith("investigation.")) {
+            if (data.event_type && data.event_type.startsWith("investigation.")) {
                 htmx.trigger("body", "investigation-updated", {detail: data});
             }
         };

@@ -19,6 +19,18 @@ def test_dashboard_contains_investigation_list(client):
     assert "investigation" in resp.text.lower() or "调查" in resp.text
 
 
+def test_dashboard_wires_live_refresh_trigger(client):
+    """The investigations table listens for the SSE-dispatched refresh event.
+
+    events.js dispatches ``investigation-updated`` on ``body``; the table must
+    carry the matching ``from:body`` hx-trigger so it re-fetches ``/``.
+    """
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'hx-trigger="investigation-updated from:body"' in resp.text
+    assert 'hx-select="#active-investigations-table"' in resp.text
+
+
 def test_web_investigations_list(client):
     resp = client.get("/web/investigations")
     assert resp.status_code == 200

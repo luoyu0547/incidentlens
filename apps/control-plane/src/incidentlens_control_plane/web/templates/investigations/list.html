@@ -2,7 +2,11 @@
 {% block title %}Investigations — IncidentLens{% endblock %}
 {% block content %}
 <h2>Investigations</h2>
-<table>
+<table id="investigations-table"
+       hx-get="/web/investigations"
+       hx-trigger="investigation-updated from:body"
+       hx-select="#investigations-table"
+       hx-swap="outerHTML">
     <thead>
         <tr>
             <th>ID</th>

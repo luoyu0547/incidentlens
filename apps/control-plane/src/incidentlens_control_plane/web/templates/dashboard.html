@@ -4,7 +4,11 @@
 <h2>Dashboard</h2>
 <article>
     <header>Active Investigations</header>
-    <table>
+    <table id="active-investigations-table"
+           hx-get="/"
+           hx-trigger="investigation-updated from:body"
+           hx-select="#active-investigations-table"
+           hx-swap="outerHTML">
         <thead>
             <tr>
                 <th>ID</th>
