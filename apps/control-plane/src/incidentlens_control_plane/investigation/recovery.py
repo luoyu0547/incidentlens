@@ -249,7 +249,7 @@ class RecoveryService:
                 "interrupted by restart; outcome cannot be confirmed and is never replayed",
             )
         for call in safe:
-            self._mark_tool_failed_retryable(call, run)
+            self._mark_tool_failed_retryable(call)
         if dangerous and run.status is AgentRunStatus.RUNNING:
             self._park_uncertain(run, investigation)
         return len(dangerous), len(safe)
@@ -328,7 +328,7 @@ class RecoveryService:
                             "shutdown interrupted execution; outcome cannot be confirmed",
                         )
                     else:
-                        self._mark_tool_failed_retryable(call, run)
+                        self._mark_tool_failed_retryable(call)
                 # Calls that were never going to run after shutdown.
                 for call in self._store.list_tool_calls(
                     agent_run_id=run.agent_run_id,
@@ -483,7 +483,7 @@ class RecoveryService:
             call, ToolCallStatus.UNCERTAIN, error_redacted=reason
         )
 
-    def _mark_tool_failed_retryable(self, call: ToolCall, run: AgentRun) -> None:
+    def _mark_tool_failed_retryable(self, call: ToolCall) -> None:
         """Mark a safe read-only in-flight call FAILED so the run can retry it."""
         self._transition_tool_call(
             call,
@@ -505,7 +505,7 @@ class RecoveryService:
                 now=self._now(),
                 error_redacted=error_redacted,
             )
-        except (IllegalTransition, Exception):  # noqa: BLE001 - best effort sweep
+        except Exception:  # noqa: BLE001 - best effort sweep
             logger.warning(
                 "could not transition tool call %s %s -> %s",
                 call.tool_call_id,
