@@ -143,11 +143,11 @@ README.md
 - `ToolDefinition(tool_name, description, parameters_json_schema, allowed_scope, requires_approval, output_cap_bytes)`
 - `ToolRegistry.tool_schemas(scope=...) -> tuple[ToolSchema, ...]`
 - `ToolExecutor.execute(request, run, *, approval_id=None, now=None) -> ToolOutcome`
-- 22 个工具名常量（`TOOL_LOG_QUERY` … `TOOL_DOCKER_ACTION`）
+- 21 个工具名常量（`TOOL_LOG_QUERY` … `TOOL_DOCKER_ACTION`）
 
 **已实现内容（[x] 完成）**
 
-- [x] 22 个工具定义：日志（3）、证据（2）、注册表（2）、host 文件（4）、container 文件（4）、发现/委托（2）、shell（1，HOST 限定）、变更（2）、docker（1，静态审批）。
+- [x] 21 个工具定义：日志（3）、证据（2）、注册表（2）、host 文件（4）、container 文件（4）、发现/委托（2）、shell（1，HOST 限定）、变更（2）、docker（1，静态审批）。
 - [x] executor 对所有含内容结果先落 EvidenceService，模型只拿 id + 有界摘要。
 - [x] 执行前二次校验 schema/scope gate/注册 service/container/路径范围；container-pin 的 run 不能降级到 host。
 - [x] shell/PTTY 复用 `CommandPolicy`+`Gateway`+`SessionManager`；shell 链式/重定向元字符直接拒绝。

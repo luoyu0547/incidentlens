@@ -116,7 +116,7 @@ AgentScope(project_id, target_id, scope: LogScope, service_name=None,
 
 ### 5.2 Tool 契约
 
-`investigation/tools.py` 定义 22 个工具（名称、JSON schema、scope 门、审批标志），`ToolRegistry` 把它们物化为 provider 可见的 `ToolSchema`，并绑定 handler：
+`investigation/tools.py` 定义 21 个工具（名称、JSON schema、scope 门、审批标志），`ToolRegistry` 把它们物化为 provider 可见的 `ToolSchema`，并绑定 handler：
 
 | 分组 | 工具 |
 |---|---|
