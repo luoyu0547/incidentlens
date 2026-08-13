@@ -35,7 +35,10 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from incidentlens_control_plane.events.broker import RuntimeEventBroker
+from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.evidence.service import EvidenceService
+from incidentlens_control_plane.investigation.events import InvestigationEventPublisher
 from incidentlens_control_plane.investigation.guard import InvestigationGuard
 from incidentlens_control_plane.investigation.provider import (
     AgentTurnRequest,
@@ -118,6 +121,8 @@ class AgentOrchestrator:
         global_child_limit: int = 8,
         max_provider_retries: int = 2,
         now: Callable[[], datetime] | None = None,
+        events: RuntimeEventStore | None = None,
+        broker: RuntimeEventBroker | None = None,
     ) -> None:
         if global_child_limit < 1:
             raise ValueError("global_child_limit must be >= 1")
@@ -131,6 +136,11 @@ class AgentOrchestrator:
         self._global_child_limit = global_child_limit
         self._max_provider_retries = max_provider_retries
         self._now = now or (lambda: datetime.now(UTC))
+        self._events_pub = (
+            InvestigationEventPublisher(events, broker)
+            if events is not None and broker is not None
+            else None
+        )
         # Bound concurrent children across all investigations sharing this
         # orchestrator.  The per-investigation cap is enforced by the guard's
         # ``can_spawn_child`` (``investigation.budget.max_children``).
@@ -799,6 +809,7 @@ class AgentOrchestrator:
             status=ToolCallStatus.PLANNED,
             idempotency_key=request.tool_call_id,
             planned_at=now,
+            arguments=request.arguments,
         )
         try:
             return self._store.create_tool_call(tool_call)
@@ -816,7 +827,8 @@ class AgentOrchestrator:
         error_redacted: str | None = None,
         approval_id: str | None = None,
     ) -> ToolCall:
-        return self._store.transition_tool_call_status(
+        previous = tool_call.status.value
+        updated = self._store.transition_tool_call_status(
             tool_call.tool_call_id,
             target,
             now=now,
@@ -825,6 +837,20 @@ class AgentOrchestrator:
             error_redacted=error_redacted,
             approval_id=approval_id,
         )
+        if self._events_pub is not None:
+            if previous != updated.status.value:
+                self._events_pub.tool_call_status_changed(
+                    updated, previous=previous, occurred_at=now
+                )
+            if (
+                previous == ToolCallStatus.PLANNED.value
+                and updated.status
+                in (ToolCallStatus.RUNNING, ToolCallStatus.WAITING_APPROVAL)
+            ):
+                self._events_pub.tool_call_started(updated, occurred_at=now)
+            if TOOL_CALL_STATE_MACHINE.is_terminal(updated.status):
+                self._events_pub.tool_call_completed(updated, occurred_at=now)
+        return updated
 
     # -- child delegation -----------------------------------------------------
 
@@ -965,23 +991,33 @@ class AgentOrchestrator:
         try:
             async with self._child_semaphore:
                 run = self._store.get_agent_run(child_id)
+                if self._events_pub is not None:
+                    self._events_pub.child_run_started(run, occurred_at=self._now())
                 if run.scope.scope is LogScope.CONTAINER:
                     container_session_id = await self._spawn_container_session(run)
                 final = await self._run_loop(child_id)
+            if self._events_pub is not None:
+                self._events_pub.child_run_completed(final, occurred_at=self._now())
             return self._build_child_report(final, package, now=self._now())
         except asyncio.CancelledError:
             run = self._store.get_agent_run(child_id)
             self._finalize_child_terminal(run, AgentRunStatus.CANCELLED, StopReason.CANCELLED)
+            final = self._store.get_agent_run(child_id)
+            if self._events_pub is not None:
+                self._events_pub.child_run_completed(final, occurred_at=self._now())
             return self._build_child_report(
-                self._store.get_agent_run(child_id), package, now=self._now()
+                final, package, now=self._now()
             )
         except Exception as exc:
             run = self._store.get_agent_run(child_id)
             self._finalize_child_terminal(
                 run, AgentRunStatus.FAILED, StopReason.FAILED
             )
+            final = self._store.get_agent_run(child_id)
+            if self._events_pub is not None:
+                self._events_pub.child_run_completed(final, occurred_at=self._now())
             return self._build_child_report(
-                self._store.get_agent_run(child_id),
+                final,
                 package,
                 now=self._now(),
                 error=str(exc),
@@ -1319,6 +1355,8 @@ class AgentOrchestrator:
             raise _EvidenceBudgetExceeded("investigation evidence budget exhausted")
         run = run.model_copy(update={"evidence": run.evidence + new_refs})
         run = self._bump_usage(run, evidence_count=len(run.evidence))
+        if self._events_pub is not None:
+            self._events_pub.evidence_appended(run, added=len(new_refs), occurred_at=now)
         return run, len(new_refs)
 
     def _reload_pair(self, run: AgentRun) -> tuple[AgentRun, Investigation]:
@@ -1394,9 +1432,24 @@ class AgentOrchestrator:
         now: datetime,
         stop_reason: StopReason | None = None,
     ) -> AgentRun:
-        return self._store.transition_agent_run_status(
+        previous = run.status.value
+        updated = self._store.transition_agent_run_status(
             run.agent_run_id, target, now=now, stop_reason=stop_reason
         )
+        if self._events_pub is not None:
+            if previous != updated.status.value:
+                self._events_pub.agent_run_status_changed(
+                    updated, previous=previous, occurred_at=now
+                )
+            if target is AgentRunStatus.COMPLETED:
+                self._events_pub.agent_run_completed(updated, occurred_at=now)
+            elif target is AgentRunStatus.FAILED:
+                self._events_pub.agent_run_failed(updated, occurred_at=now)
+            elif target is AgentRunStatus.CANCELLED:
+                self._events_pub.agent_run_cancelled(updated, occurred_at=now)
+            if previous == AgentRunStatus.CREATED.value and target is AgentRunStatus.RUNNING:
+                self._events_pub.agent_run_started(updated, occurred_at=now)
+        return updated
 
     def _transition_investigation(
         self,
@@ -1406,9 +1459,21 @@ class AgentOrchestrator:
         now: datetime,
         stop_reason: StopReason | None = None,
     ) -> Investigation:
-        return self._store.transition_investigation_status(
+        previous = investigation.status.value
+        updated = self._store.transition_investigation_status(
             investigation.investigation_id, target, now=now, stop_reason=stop_reason
         )
+        if self._events_pub is not None and previous != updated.status.value:
+            self._events_pub.investigation_status_changed(
+                updated, previous=previous, occurred_at=now
+            )
+            if target is InvestigationStatus.COMPLETED:
+                self._events_pub.investigation_completed(updated, occurred_at=now)
+            elif target is InvestigationStatus.CANCELLED:
+                self._events_pub.investigation_cancelled(updated, occurred_at=now)
+            elif target is InvestigationStatus.FAILED:
+                self._events_pub.investigation_failed(updated, occurred_at=now)
+        return updated
 
 
 __all__ = [

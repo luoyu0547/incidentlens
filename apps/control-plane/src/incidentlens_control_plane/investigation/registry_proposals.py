@@ -40,6 +40,7 @@ from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.events.types import RuntimeEvent, RuntimeEventType
 from incidentlens_control_plane.evidence.service import EvidenceService
 from incidentlens_control_plane.evidence.types import EvidenceRef
+from incidentlens_control_plane.investigation.events import InvestigationEventPublisher
 from incidentlens_control_plane.investigation.store import (
     InvestigationNotFound,
     InvestigationStore,
@@ -144,6 +145,7 @@ class RegistryProposalService:
         self._broker = broker
         self._gateway = gateway
         self._sessions = sessions
+        self._events_pub = InvestigationEventPublisher(events, broker)
         self._now = now or (lambda: datetime.now(UTC))
         self._decision_locks: dict[str, asyncio.Lock] = {}
 
@@ -205,6 +207,7 @@ class RegistryProposalService:
             update={"approval_intent_sha256": approval.intent_sha256}
         )
         self._investigations.create_proposal(proposal)
+        self._events_pub.registry_proposal_created(proposal, occurred_at=now)
 
         description = (
             f"proposal {proposal.proposal_id} "
@@ -348,6 +351,7 @@ class RegistryProposalService:
         decided = self._investigations.transition_proposal_status(
             proposal.proposal_id, RegistryProposalStatus.APPROVED, now=now
         )
+        self._events_pub.registry_proposal_decided(decided, decision="approved", occurred_at=now)
         ref = self._record_approval_decision(
             proposal, stored, "approved", now, source_ref=str(updated.project_id)
         )
@@ -381,6 +385,7 @@ class RegistryProposalService:
         decided = self._investigations.transition_proposal_status(
             proposal.proposal_id, RegistryProposalStatus.REJECTED, now=now
         )
+        self._events_pub.registry_proposal_decided(decided, decision="rejected", occurred_at=now)
         return ProposalDecisionOutcome(
             proposal=decided,
             applied=False,
@@ -401,6 +406,7 @@ class RegistryProposalService:
         decided = self._investigations.transition_proposal_status(
             proposal.proposal_id, RegistryProposalStatus.STALE, now=now
         )
+        self._events_pub.registry_proposal_decided(decided, decision="stale", occurred_at=now)
         try:
             await self._approvals.consume(approval.approval_id, registry_update_intent(proposal))
         except (ApprovalUnavailable, ApprovalNotFound):

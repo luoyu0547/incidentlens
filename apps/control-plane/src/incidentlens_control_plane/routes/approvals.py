@@ -2,10 +2,17 @@
 
 Responses use a dedicated view schema so the canonical intent mapping is never
 serialized; clients receive the redacted summary and lifecycle timestamps only.
+A successful approve/reject also asks ``InvestigationService`` to resolve any
+matching tool call or registry proposal (re-executing an approved tool,
+rejecting a denied one, applying or refusing a registry update, and resuming
+the parked run).  That linkage consumes the exact single-use intent and is
+best-effort: the decision itself is already recorded, so a linkage failure is
+logged, never surfaced as a failed approval.
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -15,6 +22,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from incidentlens_control_plane.approvals.store import ApprovalNotFound
 from incidentlens_control_plane.approvals.types import ApprovalRecord, ApprovalStatus
 from incidentlens_control_plane.routes import get_runtime
+from incidentlens_control_plane.runtime import RuntimeServices
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/approvals", tags=["approvals"])
 
@@ -43,6 +53,23 @@ def _to_view(record: ApprovalRecord) -> ApprovalView:
     )
 
 
+async def _link_investigation_decision(
+    runtime: RuntimeServices, approval_id: str
+) -> None:
+    """Resolve an investigation tool/proposal blocked on ``approval_id``.
+
+    Best-effort: the approval is already decided; a failed linkage must never
+    make the decision endpoint fail.  The exact single-use intent is consumed
+    by the underlying gateway / proposal service.
+    """
+    try:
+        await runtime.investigations.handle_approval_decision(approval_id)
+    except Exception:  # noqa: BLE001 - linkage is best-effort
+        logger.exception(
+            "investigation approval linkage failed for approval %s", approval_id
+        )
+
+
 @router.get("")
 async def list_approvals(
     request: Request,
@@ -64,6 +91,7 @@ async def approve_approval(request: Request, approval_id: str) -> dict[str, Any]
         raise HTTPException(
             status_code=409, detail="Approval not found or already decided"
         )
+    await _link_investigation_decision(runtime, approval_id)
     return _to_view(record).model_dump(mode="json")
 
 
@@ -77,4 +105,5 @@ async def reject_approval(request: Request, approval_id: str) -> dict[str, Any]:
         raise HTTPException(
             status_code=409, detail="Approval not found or already decided"
         )
+    await _link_investigation_decision(runtime, approval_id)
     return _to_view(record).model_dump(mode="json")

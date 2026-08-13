@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -46,6 +47,22 @@ def _validate_absolute_simple_paths(
         if ".." in path.parts:
             raise ValueError("paths must not contain '..'")
     return value
+
+
+def _json_compatible(value: Any) -> bool:
+    """Return True when ``value`` is a JSON-serializable plain structure."""
+    if value is None or isinstance(value, (bool, int, str)):
+        return True
+    if isinstance(value, float):
+        return value == value and value not in (float("inf"), float("-inf"))
+    if isinstance(value, list):
+        return all(_json_compatible(item) for item in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _json_compatible(item)
+            for key, item in value.items()
+        )
+    return False
 
 
 class EvidenceReference(BaseModel):
@@ -270,7 +287,13 @@ class DelegatedTaskPackage(BaseModel):
 
 
 class ToolCall(BaseModel):
-    """A single planned or executed tool invocation for an agent run."""
+    """A single planned or executed tool invocation for an agent run.
+
+    ``arguments`` is persisted verbatim so an approved tool call can be
+    re-executed by the approval-decision handler with the exact same inputs;
+    the JSON-compatible validator keeps raw/non-serializable values out of the
+    store.  Event payloads never include ``arguments``.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -286,8 +309,16 @@ class ToolCall(BaseModel):
     evidence_ids: tuple[str, ...] = Field(default=(), max_length=24)
     approval_id: str | None = Field(default=None, max_length=120)
     error_redacted: str | None = Field(default=None, max_length=2_000)
+    arguments: dict[str, Any] = Field(default_factory=dict)
 
     _validate_evidence_ids = field_validator("evidence_ids")(_validate_unique_citations)
+
+    @field_validator("arguments")
+    @classmethod
+    def _arguments_must_be_json_compatible(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if not _json_compatible(value):
+            raise ValueError("arguments must be JSON-compatible plain values")
+        return value
 
 
 class Checkpoint(BaseModel):

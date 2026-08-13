@@ -39,6 +39,34 @@ class RuntimeEventType(StrEnum):
     LOG_BACKPRESSURE = "log.backpressure"
     LOG_SUBSCRIPTION_ERROR = "log.subscription_error"
 
+    INVESTIGATION_CREATED = "investigation.created"
+    INVESTIGATION_STARTED = "investigation.started"
+    INVESTIGATION_STATUS_CHANGED = "investigation.status_changed"
+    INVESTIGATION_COMPLETED = "investigation.completed"
+    INVESTIGATION_CANCELLED = "investigation.cancelled"
+    INVESTIGATION_FAILED = "investigation.failed"
+
+    AGENT_RUN_STARTED = "agent_run.started"
+    AGENT_RUN_STATUS_CHANGED = "agent_run.status_changed"
+    AGENT_RUN_COMPLETED = "agent_run.completed"
+    AGENT_RUN_FAILED = "agent_run.failed"
+    AGENT_RUN_CANCELLED = "agent_run.cancelled"
+
+    TOOL_CALL_STARTED = "tool_call.started"
+    TOOL_CALL_STATUS_CHANGED = "tool_call.status_changed"
+    TOOL_CALL_COMPLETED = "tool_call.completed"
+
+    CHILD_RUN_STARTED = "child_run.started"
+    CHILD_RUN_COMPLETED = "child_run.completed"
+
+    EVIDENCE_APPENDED = "evidence.appended"
+
+    REGISTRY_PROPOSAL_CREATED = "registry_proposal.created"
+    REGISTRY_PROPOSAL_DECIDED = "registry_proposal.decided"
+
+    RECOVERY_STARTED = "recovery.started"
+    RECOVERY_COMPLETED = "recovery.completed"
+
 
 # JsonValue is a union type for JSON-serializable values
 # Using Any to avoid recursion issues with Pydantic

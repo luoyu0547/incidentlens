@@ -15,28 +15,56 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from incidentlens_control_plane.approvals.service import ApprovalService
+from incidentlens_control_plane.approvals.types import ApprovalRecord, ApprovalStatus
+from incidentlens_control_plane.events.broker import RuntimeEventBroker
+from incidentlens_control_plane.events.store import RuntimeEventStore
+from incidentlens_control_plane.investigation.events import InvestigationEventPublisher
 from incidentlens_control_plane.investigation.orchestrator import AgentOrchestrator
+from incidentlens_control_plane.investigation.provider import ToolRequest
+from incidentlens_control_plane.investigation.registry_proposals import (
+    RegistryProposalService,
+)
 from incidentlens_control_plane.investigation.state_machine import (
     AGENT_RUN_STATE_MACHINE,
     INVESTIGATION_STATE_MACHINE,
     AgentRunStatus,
     InvestigationStatus,
+    ToolCallStatus,
 )
 from incidentlens_control_plane.investigation.store import (
     AgentRound,
     Checkpoint,
     InvestigationStore,
 )
+from incidentlens_control_plane.investigation.tool_executor import ToolExecutor
 from incidentlens_control_plane.investigation.types import (
     AgentBudget,
     AgentRun,
     AgentScope,
+    Conclusion,
+    Hypothesis,
     Investigation,
     InvestigationBudget,
+    RegistryUpdateProposal,
     StopReason,
     ToolCall,
+)
+
+# States from which an approval decision may resume an agent run.  A CREATED or
+# RUNNING run is left alone: CREATED has never been started and RUNNING already
+# has a live loop, so neither is an approval-decision resume target.
+_RESUMABLE_RUN_STATUSES: frozenset[AgentRunStatus] = frozenset(
+    {
+        AgentRunStatus.WAITING_APPROVAL,
+        AgentRunStatus.WAITING_CHILDREN,
+        AgentRunStatus.PAUSED_BUDGET,
+        AgentRunStatus.PAUSED_MISSING_EVIDENCE,
+        AgentRunStatus.PAUSED_UNCERTAIN_STATE,
+    }
 )
 
 
@@ -49,10 +77,23 @@ class InvestigationService:
         store: InvestigationStore,
         orchestrator: AgentOrchestrator,
         now: Callable[[], datetime] | None = None,
+        approvals: ApprovalService | None = None,
+        executor: ToolExecutor | None = None,
+        registry_proposals: RegistryProposalService | None = None,
+        events: RuntimeEventStore | None = None,
+        broker: RuntimeEventBroker | None = None,
     ) -> None:
         self._store = store
         self._orchestrator = orchestrator
         self._now = now or (lambda: datetime.now(UTC))
+        self._approvals = approvals
+        self._executor = executor
+        self._registry_proposals = registry_proposals
+        self._events_pub = (
+            InvestigationEventPublisher(events, broker)
+            if events is not None and broker is not None
+            else None
+        )
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -81,7 +122,10 @@ class InvestigationService:
             created_at=now,
             updated_at=now,
         )
-        return self._store.create_investigation(investigation)
+        stored = self._store.create_investigation(investigation)
+        if self._events_pub is not None:
+            self._events_pub.investigation_created(stored, occurred_at=now)
+        return stored
 
     async def start(
         self,
@@ -111,10 +155,14 @@ class InvestigationService:
             if run.parent_run_id is None and not AGENT_RUN_STATE_MACHINE.is_terminal(run.status)
         ]
         if existing:
-            return await self._orchestrator.run(existing[0].agent_run_id)
-        return await self._orchestrator.run_investigation(
-            investigation, parent_scope, parent_budget=parent_budget
-        )
+            run = await self._orchestrator.run(existing[0].agent_run_id)
+        else:
+            run = await self._orchestrator.run_investigation(
+                investigation, parent_scope, parent_budget=parent_budget
+            )
+        if self._events_pub is not None:
+            self._events_pub.investigation_started(investigation, run, occurred_at=now)
+        return run
 
     async def resume_run(self, agent_run_id: str) -> AgentRun:
         """Run/resume an agent run from its latest checkpoint."""
@@ -123,18 +171,37 @@ class InvestigationService:
     async def cancel(self, investigation_id: str) -> Investigation:
         """Request cancellation of an investigation (idempotent).
 
-        Parks the investigation and every non-terminal run in
-        ``cancel_requested``; a CREATED run is cancelled outright.  Runs with a
-        live loop finalise to ``cancelled`` at their next round boundary.
+        A CREATED investigation (never started) is cancelled outright; any
+        other non-terminal investigation is parked in ``cancel_requested`` and
+        every non-terminal run is parked too (a CREATED run is cancelled
+        outright).  Runs with a live loop finalise to ``cancelled`` at their
+        next round boundary.
         """
         now = self._now()
         investigation = self._store.get_investigation(investigation_id)
         if INVESTIGATION_STATE_MACHINE.is_terminal(investigation.status):
             return investigation
-        if investigation.status is not InvestigationStatus.CANCEL_REQUESTED:
+        previous = investigation.status.value
+        if investigation.status is InvestigationStatus.CREATED:
+            investigation = self._store.transition_investigation_status(
+                investigation_id, InvestigationStatus.CANCELLED, now=now,
+                stop_reason=StopReason.CANCELLED,
+            )
+            if self._events_pub is not None:
+                self._events_pub.investigation_status_changed(
+                    investigation, previous=previous, occurred_at=now
+                )
+                self._events_pub.investigation_cancelled(
+                    investigation, occurred_at=now
+                )
+        elif investigation.status is not InvestigationStatus.CANCEL_REQUESTED:
             investigation = self._store.transition_investigation_status(
                 investigation_id, InvestigationStatus.CANCEL_REQUESTED, now=now
             )
+            if self._events_pub is not None:
+                self._events_pub.investigation_status_changed(
+                    investigation, previous=previous, occurred_at=now
+                )
         for run in self._store.list_agent_runs(investigation_id=investigation_id):
             self._park_run_for_cancel(run, now=now)
         return self._store.get_investigation(investigation_id)
@@ -205,6 +272,269 @@ class InvestigationService:
     def list_waiting_approval_tool_calls(self) -> tuple[ToolCall, ...]:
         return self._store.list_waiting_approval_tool_calls()
 
+    def list_children(
+        self, *, parent_run_id: str, investigation_id: str | None = None
+    ) -> tuple[AgentRun, ...]:
+        return self._store.list_agent_runs(
+            parent_run_id=parent_run_id, investigation_id=investigation_id
+        )
+
+    def get_tool_call(self, tool_call_id: str) -> ToolCall:
+        return self._store.get_tool_call(tool_call_id)
+
+    def list_hypotheses(
+        self,
+        *,
+        investigation_id: str | None = None,
+        agent_run_id: str | None = None,
+    ) -> tuple[Hypothesis, ...]:
+        return self._store.list_hypotheses(
+            investigation_id=investigation_id, agent_run_id=agent_run_id
+        )
+
+    def list_conclusions(
+        self,
+        *,
+        investigation_id: str | None = None,
+        agent_run_id: str | None = None,
+    ) -> tuple[Conclusion, ...]:
+        return self._store.list_conclusions(
+            investigation_id=investigation_id, agent_run_id=agent_run_id
+        )
+
+    def list_proposals(
+        self,
+        *,
+        investigation_id: str | None = None,
+        status: str | None = None,
+    ) -> tuple[RegistryUpdateProposal, ...]:
+        from incidentlens_control_plane.investigation.types import (
+            RegistryProposalStatus,
+        )
+
+        return self._store.list_proposals(
+            investigation_id=investigation_id,
+            status=RegistryProposalStatus(status) if status is not None else None,
+        )
+
+    def list_delegated_tasks(
+        self,
+        *,
+        investigation_id: str | None = None,
+        parent_run_id: str | None = None,
+    ) -> tuple[object, ...]:
+        return self._store.list_delegated_tasks(
+            investigation_id=investigation_id, parent_run_id=parent_run_id
+        )
+
+    # -- approval decisions ---------------------------------------------------
+
+    async def handle_approval_decision(
+        self, approval_id: str, *, now: datetime | None = None
+    ) -> ApprovalDecisionOutcome:
+        """Resolve an approval decision against a matching tool call or proposal.
+
+        An approval granted to a WAITING_APPROVAL tool call re-executes the tool
+        with the exact, single-use approval (consumed by the underlying gateway)
+        and resumes the run; a rejected one parks the tool call as cancelled and
+        resumes the run so the agent can react.  A pending registry proposal
+        whose canonical intent hash matches the approval is delegated to
+        ``RegistryProposalService.handle_approval_decision`` and its run resumed
+        when parked.  Approvals that match nothing are a no-op: the record is
+        already decided and the linkage is best-effort.
+        """
+        now = now or self._now()
+        if self._approvals is None:
+            return ApprovalDecisionOutcome(approval_id=approval_id, matched="none")
+        approval = self._approvals.get(approval_id)
+        if approval is None:
+            return ApprovalDecisionOutcome(approval_id=approval_id, matched="none")
+
+        for tool_call in self._store.list_waiting_approval_tool_calls():
+            if tool_call.approval_id == approval_id:
+                return await self._handle_tool_approval(tool_call, approval, now)
+
+        if self._registry_proposals is not None:
+            for proposal in self._store.list_pending_proposals():
+                if proposal.approval_intent_sha256 == approval.intent_sha256:
+                    return await self._handle_proposal_approval(proposal, approval, now)
+
+        return ApprovalDecisionOutcome(approval_id=approval_id, matched="none")
+
+    async def _handle_tool_approval(
+        self,
+        tool_call: ToolCall,
+        approval: ApprovalRecord,
+        now: datetime,
+    ) -> ApprovalDecisionOutcome:
+        if approval.status is ApprovalStatus.REJECTED:
+            self._store.transition_tool_call_status(
+                tool_call.tool_call_id, ToolCallStatus.CANCELLED, now=now
+            )
+            await self._resume_after_decision(tool_call.agent_run_id, now)
+            return ApprovalDecisionOutcome(
+                approval_id=approval.approval_id,
+                matched="tool_call",
+                tool_call_id=tool_call.tool_call_id,
+                run_id=tool_call.agent_run_id,
+                action="cancelled",
+            )
+        if approval.status is not ApprovalStatus.APPROVED or self._executor is None:
+            return ApprovalDecisionOutcome(
+                approval_id=approval.approval_id,
+                matched="tool_call",
+                tool_call_id=tool_call.tool_call_id,
+                run_id=tool_call.agent_run_id,
+                action="noop",
+            )
+        run = self._store.get_agent_run(tool_call.agent_run_id)
+        request = ToolRequest(
+            tool_call_id=tool_call.tool_call_id,
+            tool_name=tool_call.tool_name,
+            arguments=tool_call.arguments,
+        )
+        outcome = await self._executor.execute(
+            request, run, approval_id=tool_call.approval_id, now=now
+        )
+        if outcome.status is ToolCallStatus.WAITING_APPROVAL:
+            # The exact approval could not be consumed (e.g. already spent):
+            # surface the call as failed rather than looping on approval.
+            self._store.transition_tool_call_status(
+                tool_call.tool_call_id,
+                ToolCallStatus.FAILED,
+                now=now,
+                error_redacted=outcome.error_redacted or "approval could not be consumed",
+            )
+        else:
+            # WAITING_APPROVAL -> SUCCEEDED/FAILED/UNCERTAIN is not a legal
+            # move, so the call re-enters RUNNING first (stamping started_at)
+            # and then lands on the executed outcome.
+            self._store.transition_tool_call_status(
+                tool_call.tool_call_id,
+                ToolCallStatus.RUNNING,
+                now=now,
+            )
+            self._store.transition_tool_call_status(
+                tool_call.tool_call_id,
+                outcome.status,
+                now=now,
+                output_bytes=outcome.output_bytes,
+                evidence_ids=tuple(ref.evidence_id for ref in outcome.evidence),
+                error_redacted=outcome.error_redacted,
+            )
+            self._append_tool_outcome_evidence(
+                self._store.get_agent_run(tool_call.agent_run_id), outcome, now
+            )
+        await self._resume_after_decision(tool_call.agent_run_id, now)
+        return ApprovalDecisionOutcome(
+            approval_id=approval.approval_id,
+            matched="tool_call",
+            tool_call_id=tool_call.tool_call_id,
+            run_id=tool_call.agent_run_id,
+            action="re-executed",
+            applied=outcome.status is ToolCallStatus.SUCCEEDED,
+            consumed=True,
+        )
+
+    async def _handle_proposal_approval(
+        self,
+        proposal: RegistryUpdateProposal,
+        approval: ApprovalRecord,
+        now: datetime,
+    ) -> ApprovalDecisionOutcome:
+        assert self._registry_proposals is not None
+        outcome = await self._registry_proposals.handle_approval_decision(
+            proposal, approval, now=now
+        )
+        await self._resume_after_decision(proposal.agent_run_id, now)
+        return ApprovalDecisionOutcome(
+            approval_id=approval.approval_id,
+            matched="registry_proposal",
+            proposal_id=proposal.proposal_id,
+            run_id=proposal.agent_run_id,
+            action=outcome.decision or "noop",
+            applied=outcome.applied,
+        )
+
+    async def _resume_after_decision(self, agent_run_id: str, now: datetime) -> AgentRun:
+        """Resume a parked run after an approval decision.
+
+        Only WAITING_APPROVAL / WAITING_CHILDREN / PAUSED_* runs are resumed; a
+        CREATED run has never been started and a RUNNING run already has a live
+        loop, so neither is a resume target.
+        """
+        run = self._store.get_agent_run(agent_run_id)
+        if run.status not in _RESUMABLE_RUN_STATUSES:
+            return run
+        if run.status is AgentRunStatus.WAITING_APPROVAL:
+            # The orchestrator parks WAITING_APPROVAL loops permanently; move the
+            # run back to RUNNING (and its investigation) before re-entering.
+            previous = run.status.value
+            run = self._store.transition_agent_run_status(
+                run.agent_run_id, AgentRunStatus.RUNNING, now=now
+            )
+            if self._events_pub is not None:
+                self._events_pub.agent_run_status_changed(
+                    run, previous=previous, occurred_at=now
+                )
+                self._events_pub.agent_run_started(run, occurred_at=now)
+            self._restore_investigation_running(run.investigation_id, now)
+        return await self._orchestrator.run(agent_run_id)
+
+    def _restore_investigation_running(self, investigation_id: str, now: datetime) -> None:
+        investigation = self._store.get_investigation(investigation_id)
+        if investigation.status is InvestigationStatus.WAITING_APPROVAL:
+            previous = investigation.status.value
+            updated = self._store.transition_investigation_status(
+                investigation_id, InvestigationStatus.RUNNING, now=now
+            )
+            if self._events_pub is not None:
+                self._events_pub.investigation_status_changed(
+                    updated, previous=previous, occurred_at=now
+                )
+
+    def _append_tool_outcome_evidence(
+        self, run: AgentRun, outcome: object, now: datetime
+    ) -> None:
+        """Fold a re-executed tool's evidence refs into the run, bounded."""
+        new_refs = tuple(
+            ref
+            for ref in outcome.evidence
+            if ref.evidence_id not in {known.evidence_id for known in run.evidence}
+        )
+        if not new_refs:
+            return
+        if run.usage.evidence_count + len(new_refs) > run.budget.max_evidence:
+            return
+        run = run.model_copy(update={"evidence": run.evidence + new_refs})
+        usage = run.usage.model_copy(
+            update={
+                "evidence_count": run.usage.evidence_count + len(new_refs),
+                "tool_calls": run.usage.tool_calls + 1,
+                "total_output_bytes": run.usage.total_output_bytes + outcome.output_bytes,
+            }
+        )
+        run = run.model_copy(update={"usage": usage})
+        self._store.update_agent_run(run)
+        if self._events_pub is not None:
+            self._events_pub.evidence_appended(
+                run, added=len(new_refs), occurred_at=now
+            )
+
+
+@dataclass(frozen=True)
+class ApprovalDecisionOutcome:
+    """The result of resolving one approval decision against the investigation."""
+
+    approval_id: str
+    matched: str
+    tool_call_id: str | None = None
+    proposal_id: str | None = None
+    run_id: str | None = None
+    action: str | None = None
+    applied: bool = False
+    consumed: bool = False
+
 
 class InvestigationAlreadyTerminal(Exception):
     """Raised when ``start`` targets an investigation in a terminal state."""
@@ -217,6 +547,7 @@ def _empty_usage():
 
 
 __all__ = [
+    "ApprovalDecisionOutcome",
     "InvestigationAlreadyTerminal",
     "InvestigationService",
 ]

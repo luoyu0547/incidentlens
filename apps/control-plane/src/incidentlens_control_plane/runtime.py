@@ -13,7 +13,22 @@ from incidentlens_control_plane.changes.store import ChangeSetStore
 from incidentlens_control_plane.config import RuntimeSettings
 from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
+from incidentlens_control_plane.evidence.service import EvidenceService
 from incidentlens_control_plane.evidence.store import EvidenceStore
+from incidentlens_control_plane.investigation.fake_provider import (
+    FakeProvider,
+    FakeProviderRegistry,
+)
+from incidentlens_control_plane.investigation.orchestrator import AgentOrchestrator
+from incidentlens_control_plane.investigation.registry_proposals import (
+    RegistryProposalService,
+)
+from incidentlens_control_plane.investigation.service import InvestigationService
+from incidentlens_control_plane.investigation.source_discovery import (
+    SourceDiscoveryService,
+)
+from incidentlens_control_plane.investigation.store import InvestigationStore
+from incidentlens_control_plane.investigation.tool_executor import ToolExecutor
 from incidentlens_control_plane.logs.service import LogService
 from incidentlens_control_plane.logs.store import LogStore
 from incidentlens_control_plane.logs.subscriptions import LogSubscriptionManager
@@ -43,6 +58,12 @@ class RuntimeServices:
     evidence: EvidenceStore
     logs: LogService
     subscriptions: LogSubscriptionManager
+    evidence_service: EvidenceService
+    investigation_store: InvestigationStore
+    investigations: InvestigationService
+    registry_proposals: RegistryProposalService
+    source_discovery: SourceDiscoveryService
+    fake_provider: FakeProviderRegistry
 
 
 def build_runtime(
@@ -72,12 +93,14 @@ def build_runtime(
     change_store = ChangeSetStore(connect)
     log_store = LogStore(connect)
     evidence = EvidenceStore(connect)
+    investigation_store = InvestigationStore(connect)
     projects.migrate()
     events.migrate()
     approval_store.migrate()
     change_store.migrate()
     log_store.migrate()
     evidence.migrate()
+    investigation_store.migrate()
 
     broker = RuntimeEventBroker()
     approvals = ApprovalService(
@@ -125,6 +148,60 @@ def build_runtime(
         settings=settings,
     )
 
+    # Phase 4 investigation stack: a scripted provider drives the bounded
+    # orchestrator until a production model provider is wired in Task 16, and
+    # every service shares the same evidence, approval and event services so
+    # there is exactly one execution channel and one event stream.
+    evidence_service = EvidenceService(evidence, investigations=investigation_store)
+    executor = ToolExecutor(
+        projects=projects,
+        sessions=sessions,
+        gateway=remote_tools,
+        logs=logs,
+        log_store=log_store,
+        evidence=evidence_service,
+        evidence_store=evidence,
+        investigations=investigation_store,
+        approvals=approvals,
+    )
+    fake_provider = FakeProviderRegistry()
+    orchestrator = AgentOrchestrator(
+        store=investigation_store,
+        provider=FakeProvider(fake_provider),
+        executor=executor,
+        evidence=evidence_service,
+        projects=projects,
+        sessions=sessions,
+        events=events,
+        broker=broker,
+    )
+    source_discovery = SourceDiscoveryService(
+        projects=projects,
+        gateway=remote_tools,
+        sessions=sessions,
+        evidence=evidence_service,
+        investigations=investigation_store,
+    )
+    registry_proposals = RegistryProposalService(
+        projects=projects,
+        investigations=investigation_store,
+        approvals=approvals,
+        evidence=evidence_service,
+        events=events,
+        broker=broker,
+        gateway=remote_tools,
+        sessions=sessions,
+    )
+    investigation_service = InvestigationService(
+        store=investigation_store,
+        orchestrator=orchestrator,
+        approvals=approvals,
+        executor=executor,
+        registry_proposals=registry_proposals,
+        events=events,
+        broker=broker,
+    )
+
     return RuntimeServices(
         projects=projects,
         events=events,
@@ -139,4 +216,10 @@ def build_runtime(
         evidence=evidence,
         logs=logs,
         subscriptions=subscriptions,
+        evidence_service=evidence_service,
+        investigation_store=investigation_store,
+        investigations=investigation_service,
+        registry_proposals=registry_proposals,
+        source_discovery=source_discovery,
+        fake_provider=fake_provider,
     )
