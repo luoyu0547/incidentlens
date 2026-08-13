@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Approvals{% endblock %}
+{% block content %}
+<h2>Pending Approvals</h2>
+<table>
+    <thead><tr><th>ID</th><th>Type</th><th>Created</th><th>Action</th></tr></thead>
+    <tbody>
+    {% for a in approvals %}
+    <tr>
+        <td>{{ a.approval_id[:16] }}</td>
+        <td>{{ a.intent.get("kind", "") }}</td>
+        <td>{{ a.created_at.strftime('%Y-%m-%d %H:%M') if a.created_at else '' }}</td>
+        <td>
+        {% set approval_id = a.approval_id %}
+        {% set status = a.status.value %}
+        {% include "approvals/_action.html" %}
+        </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">No pending approvals.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

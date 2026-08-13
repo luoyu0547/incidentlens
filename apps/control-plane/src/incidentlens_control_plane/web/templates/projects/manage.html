@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Projects{% endblock %}
+{% block content %}
+<h2>Projects</h2>
+<table>
+    <thead><tr><th>ID</th><th>Name</th><th>Targets</th></tr></thead>
+    <tbody>
+    {% for p in projects %}
+    <tr>
+        <td>{{ p.project_id }}</td>
+        <td>{{ p.display_name }}</td>
+        <td>{{ p.targets|length }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="3">No projects registered.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

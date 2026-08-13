@@ -1,0 +1,15 @@
+<table>
+    <thead><tr><th>Time</th><th>Level</th><th>Service</th><th>Message</th></tr></thead>
+    <tbody>
+    {% for r in results %}
+    <tr>
+        <td>{{ r.event_time }}</td>
+        <td>{{ r.severity }}</td>
+        <td>{{ r.service_name }}</td>
+        <td>{{ r.message[:120] }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">No results.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>

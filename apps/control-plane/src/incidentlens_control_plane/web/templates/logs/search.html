@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Log Search{% endblock %}
+{% block content %}
+<h2>Log Search</h2>
+<form hx-get="/web/logs/search" hx-target="#results" hx-trigger="submit">
+    <input type="text" name="query" placeholder="Search logs...">
+    <button type="submit">Search</button>
+</form>
+<div id="results">
+{% include "logs/_results.html" %}
+</div>
+{% endblock %}
