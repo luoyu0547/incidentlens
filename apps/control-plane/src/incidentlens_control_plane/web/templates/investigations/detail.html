@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Investigation {{ investigation.investigation_id[:16] if investigation else 'Not Found' }}{% endblock %}
+{% block content %}
+{% if investigation %}
+<h2>Investigation {{ investigation.investigation_id[:16] }}</h2>
+<article>
+    <header>
+        <strong>Status:</strong> <mark>{{ investigation.status.value }}</mark>
+        &nbsp;|&nbsp; <strong>Service:</strong> {{ investigation.service }}
+    </header>
+    <p><strong>Symptom:</strong> {{ investigation.symptom }}</p>
+</article>
+
+<div class="grid">
+    <article>
+        <header>Runs ({{ runs|length }})</header>
+        <table>
+            <thead><tr><th>ID</th><th>Kind</th><th>Status</th></tr></thead>
+            <tbody>
+            {% for run in runs %}
+            <tr>
+                <td>{{ run.agent_run_id[-12:] }}</td>
+                <td>{{ run.kind.value }}</td>
+                <td><mark>{{ run.status.value }}</mark></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </article>
+    <article>
+        <header>Hypotheses ({{ hypotheses|length }})</header>
+        <ul>
+        {% for h in hypotheses %}
+        <li><mark>{{ h.status.value }}</mark> {{ h.summary[:100] }}</li>
+        {% endfor %}
+        </ul>
+    </article>
+</div>
+
+<h3>Timeline</h3>
+{% include "investigations/_timeline.html" %}
+
+{% else %}
+<article>
+    <header>Not Found</header>
+    <p>Investigation <code>{{ investigation_id }}</code> was not found.</p>
+</article>
+{% endif %}
+{% endblock %}

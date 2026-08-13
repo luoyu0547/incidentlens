@@ -19,3 +19,11 @@ mark {
 tbody tr:nth-child(even) {
     background: rgba(0, 0, 0, 0.02);
 }
+
+/* Timeline */
+.timeline { position: relative; padding-left: 2rem; margin: 1rem 0; }
+.timeline::before { content: ""; position: absolute; left: 0.5rem; top: 0; bottom: 0; width: 2px; background: var(--il-border); }
+.timeline-item { position: relative; margin-bottom: 0.8rem; }
+.timeline-dot { position: absolute; left: -1.65rem; top: 0.3rem; width: 10px; height: 10px; border-radius: 50%; background: var(--il-primary); }
+.timeline-time { font-size: 0.8em; color: var(--il-muted); margin-right: 0.5rem; }
+.timeline-content { font-size: 0.95em; }

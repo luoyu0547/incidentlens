@@ -33,3 +33,35 @@ async def investigations_list(request: Request) -> str:
     investigations = runtime.investigations.list_investigations()
     template = _env.get_template("investigations/list.html")
     return template.render(investigations=investigations)
+
+
+@router.get("/web/investigations/{investigation_id}", response_class=HTMLResponse)
+async def investigation_detail(request: Request, investigation_id: str) -> str:
+    runtime = _get_runtime(request)
+    try:
+        investigation = runtime.investigations.get_investigation(investigation_id)
+    except Exception:
+        investigation = None
+    runs = []
+    hypotheses = []
+    conclusions = []
+    tool_calls = []
+    if investigation:
+        runs = list(runtime.investigations.list_runs(investigation_id=investigation_id))
+        hypotheses = list(runtime.investigations.list_hypotheses(investigation_id=investigation_id))
+        conclusions = list(
+            runtime.investigations.list_conclusions(investigation_id=investigation_id)
+        )
+        for run in runs:
+            tool_calls.extend(
+                runtime.investigation_store.list_tool_calls(agent_run_id=run.agent_run_id)
+            )
+    template = _env.get_template("investigations/detail.html")
+    return template.render(
+        investigation=investigation,
+        investigation_id=investigation_id,
+        runs=runs,
+        hypotheses=hypotheses,
+        conclusions=conclusions,
+        tool_calls=tool_calls,
+    )
