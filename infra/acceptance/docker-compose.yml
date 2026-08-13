@@ -1,0 +1,54 @@
+# infra/acceptance/docker-compose.yml
+services:
+  postgres:
+    build: ./services/postgres
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_DB: acceptance
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d acceptance"]
+      interval: 5s
+      retries: 5
+
+  order-service:
+    build: ./services/order-service
+    ports: ["5001:5000"]
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=acceptance
+      - DB_USER=test
+      - DB_PASSWORD=test
+      - PAYMENT_URL=http://payment-service:5000
+      - INVENTORY_URL=http://inventory-service:5000
+      - FAULT_DB_POOL=false
+      - FAULT_PAYMENT_TIMEOUT=false
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  payment-service:
+    build: ./services/payment-service
+    ports: ["5002:5000"]
+    environment:
+      - FAULT_DEPENDENCY=false
+
+  inventory-service:
+    build: ./services/inventory-service
+    ports: ["5003:5000"]
+    environment:
+      - FAULT_DEPENDENCY=false
+
+  api-gateway:
+    build: ./services/api-gateway
+    ports: ["8080:8080"]
+    environment:
+      - ORDER_URL=http://order-service:5000
+      - PAYMENT_URL=http://payment-service:5000
+      - INVENTORY_URL=http://inventory-service:5000
+    depends_on:
+      - order-service
+      - payment-service
+      - inventory-service
