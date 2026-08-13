@@ -437,3 +437,37 @@ def test_proposals_and_evidence_queries(client, runtime, registered_project) -> 
         item["source_ref"] == "probe" for item in evidence.json()
     )
     assert all("content_redacted" in item for item in evidence.json())
+
+
+def test_proposals_rejects_invalid_status_enum(
+    client, runtime, registered_project
+) -> None:
+    inv_id = _create(client)["investigation_id"]
+    response = client.get(
+        f"/api/investigations/{inv_id}/proposals",
+        params={"status": "not-a-status"},
+    )
+    assert response.status_code == 422
+
+
+def test_investigation_evidence_rejects_invalid_kind_enum(
+    client, runtime, registered_project
+) -> None:
+    inv_id = _create(client)["investigation_id"]
+    response = client.get(
+        f"/api/investigations/{inv_id}/evidence",
+        params={"kind": "not-a-kind"},
+    )
+    assert response.status_code == 422
+
+
+def test_tool_calls_rejects_invalid_status_enum(
+    client, runtime, registered_project
+) -> None:
+    inv_id = _create(client)["investigation_id"]
+    _make_parent_run(runtime, inv_id, run_id="run-enum-1")
+    response = client.get(
+        f"/api/investigations/{inv_id}/runs/run-enum-1/tool-calls",
+        params={"status": "not-a-status"},
+    )
+    assert response.status_code == 422

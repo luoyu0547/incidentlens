@@ -488,6 +488,72 @@ async def test_uncertain_remote_state_pauses(tmp_path: Any) -> None:
     assert stored.evidence_kind is EvidenceKind.UNCERTAIN_STATE
 
 
+async def test_approval_reexecution_uncertain_parks_run(tmp_path: Any) -> None:
+    """An approved tool that re-executes UNCERTAIN parks the run, never resumes."""
+    harness = build_harness(
+        tmp_path,
+        transport_factory=HarnessTransportFactory(
+            run_argv_error=RemoteTimeoutError("docker action timed out")
+        ),
+    )
+    registry = FakeProviderRegistry()
+    _make_investigation(harness, status=InvestigationStatus.RUNNING)
+    _make_parent_run(harness)
+    registry.set_script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=(
+                    tool_request(
+                        "docker_action", "call-1", service_name=SERVICE,
+                        action="restart", container=CONTAINER, reason="investigate",
+                    ),
+                )
+            )
+        ],
+    )
+    provider = FakeProvider(registry)
+    wrapped = GroundedStopProvider(provider)
+    orchestrator = AgentOrchestrator(
+        store=harness.investigations,
+        provider=wrapped,
+        executor=harness.executor,
+        evidence=harness.evidence,
+        projects=harness.projects,
+        sessions=harness.sessions,
+        now=lambda: NOW,
+    )
+    service = InvestigationService(
+        store=harness.investigations,
+        orchestrator=orchestrator,
+        now=lambda: NOW,
+        approvals=harness.approvals,
+        executor=harness.executor,
+    )
+
+    final = await orchestrator.run("run-1")
+    assert final.status is AgentRunStatus.WAITING_APPROVAL
+    tool_calls = harness.investigations.list_tool_calls(agent_run_id="run-1")
+    approval_id = tool_calls[0].approval_id
+    assert approval_id is not None
+
+    await harness.approvals.approve(approval_id)
+    outcome = await service.handle_approval_decision(approval_id, now=NOW)
+
+    assert outcome.action == "uncertain"
+    run = harness.investigations.get_agent_run("run-1")
+    assert run.status is AgentRunStatus.PAUSED_UNCERTAIN_STATE
+    assert run.stop_reason is StopReason.UNCERTAIN_STATE
+    assert (
+        service.get_investigation("inv-1").status
+        is InvestigationStatus.PAUSED_UNCERTAIN_STATE
+    )
+    tool_calls = harness.investigations.list_tool_calls(agent_run_id="run-1")
+    assert tool_calls[0].status is ToolCallStatus.UNCERTAIN
+    stored = harness.evidence_store.get(tool_calls[0].evidence_ids[0])
+    assert stored.evidence_kind is EvidenceKind.UNCERTAIN_STATE
+
+
 # ---------------------------------------------------------------------------
 # Parent / container-child delegation
 # ---------------------------------------------------------------------------

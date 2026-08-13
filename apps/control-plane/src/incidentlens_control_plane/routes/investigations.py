@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from incidentlens_control_plane.evidence.types import EvidenceKind
 from incidentlens_control_plane.investigation.service import (
     InvestigationAlreadyTerminal,
     NotAcceptingInvestigations,
@@ -35,6 +36,7 @@ from incidentlens_control_plane.investigation.types import (
     AgentBudget,
     AgentScope,
     InvestigationBudget,
+    RegistryProposalStatus,
     ToolCall,
 )
 from incidentlens_control_plane.routes import get_runtime
@@ -281,7 +283,7 @@ async def list_run_tool_calls(
     request: Request,
     investigation_id: str,
     agent_run_id: str,
-    status: str | None = Query(default=None, max_length=40),
+    status: ToolCallStatus | None = Query(default=None),
 ) -> list[dict[str, Any]]:
     """List tool calls for an agent run, optionally filtered by status."""
     runtime = get_runtime(request)
@@ -293,7 +295,7 @@ async def list_run_tool_calls(
         raise _run_not_found(agent_run_id)
     records = runtime.investigation_store.list_tool_calls(
         agent_run_id=agent_run_id,
-        status=ToolCallStatus(status) if status is not None else None,
+        status=status,
     )
     return [_tool_call_view(record).model_dump(mode="json") for record in records]
 
@@ -388,7 +390,7 @@ async def list_conclusions(
 async def list_proposals(
     request: Request,
     investigation_id: str,
-    status: str | None = Query(default=None, max_length=40),
+    status: RegistryProposalStatus | None = Query(default=None),
 ) -> list[dict[str, Any]]:
     """List registry-update proposals for an investigation."""
     runtime = get_runtime(request)
@@ -408,7 +410,7 @@ async def list_investigation_evidence(
     investigation_id: str,
     limit: int = Query(default=100, ge=1, le=1000),
     agent_run_id: str | None = Query(default=None, max_length=120),
-    kind: str | None = Query(default=None, max_length=40),
+    kind: EvidenceKind | None = Query(default=None),
 ) -> list[dict[str, Any]]:
     """List redacted evidence collected during an investigation.
 
@@ -416,8 +418,6 @@ async def list_investigation_evidence(
     filter narrows to one run.  Only already-redacted, bounded content is
     returned.
     """
-    from incidentlens_control_plane.evidence.types import EvidenceKind
-
     runtime = get_runtime(request)
     try:
         investigation = runtime.investigations.get_investigation(investigation_id)
@@ -426,7 +426,7 @@ async def list_investigation_evidence(
     records = runtime.evidence.query(
         incident_id=investigation.incident_id,
         agent_run_id=agent_run_id,
-        evidence_kind=EvidenceKind(kind) if kind is not None else None,
+        evidence_kind=kind,
         limit=limit,
     )
     return [record.model_dump(mode="json") for record in records]

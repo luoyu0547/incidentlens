@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shlex
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
@@ -38,6 +39,7 @@ from incidentlens_control_plane.evidence.service import (
 )
 from incidentlens_control_plane.evidence.store import EvidenceStore
 from incidentlens_control_plane.evidence.types import EvidenceRef
+from incidentlens_control_plane.investigation.guard import InvestigationGuard
 from incidentlens_control_plane.investigation.provider import (
     ToolRequest,
     ToolSchema,
@@ -127,6 +129,11 @@ from incidentlens_control_plane.remote_ops.types import (
 _HOST_EVIDENCE_SERVICE = "host"
 
 _MAX_FILE_READ_BYTES = 1_048_576
+
+# A cwd is interpolated into shell framing, so any character a shell would
+# interpret as control/redirection/substitution is rejected outright even
+# though ``PurePosixPath`` would happily carry it inside a path component.
+_SHELL_CWD_UNSAFE_RE = re.compile(r"[\n\x00&|;<>`]|\$\(")
 
 # Message markers that reliably indicate a remote timeout/connection failure
 # even after a gateway or change manager has wrapped the original exception.
@@ -246,6 +253,7 @@ class ToolExecutor:
         self._evidence_store = evidence_store
         self._investigations = investigations
         self._approvals = approvals
+        self._guard = InvestigationGuard()
         self._registry = registry or default_tool_registry(self)
 
     @property
@@ -757,6 +765,13 @@ class ToolExecutor:
         child_run_id = args["child_run_id"]
         if child_run_id == ctx.run.agent_run_id:
             raise ToolExecutionError("child_run_id must differ from the run id")
+        # A child run must never delegate grandchildren, and the investigation's
+        # global child budget must not be exceeded through the tool path either
+        # (the provider path already enforces this via the same guard).
+        investigation = self._investigations.get_investigation(ctx.run.investigation_id)
+        allowed, reason = self._guard.can_spawn_child(ctx.run, investigation)
+        if not allowed:
+            raise ToolExecutionError(reason)
         child_scope = AgentScope(**args["scope"])
         allowed, reason = _scope_within(child_scope, ctx.run.scope)
         if not allowed:
@@ -779,6 +794,14 @@ class ToolExecutor:
             evidence_ids=seed,
         )
         self._investigations.create_delegated_task(package, now=ctx.now)
+        # Account the delegation against the investigation's child budget so the
+        # tool path and the provider path consume the same bounded pool.
+        investigation = self._investigations.get_investigation(ctx.run.investigation_id)
+        usage = investigation.usage.model_copy(
+            update={"children": investigation.usage.children + 1}
+        )
+        investigation = investigation.model_copy(update={"usage": usage})
+        self._investigations.update_investigation(investigation)
         description = (
             f"delegate child {child_run_id} scope={child_scope.scope.value} "
             f"project={child_scope.project_id} target={child_scope.target_id} "
@@ -827,6 +850,15 @@ class ToolExecutor:
         if args.get("cwd") is not None:
             cwd_path = self._parse_path(args["cwd"])
             self._validate_path_in_scope(ctx, cwd_path, scope=LogScope.HOST)
+            # The cwd is interpolated into the shell framing, so it must never
+            # carry chaining/redirection/substitution metacharacters: a
+            # ``cd /path; curl`` or ``cd /path/$(id)`` cwd would otherwise
+            # smuggle a second command past the command gate.
+            if _SHELL_CWD_UNSAFE_RE.search(str(cwd_path)):
+                raise ToolExecutionError(
+                    "cwd contains shell control/redirection/substitution "
+                    "metacharacters and is not allowed"
+                )
 
         request = ShellRequest(
             operation_id=ctx.operation_id,
@@ -856,7 +888,11 @@ class ToolExecutor:
         session = await self._sessions.connect(target)
         process = await session.transport.open_shell()
         shell = PersistentShell(process)
-        framed = f"cd {cwd_path} && {command}" if cwd_path is not None else command
+        framed = (
+            f"cd {shlex.quote(str(cwd_path))} && {command}"
+            if cwd_path is not None
+            else command
+        )
         try:
             shell_result = await shell.execute(framed, timeout=timeout)
         except asyncio.TimeoutError:

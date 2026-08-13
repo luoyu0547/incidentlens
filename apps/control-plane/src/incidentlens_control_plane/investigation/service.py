@@ -32,6 +32,7 @@ from incidentlens_control_plane.investigation.state_machine import (
     AGENT_RUN_STATE_MACHINE,
     INVESTIGATION_STATE_MACHINE,
     AgentRunStatus,
+    IllegalTransition,
     InvestigationStatus,
     ToolCallStatus,
 )
@@ -45,6 +46,7 @@ from incidentlens_control_plane.investigation.tool_executor import ToolExecutor
 from incidentlens_control_plane.investigation.types import (
     AgentBudget,
     AgentRun,
+    AgentRunKind,
     AgentScope,
     Conclusion,
     Hypothesis,
@@ -348,15 +350,11 @@ class InvestigationService:
         self,
         *,
         investigation_id: str | None = None,
-        status: str | None = None,
+        status: RegistryProposalStatus | None = None,
     ) -> tuple[RegistryUpdateProposal, ...]:
-        from incidentlens_control_plane.investigation.types import (
-            RegistryProposalStatus,
-        )
-
         return self._store.list_proposals(
             investigation_id=investigation_id,
-            status=RegistryProposalStatus(status) if status is not None else None,
+            status=status,
         )
 
     def list_delegated_tasks(
@@ -485,6 +483,22 @@ class InvestigationService:
             self._append_tool_outcome_evidence(
                 self._store.get_agent_run(tool_call.agent_run_id), outcome, now
             )
+        if outcome.status is ToolCallStatus.UNCERTAIN:
+            # Mirror the main loop: an approved tool whose result could not be
+            # confirmed parks the run (and its parent investigation)
+            # PAUSED_UNCERTAIN_STATE instead of resuming it.
+            self._park_uncertain_after_tool(
+                self._store.get_agent_run(tool_call.agent_run_id), now
+            )
+            return ApprovalDecisionOutcome(
+                approval_id=approval.approval_id,
+                matched="tool_call",
+                tool_call_id=tool_call.tool_call_id,
+                run_id=tool_call.agent_run_id,
+                action="uncertain",
+                applied=False,
+                consumed=True,
+            )
         await self._resume_after_decision(tool_call.agent_run_id, now)
         return ApprovalDecisionOutcome(
             approval_id=approval.approval_id,
@@ -589,6 +603,60 @@ class InvestigationService:
                 self._events_pub.investigation_status_changed(
                     updated, previous=previous, occurred_at=now
                 )
+
+    def _park_uncertain_after_tool(self, run: AgentRun, now: datetime) -> None:
+        """Park a run and its parent investigation as PAUSED_UNCERTAIN_STATE.
+
+        Mirrors the orchestrator's main-loop handling of an UNCERTAIN tool
+        outcome so an approval re-execution whose result could not be confirmed
+        parks the run instead of auto-resuming it.  The state machine forbids a
+        direct WAITING_APPROVAL -> PAUSED_UNCERTAIN_STATE move, so the run is
+        first moved to RUNNING exactly like ``_resume_after_decision`` does,
+        then parked.
+        """
+        try:
+            current = self._store.get_agent_run(run.agent_run_id)
+            previous = current.status.value
+            if current.status is AgentRunStatus.WAITING_APPROVAL:
+                current = self._store.transition_agent_run_status(
+                    current.agent_run_id, AgentRunStatus.RUNNING, now=now
+                )
+            if current.status is AgentRunStatus.RUNNING:
+                updated = self._store.transition_agent_run_status(
+                    current.agent_run_id,
+                    AgentRunStatus.PAUSED_UNCERTAIN_STATE,
+                    now=now,
+                    stop_reason=StopReason.UNCERTAIN_STATE,
+                )
+                if self._events_pub is not None:
+                    self._events_pub.agent_run_status_changed(
+                        updated, previous=previous, occurred_at=now
+                    )
+        except IllegalTransition:
+            pass
+        if run.kind is not AgentRunKind.PARENT:
+            return
+        try:
+            investigation = self._store.get_investigation(run.investigation_id)
+            previous = investigation.status.value
+            current = investigation
+            if current.status is InvestigationStatus.WAITING_APPROVAL:
+                current = self._store.transition_investigation_status(
+                    current.investigation_id, InvestigationStatus.RUNNING, now=now
+                )
+            if current.status is InvestigationStatus.RUNNING:
+                updated = self._store.transition_investigation_status(
+                    current.investigation_id,
+                    InvestigationStatus.PAUSED_UNCERTAIN_STATE,
+                    now=now,
+                    stop_reason=StopReason.UNCERTAIN_STATE,
+                )
+                if self._events_pub is not None:
+                    self._events_pub.investigation_status_changed(
+                        updated, previous=previous, occurred_at=now
+                    )
+        except (InvestigationNotFound, IllegalTransition):
+            pass
 
     def _append_tool_outcome_evidence(
         self, run: AgentRun, outcome: object, now: datetime
