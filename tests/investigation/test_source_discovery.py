@@ -14,7 +14,7 @@ import asyncio
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -987,6 +987,42 @@ async def test_expired_or_consumed_approval_cannot_authorize_registry_write(
         )
 
     # The registry was never widened and the proposal stays undecided.
+    service = next(
+        s
+        for s in harness.projects.get(PROJECT_ID).services
+        if s.compose_service == SERVICE
+    )
+    assert "ghost-worker-1" not in service.container_names
+    stored = harness.investigations.get_proposal(proposed.proposal.proposal_id)
+    assert stored.status is RegistryProposalStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_ttl_expired_approval_cannot_authorize_registry_write(
+    tmp_path: Path,
+) -> None:
+    """I1: an APPROVED-but-expired approval must fail closed before mutation."""
+    harness = build_harness(tmp_path, transport=_ghost_transport())
+    run = _new_run(harness.investigations)
+    proposed = await harness.proposals.propose(
+        run,
+        discovery_evidence_id="ev-discovery-ttl",
+        kind=RegistryUpdateKind.CONTAINER_REGISTRATION,
+        service_name=SERVICE,
+        container="ghost-worker-1",
+        now=NOW,
+    )
+    await harness.approvals.approve(proposed.approval.approval_id)
+    approval = _approval_for(harness, proposed.approval.approval_id)
+    # Past the 15-minute TTL, still APPROVED but no longer consumable.
+    assert approval.expires_at is not None
+    later = approval.expires_at + timedelta(minutes=1)
+
+    with pytest.raises(ApprovalUnavailable):
+        await harness.proposals.handle_approval_decision(
+            proposed.proposal, approval, now=later
+        )
+
     service = next(
         s
         for s in harness.projects.get(PROJECT_ID).services

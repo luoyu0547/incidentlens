@@ -284,6 +284,11 @@ class RegistryProposalService:
                 f"approval {approval.approval_id} is {stored.status.value}, "
                 "not approved"
             )
+        if now > stored.expires_at:
+            raise ApprovalUnavailable(
+                f"approval {approval.approval_id} expired at "
+                f"{stored.expires_at.isoformat()}"
+            )
 
         intent = registry_update_intent(proposal)
         if intent_sha256(intent) != stored.intent_sha256:
