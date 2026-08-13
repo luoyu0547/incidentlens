@@ -73,16 +73,22 @@ def test_reports_page_not_found(client):
     assert "Report not available" in resp.text
 
 
-def test_events_stream(client):
-    """SSE stream is registered and starts with a 200 response.
+def test_events_stream(client, runtime):
+    """SSE stream emits correctly framed, serialized events.
 
     The sync TestClient buffers the full response body, so an infinite SSE
     stream would hang a plain ``client.get``. Instead, drive the ASGI app
-    directly: the response start (200) is emitted before the first body
-    chunk, and the immediate client disconnect cancels the generator so the
-    app returns.
+    directly: publish a RuntimeEvent while the generator is subscribed, capture
+    the ``http.response.body`` chunks, then let a client disconnect cancel the
+    generator so the app returns.
     """
     import asyncio
+    from datetime import UTC, datetime
+
+    from incidentlens_control_plane.events.types import (
+        RuntimeEvent,
+        RuntimeEventType,
+    )
 
     scope = {
         "type": "http",
@@ -99,18 +105,56 @@ def test_events_stream(client):
         "server": ("testserver", 80),
     }
 
-    async def receive() -> dict[str, object]:
-        return {"type": "http.disconnect"}
-
-    async def run() -> list[object]:
+    async def run() -> tuple[list[object], list[bytes]]:
         started: list[object] = []
+        bodies: list[bytes] = []
+        body_captured = asyncio.Event()
+        request_complete = False
+
+        async def receive() -> dict[str, object]:
+            nonlocal request_complete
+            if not request_complete:
+                request_complete = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await body_captured.wait()
+            return {"type": "http.disconnect"}
 
         async def send(message: dict[str, object]) -> None:
             if message["type"] == "http.response.start":
                 started.append(message["status"])
+            elif message["type"] == "http.response.body":
+                bodies.append(message.get("body", b"") or b"")
+                if not body_captured.is_set():
+                    body_captured.set()
 
-        await client.app(scope, receive, send)
-        return started
+        driver = asyncio.create_task(client.app(scope, receive, send))
 
-    statuses = asyncio.run(run())
-    assert statuses == [200]
+        event = RuntimeEvent(
+            event_id="evt-sse-1",
+            sequence=0,
+            event_type=RuntimeEventType.INVESTIGATION_CREATED,
+            occurred_at=datetime(2026, 8, 13, tzinfo=UTC),
+            payload={"investigation_id": "inv-sse-1"},
+        )
+        # Publish until the route's generator has subscribed and forwarded a
+        # framed chunk (the subscriber registers asynchronously).
+        for _ in range(1000):
+            await runtime.broker.publish(event)
+            try:
+                await asyncio.wait_for(body_captured.wait(), timeout=0.05)
+                break
+            except asyncio.TimeoutError:
+                continue
+
+        assert body_captured.is_set(), "no framed SSE body chunk was produced"
+        await asyncio.wait_for(driver, timeout=5)
+        return started, bodies
+
+    started, bodies = asyncio.run(run())
+    assert started == [200]
+    assert bodies, "SSE stream produced no body chunks"
+    framed = bodies[0]
+    assert framed.startswith(b"data: ")
+    assert b'"event_id":"evt-sse-1"' in framed
+    assert b'"payload":{"investigation_id":"inv-sse-1"}' in framed
+    assert framed.endswith(b"\n\n")
