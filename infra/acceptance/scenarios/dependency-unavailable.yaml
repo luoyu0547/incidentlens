@@ -5,12 +5,12 @@ fault_injection:
   service: inventory-service
   env_var: FAULT_DEPENDENCY
   value: "true"
-trigger_condition: "inventory-service /health returns 503"
+trigger_condition: "inventory-service /inventory/reserve returns 503"
 normal_behavior:
   - "Inventory service responds to /inventory/reserve"
 fault_behavior:
-  - "Inventory service returns 503 for all requests"
-  - "GET /health returns 503"
+  - "POST /inventory/reserve returns 503 with 'inventory service unavailable'"
+  - "GET /health still returns 200 {'status': 'ok'}"
 expected_diagnosis:
   - "Agent should discover inventory service is down"
   - "Root cause: inventory service dependency failure"
