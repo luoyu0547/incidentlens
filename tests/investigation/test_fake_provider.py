@@ -250,6 +250,8 @@ def _snapshot(investigation: Investigation) -> InvestigationSnapshot:
     return InvestigationSnapshot(
         investigation_id=investigation.investigation_id,
         incident_id=investigation.incident_id,
+        service=investigation.service,
+        allowed_log_paths=(),
         symptom=investigation.symptom,
         status=investigation.status,
         budget=investigation.budget,

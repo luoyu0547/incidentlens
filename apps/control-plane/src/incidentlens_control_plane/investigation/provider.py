@@ -378,6 +378,8 @@ class InvestigationSnapshot(BaseModel):
 
     investigation_id: str = Field(min_length=1, max_length=120)
     incident_id: str = Field(min_length=1, max_length=120)
+    service: str = Field(min_length=1, max_length=120)
+    allowed_log_paths: tuple[str, ...] = Field(default=(), max_length=64)
     symptom: str = Field(min_length=1, max_length=2_000)
     status: InvestigationStatus
     budget: InvestigationBudget

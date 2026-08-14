@@ -210,12 +210,12 @@ def test_generate_aggregates_runs_tool_calls_hypotheses_and_evidence(
     assert "connection pool exhaustion caused by leaked DB connections" in md
     assert "connection pool exhaustion caused by leaked DB connections" in html
     # 时间线：run 的 kind + 截断 run id + 终止状态；tool call 的 started_at + 状态
-    assert "`00000001` started (parent)" in md
-    assert "Finished: completed" in md
+    assert "`00000001` 已启动（parent）" in md
+    assert "已结束：completed" in md
     assert "`log_tail` → succeeded" in md
     # 证据汇总：evidence_kind.value / evidence_ref_id / source_ref
-    assert "[log_record] ev-test001: /var/log/order/app.log" in md
+    assert "[log_record] ev-test001：/var/log/order/app.log" in md
     # 假设演进：hypothesis.summary + status.value
-    assert "**confirmed**: connection pool exhaustion" in md
+    assert "**confirmed**：connection pool exhaustion" in md
     # 附录：tool call 的 evidence_ids join
-    assert "`log_tail` (succeeded) — evidence: ev-test001" in md
+    assert "`log_tail`（succeeded）— 关联证据：ev-test001" in md

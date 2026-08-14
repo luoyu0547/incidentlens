@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from incidentlens_control_plane.approvals.types import ApprovalStatus
+from incidentlens_control_plane.investigation.state_machine import InvestigationStatus
 from incidentlens_control_plane.runtime import RuntimeServices
 from incidentlens_control_plane.web.dependencies import get_jinja_env
 
@@ -24,8 +25,31 @@ def _get_runtime(request: Request) -> RuntimeServices:
 async def dashboard(request: Request) -> str:
     runtime = _get_runtime(request)
     investigations = runtime.investigations.list_investigations()
+    approvals = runtime.approvals.list(ApprovalStatus.PENDING)
+    stats = {
+        "active": sum(
+            1
+            for item in investigations
+            if item.status
+            in {
+                InvestigationStatus.RUNNING,
+                InvestigationStatus.WAITING_APPROVAL,
+                InvestigationStatus.PAUSED_BUDGET,
+            }
+        ),
+        "pending_approvals": len(approvals),
+        "completed": sum(
+            1 for item in investigations if item.status is InvestigationStatus.COMPLETED
+        ),
+    }
     template = _env.get_template("dashboard.html")
-    return template.render(investigations=investigations)
+    return template.render(
+        request=request,
+        investigations=investigations,
+        stats=stats,
+        approvals=approvals,
+        pending_approval_count=stats["pending_approvals"],
+    )
 
 
 @router.get("/web/investigations", response_class=HTMLResponse)
@@ -33,7 +57,7 @@ async def investigations_list(request: Request) -> str:
     runtime = _get_runtime(request)
     investigations = runtime.investigations.list_investigations()
     template = _env.get_template("investigations/list.html")
-    return template.render(investigations=investigations)
+    return template.render(request=request, investigations=investigations)
 
 
 @router.get("/web/investigations/{investigation_id}", response_class=HTMLResponse)
@@ -59,6 +83,7 @@ async def investigation_detail(request: Request, investigation_id: str) -> str:
             )
     template = _env.get_template("investigations/detail.html")
     return template.render(
+        request=request,
         investigation=investigation,
         investigation_id=investigation_id,
         runs=runs,
@@ -73,7 +98,7 @@ def approvals_list(request: Request) -> str:
     runtime = _get_runtime(request)
     pending = runtime.approvals.list(ApprovalStatus.PENDING)
     template = _env.get_template("approvals/list.html")
-    return template.render(approvals=pending)
+    return template.render(request=request, approvals=pending, pending_approval_count=len(pending))
 
 
 @router.post("/web/approvals/{approval_id}/approve")
@@ -101,13 +126,13 @@ async def reject_action(request: Request, approval_id: str) -> HTMLResponse:
 @router.get("/web/logs/search", response_class=HTMLResponse)
 def logs_search(request: Request) -> str:
     template = _env.get_template("logs/search.html")
-    return template.render(results=[])
+    return template.render(request=request, results=[])
 
 
 @router.get("/web/evidence/{evidence_ref_id}", response_class=HTMLResponse)
 def evidence_detail(request: Request, evidence_ref_id: str) -> str:
     template = _env.get_template("evidence/detail.html")
-    return template.render(evidence_id=evidence_ref_id, evidence=None)
+    return template.render(request=request, evidence_id=evidence_ref_id, evidence=None)
 
 
 @router.get("/web/reports/{investigation_id}", response_class=HTMLResponse)
@@ -120,7 +145,7 @@ def report_view(request: Request, investigation_id: str) -> HTMLResponse:
     except Exception:
         template = _env.get_template("reports/render.html")
         return template.render(
-            error="Report not available", investigation_id=investigation_id
+            request=request, error="Report not available", investigation_id=investigation_id
         )
 
 
@@ -129,7 +154,7 @@ def projects_manage(request: Request) -> str:
     runtime = _get_runtime(request)
     projects = runtime.projects.list()
     template = _env.get_template("projects/manage.html")
-    return template.render(projects=projects)
+    return template.render(request=request, projects=projects)
 
 
 @router.get("/web/events/stream")

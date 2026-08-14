@@ -121,12 +121,12 @@ class ReportService:
         sections.append(
             ReportSection(
                 kind=ReportKind.SUMMARY,
-                title="Summary",
+                title="摘要",
                 content=(
-                    f"Investigation into: {investigation.symptom}\n\n"
-                    f"Service: {investigation.service}\n"
-                    f"Status: {investigation.status.value}\n"
-                    f"Total rounds: {investigation.usage.rounds}"
+                    f"调查症状：{investigation.symptom}\n\n"
+                    f"关联服务：{investigation.service}\n"
+                    f"调查状态：{investigation.status.value}\n"
+                    f"累计轮次：{investigation.usage.rounds}"
                 ),
             )
         )
@@ -137,7 +137,7 @@ class ReportService:
             sections.append(
                 ReportSection(
                     kind=ReportKind.ROOT_CAUSE,
-                    title="Root Cause Analysis",
+                    title="根因分析",
                     content="\n".join(lines),
                 )
             )
@@ -146,22 +146,22 @@ class ReportService:
         timeline_lines: list[str] = []
         for run in runs:
             timeline_lines.append(
-                f"- **{run.created_at:%H:%M:%S}** — Agent run "
-                f"`{run.agent_run_id[-8:]}` started ({run.kind.value})"
+                f"- **{run.created_at:%H:%M:%S}** — Agent 运行 "
+                f"`{run.agent_run_id[-8:]}` 已启动（{run.kind.value}）"
             )
             if run.status.value in ("completed", "failed", "cancelled"):
-                timeline_lines.append(f"  - Finished: {run.status.value}")
+                timeline_lines.append(f"  - 已结束：{run.status.value}")
         for tc in tool_calls:
             if tc.started_at:
                 timeline_lines.append(
-                    f"- **{tc.started_at:%H:%M:%S}** — "
+                    f"- **{tc.started_at:%H:%M:%S}** — 工具调用 "
                     f"`{tc.tool_name}` → {tc.status.value}"
                 )
         if timeline_lines:
             sections.append(
                 ReportSection(
                     kind=ReportKind.TIMELINE,
-                    title="Timeline",
+                    title="调查时间线",
                     content="\n".join(timeline_lines),
                 )
             )
@@ -169,25 +169,25 @@ class ReportService:
         # 4. 证据汇总
         if evidence_refs:
             ev_lines = [
-                f"- [{ref.evidence_kind.value}] {ref.evidence_ref_id}: "
-                f"{ref.source_ref or 'N/A'}"
+                f"- [{ref.evidence_kind.value}] {ref.evidence_ref_id}："
+                f"{ref.source_ref or '未标注来源'}"
                 for ref in evidence_refs[:50]
             ]
             sections.append(
                 ReportSection(
                     kind=ReportKind.EVIDENCE,
-                    title="Evidence",
+                    title="证据汇总",
                     content="\n".join(ev_lines),
                 )
             )
 
         # 5. 假设演进
         if hypotheses:
-            hyp_lines = [f"- **{h.status.value}**: {h.summary}" for h in hypotheses]
+            hyp_lines = [f"- **{h.status.value}**：{h.summary}" for h in hypotheses]
             sections.append(
                 ReportSection(
                     kind=ReportKind.HYPOTHESES,
-                    title="Hypotheses",
+                    title="假设演进",
                     content="\n".join(hyp_lines),
                 )
             )
@@ -198,8 +198,8 @@ class ReportService:
         sections.append(
             ReportSection(
                 kind=ReportKind.RECOMMENDATIONS,
-                title="Recommendations",
-                content="- Manual review recommended based on evidence above.",
+                title="修复建议",
+                content="- 建议基于以上已脱敏证据进行人工复核和后续修复。",
             )
         )
 
@@ -207,14 +207,14 @@ class ReportService:
         appendix_lines: list[str] = []
         for tc in tool_calls:
             appendix_lines.append(
-                f"- `{tc.tool_name}` ({tc.status.value}) — "
-                f"evidence: {', '.join(tc.evidence_ids) or 'none'}"
+                f"- `{tc.tool_name}`（{tc.status.value}）— "
+                f"关联证据：{', '.join(tc.evidence_ids) or '无'}"
             )
         if appendix_lines:
             sections.append(
                 ReportSection(
                     kind=ReportKind.APPENDIX,
-                    title="Appendix: Tool Calls",
+                    title="附录：工具调用",
                     content="\n".join(appendix_lines),
                 )
             )

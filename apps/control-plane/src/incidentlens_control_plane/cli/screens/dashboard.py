@@ -20,24 +20,35 @@ class DashboardScreen(Screen):
         self.runtime = runtime
 
     def compose(self) -> ComposeResult:
-        yield Static("=== IncidentLens Dashboard ===\n", id="title")
+        yield Static("[bold]incidentlens[/] / 本地调查", id="workspace-title")
         yield DataTable(id="investigations")
-        yield Static("", id="status")
+        yield Static(
+            "选择调查后按 Enter 进入会话；也可使用 incidentlens investigate <ID>。",
+            id="status",
+        )
 
     def on_mount(self) -> None:
         if self.runtime is None:
             return
         table = self.query_one("#investigations", DataTable)
-        table.add_columns("ID", "Symptom", "Status", "Service")
+        table.cursor_type = "row"
+        table.add_columns("调查", "症状", "状态", "服务", "更新")
         investigations = self.runtime.investigations.list_investigations()
         for inv in investigations[:20]:
             table.add_row(
-                inv.investigation_id[:16],
+                inv.investigation_id,
                 inv.symptom[:60],
                 inv.status.value,
                 inv.service,
+                inv.updated_at.strftime("%m-%d %H:%M"),
+                key=inv.investigation_id,
             )
         pending = self.runtime.approvals.list(ApprovalStatus.PENDING)
         self.query_one("#status").update(
-            f"Active: {len(investigations)} | Pending approvals: {len(pending)}"
+            f"共 {len(investigations)} 个调查 · {len(pending)} 个待确认操作 · Enter 进入会话"
         )
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        from incidentlens_control_plane.cli.screens.investigation import InvestigationScreen
+
+        self.app.push_screen(InvestigationScreen(str(event.row_key.value), self.runtime))

@@ -71,14 +71,29 @@ class RuntimeSettings(BaseModel):
 
     # -- reports ---------------------------------------------------------------
     report_output_dir: Path | None = None
+    agent_mode: str = "fake"
+    llm_active_model: str | None = None
+    llm_base_url: str = "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2"
+    xfyun_maas_api_key: str | None = None
 
     @classmethod
     def from_environment(cls) -> RuntimeSettings:
         """Create settings from the INCIDENTLENS_DATA_DIR environment variable."""
+        _load_local_dotenv()
         configured = os.environ.get("INCIDENTLENS_DATA_DIR")
         data_dir = Path(configured).expanduser() if configured else Path.home() / ".incidentlens"
         report_output_dir = data_dir.resolve() / "reports"
-        return cls(data_dir=data_dir.resolve(), report_output_dir=report_output_dir)
+        return cls(
+            data_dir=data_dir.resolve(),
+            report_output_dir=report_output_dir,
+            agent_mode=os.environ.get("INCIDENTLENS_AGENT_MODE", "fake"),
+            llm_active_model=os.environ.get("INCIDENTLENS_LLM_ACTIVE_MODEL"),
+            llm_base_url=os.environ.get(
+                "INCIDENTLENS_LLM_BASE_URL",
+                "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2",
+            ),
+            xfyun_maas_api_key=os.environ.get("XFYUN_MAAS_API_KEY"),
+        )
 
     def default_run_budget(self) -> AgentBudget:
         """The bounded default budget applied to a run without an explicit one."""
@@ -103,3 +118,16 @@ class RuntimeSettings(BaseModel):
             max_evidence=self.max_evidence_per_investigation,
             max_no_new_evidence_rounds=self.max_no_new_evidence_rounds,
         )
+
+
+def _load_local_dotenv() -> None:
+    """读取项目 .env，但永不覆盖已由用户 shell 提供的环境变量。"""
+    dotenv = Path.cwd() / ".env"
+    if not dotenv.is_file():
+        return
+    for line in dotenv.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        os.environ.setdefault(name.strip(), value.strip().strip('"').strip("'"))

@@ -30,6 +30,10 @@ from incidentlens_control_plane.investigation.source_discovery import (
 )
 from incidentlens_control_plane.investigation.store import InvestigationStore
 from incidentlens_control_plane.investigation.tool_executor import ToolExecutor
+from incidentlens_control_plane.investigation.xfyun_provider import (
+    XfyunMaaSConfig,
+    XfyunMaaSProvider,
+)
 from incidentlens_control_plane.logs.service import LogService
 from incidentlens_control_plane.logs.store import LogStore
 from incidentlens_control_plane.logs.subscriptions import LogSubscriptionManager
@@ -171,9 +175,22 @@ def build_runtime(
         approvals=approvals,
     )
     fake_provider = fake_provider_registry or FakeProviderRegistry()
+    provider = FakeProvider(fake_provider)
+    if settings.agent_mode == "llm_agent":
+        if not settings.xfyun_maas_api_key or not settings.llm_active_model:
+            raise ValueError(
+                "llm_agent 模式需要 XFYUN_MAAS_API_KEY 和 INCIDENTLENS_LLM_ACTIVE_MODEL"
+            )
+        provider = XfyunMaaSProvider(
+            XfyunMaaSConfig(
+                api_key=settings.xfyun_maas_api_key,
+                base_url=settings.llm_base_url,
+                model=settings.llm_active_model.removeprefix("xfyun-"),
+            )
+        )
     orchestrator = AgentOrchestrator(
         store=investigation_store,
-        provider=FakeProvider(fake_provider),
+        provider=provider,
         executor=executor,
         evidence=evidence_service,
         projects=projects,

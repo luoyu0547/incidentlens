@@ -1,9 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Projects{% endblock %}
+{% block title %}项目管理 — IncidentLens{% endblock %}
+{% block page_label %}项目管理{% endblock %}
 {% block content %}
-<h2>Projects</h2>
+<div class="il-page-heading"><div><h1>项目管理</h1><p>管理项目、目标主机与 Agent 可访问范围</p></div></div>
 <table>
-    <thead><tr><th>ID</th><th>Name</th><th>Targets</th></tr></thead>
+    <thead><tr><th>项目 ID</th><th>项目名称</th><th>目标主机</th></tr></thead>
     <tbody>
     {% for p in projects %}
     <tr>
@@ -12,7 +13,7 @@
         <td>{{ p.targets|length }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="3">No projects registered.</td></tr>
+    <tr><td colspan="3" class="il-empty">暂无已注册项目</td></tr>
     {% endfor %}
     </tbody>
 </table>

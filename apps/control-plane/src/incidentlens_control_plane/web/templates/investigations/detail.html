@@ -1,19 +1,18 @@
 {% extends "base.html" %}
 {% block title %}Investigation {{ investigation.investigation_id[:16] if investigation else 'Not Found' }}{% endblock %}
+{% block page_label %}调查详情{% endblock %}
 {% block content %}
 {% if investigation %}
-<h2>Investigation {{ investigation.investigation_id[:16] }}</h2>
-<article>
-    <header>
-        <strong>Status:</strong> <mark>{{ investigation.status.value }}</mark>
-        &nbsp;|&nbsp; <strong>Service:</strong> {{ investigation.service }}
-    </header>
-    <p><strong>Symptom:</strong> {{ investigation.symptom }}</p>
-</article>
+<div class="il-page-heading il-detail-heading">
+    <div><div class="il-detail-kicker">{{ investigation.investigation_id[:16] }} · P1 事故</div><h1>{{ investigation.symptom }}</h1><p><span class="il-badge il-badge-{{ investigation.status.value }}">{{ investigation.status.value }}</span> <span class="il-service-chip">{{ investigation.service }}</span></p></div>
+    <a class="il-button il-button-primary" href="/web/reports/{{ investigation.investigation_id }}">生成报告</a>
+</div>
+<div class="il-detail-meta"><div><span>影响服务</span><strong>{{ investigation.service }}</strong></div><div><span>开始时间</span><strong>{{ investigation.created_at.strftime('%Y-%m-%d %H:%M') }}</strong></div><div><span>调查状态</span><strong>{{ investigation.status.value }}</strong></div><div><span>证据数量</span><strong>{{ tool_calls|length }}</strong></div></div>
+<div class="il-safety-banner"><span>✓</span><div><strong>安全边界已启用</strong><p>所有调查结论均基于已脱敏的日志证据生成。Agent 操作范围受项目注册边界严格限制。</p></div></div>
 
 <div class="grid">
-    <article>
-        <header>Runs ({{ runs|length }})</header>
+    <article class="il-card">
+        <header class="il-card-heading"><h2>Agent 运行（{{ runs|length }}）</h2></header>
         <table>
             <thead><tr><th>ID</th><th>Kind</th><th>Status</th></tr></thead>
             <tbody>
@@ -27,8 +26,8 @@
             </tbody>
         </table>
     </article>
-    <article>
-        <header>Hypotheses ({{ hypotheses|length }})</header>
+    <article class="il-card">
+        <header class="il-card-heading"><h2>当前假设（{{ hypotheses|length }}）</h2></header>
         <ul>
         {% for h in hypotheses %}
         <li><mark>{{ h.status.value }}</mark> {{ h.summary[:100] }}</li>
@@ -37,7 +36,7 @@
     </article>
 </div>
 
-<h3>Timeline</h3>
+<h2 class="il-section-title">调查时间线 <small>Timeline</small></h2>
 {% include "investigations/_timeline.html" %}
 
 {% else %}

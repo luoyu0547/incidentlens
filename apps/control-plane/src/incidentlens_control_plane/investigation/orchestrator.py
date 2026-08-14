@@ -517,6 +517,10 @@ class AgentOrchestrator:
         round_number: int,
         child_reports: list[ChildReport],
     ) -> AgentTurnRequest:
+        project = self._projects.get(investigation.project_id)
+        service = next(
+            item for item in project.services if item.compose_service == investigation.service
+        )
         return AgentTurnRequest(
             checkpoint=RunCheckpoint(
                 agent_run_id=run.agent_run_id,
@@ -531,6 +535,8 @@ class AgentOrchestrator:
             investigation=InvestigationSnapshot(
                 investigation_id=investigation.investigation_id,
                 incident_id=investigation.incident_id,
+                service=investigation.service,
+                allowed_log_paths=service.allowed_log_paths,
                 symptom=investigation.symptom,
                 status=investigation.status,
                 budget=investigation.budget,

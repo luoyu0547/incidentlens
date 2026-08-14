@@ -1,9 +1,19 @@
 {% extends "base.html" %}
-{% block title %}Dashboard — IncidentLens{% endblock %}
+{% block title %}仪表盘 — IncidentLens{% endblock %}
+{% block page_label %}仪表盘{% endblock %}
 {% block content %}
-<h2>Dashboard</h2>
-<article>
-    <header>Active Investigations</header>
+<div class="il-page-heading">
+    <div><h1>事故调查仪表盘</h1><p>实时掌握事故进展、风险操作与调查结论</p></div>
+    <a class="il-button il-button-primary" href="/web/investigations">＋ 发起调查</a>
+</div>
+<section class="il-stat-grid" aria-label="运行概览">
+    <article class="il-stat-card"><span>进行中调查</span><strong>{{ stats.active }}</strong><small>当前活跃任务</small></article>
+    <article class="il-stat-card il-stat-warning"><span>待审批操作</span><strong>{{ stats.pending_approvals }}</strong><small>需要人工确认</small></article>
+    <article class="il-stat-card il-stat-success"><span>已完成调查</span><strong>{{ stats.completed }}</strong><small>历史调查总数</small></article>
+    <article class="il-stat-card"><span>数据脱敏</span><strong class="il-status-ok">开启</strong><small>所有证据均已处理</small></article>
+</section>
+<section class="il-card il-investigations-card">
+    <div class="il-card-heading"><div><h2>调查列表</h2><p>按状态跟踪所有事故调查</p></div><div class="il-filter-tabs"><button class="is-active">全部</button><button>进行中</button><button>待审批</button><button>已完成</button></div></div>
     <table id="active-investigations-table"
            hx-get="/"
            hx-trigger="investigation-updated from:body"
@@ -11,24 +21,25 @@
            hx-swap="outerHTML">
         <thead>
             <tr>
-                <th>ID</th>
-                <th>Symptom</th>
-                <th>Status</th>
-                <th>Service</th>
+                <th>事故 / 服务</th><th>状态</th><th>影响服务</th><th>更新时间</th>
             </tr>
         </thead>
         <tbody>
         {% for inv in investigations %}
             <tr>
-                <td><a href="/web/investigations/{{ inv.investigation_id }}">{{ inv.investigation_id[:16] }}</a></td>
-                <td>{{ inv.symptom[:80] }}</td>
-                <td><mark>{{ inv.status.value }}</mark></td>
-                <td>{{ inv.service }}</td>
+                <td><a class="il-incident-link" href="/web/investigations/{{ inv.investigation_id }}"><strong>{{ inv.symptom[:80] }}</strong><small>{{ inv.investigation_id[:16] }}</small></a></td>
+                <td><span class="il-badge il-badge-{{ inv.status.value }}">{{ inv.status.value }}</span></td>
+                <td><span class="il-service-chip">{{ inv.service }}</span></td>
+                <td class="il-muted">{{ inv.updated_at.strftime('%m月%d日 %H:%M') }}</td>
             </tr>
         {% else %}
-            <tr><td colspan="4">No investigations yet.</td></tr>
+            <tr><td colspan="4" class="il-empty">暂无调查记录</td></tr>
         {% endfor %}
         </tbody>
     </table>
-</article>
+</section>
+<section class="il-dashboard-bottom">
+    <article class="il-card"><div class="il-card-heading"><div><h2>待处理审批</h2><p>需要人工确认的高风险操作</p></div><a href="/web/approvals" class="il-text-link">查看全部 →</a></div>{% for approval in approvals[:3] %}<div class="il-approval-row"><span class="il-risk-dot"></span><div><strong>{{ approval.intent.get('kind', '风险操作') }}</strong><small>{{ approval.approval_id[:16] }}</small></div><span class="il-badge il-badge-waiting">待审批</span></div>{% else %}<p class="il-empty">当前没有待审批操作</p>{% endfor %}</article>
+    <article class="il-card"><div class="il-card-heading"><div><h2>安全边界</h2><p>IncidentLens 运行保护</p></div></div><div class="il-safety-row"><span>✓</span><div><strong>证据自动脱敏</strong><small>Token、邮箱、IP 等敏感信息不会进入证据库</small></div></div><div class="il-safety-row"><span>✓</span><div><strong>危险操作需审批</strong><small>远程变更前强制双重备份并支持回滚</small></div></div></article>
+</section>
 {% endblock %}
