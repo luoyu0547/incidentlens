@@ -38,8 +38,15 @@ from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
+from incidentlens_control_plane.investigation.compactor import (
+    CompactionCircuitOpen,
+    CompactionRejected,
+    CompactionRequest,
+    CompactionValidator,
+    ContextCompactor,
+)
 from incidentlens_control_plane.investigation.state_machine import HypothesisStatus
 from incidentlens_control_plane.investigation.store import (
     CompactBoundaryConflict,
@@ -54,6 +61,7 @@ from incidentlens_control_plane.investigation.transcript import (
 from incidentlens_control_plane.investigation.types import (
     AgentRun,
     CompactBoundary,
+    CompactionState,
     Investigation,
     MessageRole,
     SessionMemory,
@@ -416,11 +424,15 @@ class AgentContextManager:
         policy: ContextBudgetPolicy | None = None,
         estimator: TokenEstimator | None = None,
         now: Callable[[], datetime] | None = None,
+        compactor: ContextCompactor | None = None,
+        validator: CompactionValidator | None = None,
     ) -> None:
         self._store = store
         self._policy = policy or ContextBudgetPolicy()
         self._estimator = estimator or ConservativeTokenEstimator()
         self._now = now or (lambda: datetime.now(UTC))
+        self._compactor = compactor
+        self._validator = validator or CompactionValidator()
         self._transcript = TranscriptService(store)
 
     # -- public ---------------------------------------------------------------
@@ -460,6 +472,197 @@ class AgentContextManager:
                 run, investigation, tool_schemas, boundary, memory, todos
             )
         return active
+
+    # -- semantic / reactive compaction ---------------------------------------
+
+    async def semantic_compact(self, run: AgentRun) -> SessionMemory:
+        """Ask the injected ``ContextCompactor`` to summarize the recent transcript.
+
+        The manager builds a tool-free ``CompactionRequest`` over the groups
+        written since the latest compact boundary, validates the compactor's
+        memory revision (evidence ownership, monotonic boundary, redaction and
+        length) and commits it with its boundary and a reset breaker state in
+        one transaction.  A provider failure or an invalid revision increments
+        the durable breaker; the fourth consecutive failure raises
+        ``CompactionCircuitOpen``.
+        """
+        boundary = self._store.get_latest_compact_boundary(run.agent_run_id)
+        groups = self._transcript.group_messages(
+            run.agent_run_id, after=boundary.through_sequence if boundary else 0
+        )
+        return await self._semantic_compact_groups(run, groups)
+
+    async def reactive_compact(
+        self, run: AgentRun, *, keep_recent_groups: int = 5
+    ) -> ActiveContext:
+        """Respond to a prompt-too-long turn by compacting the oldest groups.
+
+        The newest ``keep_recent_groups`` complete groups stay whole in the
+        replayed tail; everything older is handed to the semantic compactor and
+        summarized into a new memory revision, after which the context is
+        re-materialized from the new boundary with the tail preserved.  Only one
+        reactive compaction is allowed per round: a second attempt in the same
+        round is refused using ``CompactionState.reactive_round``.
+        """
+        state = self._store.get_compaction_state(run.agent_run_id)
+        if state is not None and state.reactive_round == run.usage.rounds:
+            raise CompactionRejected(
+                f"reactive compaction already performed for run {run.agent_run_id} "
+                f"in round {run.usage.rounds}"
+            )
+        if keep_recent_groups < 1:
+            raise ValueError("keep_recent_groups must be >= 1")
+        investigation = self._store.get_investigation(run.investigation_id)
+        groups = self._transcript.group_messages(run.agent_run_id)
+        head, tail = groups[:-keep_recent_groups], groups[-keep_recent_groups:]
+        memory = await self._semantic_compact_groups(
+            run, head, reactive_round=run.usage.rounds
+        )
+        return self._materialize_after(
+            run, investigation, memory.through_transcript_sequence, tail
+        )
+
+    async def _semantic_compact_groups(
+        self,
+        run: AgentRun,
+        groups: tuple[MessageGroup, ...],
+        *,
+        reactive_round: int | None = None,
+    ) -> SessionMemory:
+        """Compact ``groups`` through the injected compactor and commit atomically."""
+        state = self._store.get_compaction_state(run.agent_run_id)
+        if state is not None and state.consecutive_failures >= 3:
+            raise CompactionCircuitOpen(
+                f"semantic compaction tripped the breaker for run {run.agent_run_id}: "
+                f"{state.consecutive_failures} consecutive failures"
+            )
+        if self._compactor is None:
+            raise CompactionRejected(
+                f"no semantic compactor configured for run {run.agent_run_id}"
+            )
+        boundary = self._store.get_latest_compact_boundary(run.agent_run_id)
+        prior_memory = self._store.get_latest_session_memory(run.agent_run_id)
+        if not groups and boundary is not None and prior_memory is not None:
+            # Nothing new to summarize: the existing memory and boundary already
+            # cover the whole transcript, so a redundant commit would collide on
+            # the boundary.  Return the prior revision unchanged.
+            return prior_memory
+        through_sequence = (
+            max(message.sequence for group in groups for message in group.messages)
+            if groups
+            else (boundary.through_sequence if boundary else 0)
+        )
+        messages = flatten(
+            tool_result_budget(groups, max_chars=self._policy.tool_result_budget_chars)
+        )
+        request = CompactionRequest(
+            agent_run_id=run.agent_run_id,
+            through_sequence=through_sequence,
+            prior_memory=prior_memory,
+            messages=messages,
+            allowed_evidence_ids=tuple(
+                dict.fromkeys(reference.evidence_id for reference in run.evidence)
+            ),
+        )
+        try:
+            memory = await self._compactor.compact(request)
+        except CompactionCircuitOpen:
+            raise
+        except CompactionRejected:
+            self._record_failure(run, state)
+            raise
+        except Exception as exc:
+            self._record_failure(run, state)
+            raise CompactionRejected(
+                f"semantic compactor failed for run {run.agent_run_id}: {exc}"
+            ) from exc
+        try:
+            memory = self._validator.validate(request, memory)
+        except CompactionRejected:
+            self._record_failure(run, state)
+            raise
+        except ValidationError as exc:
+            self._record_failure(run, state)
+            raise CompactionRejected(
+                f"semantic compactor returned an invalid memory for run "
+                f"{run.agent_run_id}: {exc}"
+            ) from exc
+        if memory.investigation_id != run.investigation_id:
+            self._record_failure(run, state)
+            raise CompactionRejected(
+                f"semantic compactor memory names investigation "
+                f"{memory.investigation_id!r} but the run belongs to "
+                f"{run.investigation_id!r}"
+            )
+        compact_boundary = CompactBoundary(
+            agent_run_id=run.agent_run_id,
+            through_sequence=memory.through_transcript_sequence,
+            memory_revision=memory.revision,
+            summary=(
+                f"semantic compact through transcript sequence "
+                f"{memory.through_transcript_sequence}"
+            ),
+            created_at=self._now(),
+        )
+        next_state = CompactionState(
+            agent_run_id=run.agent_run_id,
+            consecutive_failures=0,
+            reactive_round=(
+                reactive_round
+                if reactive_round is not None
+                else (state.reactive_round if state else None)
+            ),
+            latest_boundary_sequence=memory.through_transcript_sequence,
+            updated_at=self._now(),
+        )
+        self._store.commit_compaction(memory, compact_boundary, next_state)
+        return memory
+
+    def _materialize_after(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        through_sequence: int,
+        tail: tuple[MessageGroup, ...],
+    ) -> ActiveContext:
+        """Rebuild a bounded active context after a reactive compaction.
+
+        Groups the new memory already summarizes (``sequence <=
+        through_sequence``) are never replayed; the preserved ``tail`` is
+        otherwise kept whole, budgeted and micro-compacted like any active
+        context, then replayed behind the header carrying the fresh memory.
+        Tool schemas are not available on this path, so the budget estimate
+        counts no tool tokens.
+        """
+        memory = self._store.get_latest_session_memory(run.agent_run_id)
+        todos = self._store.list_todos(run.agent_run_id)
+        tail = tuple(
+            group
+            for group in tail
+            if any(message.sequence > through_sequence for message in group.messages)
+        )
+        groups = tool_result_budget(tail, max_chars=self._policy.tool_result_budget_chars)
+        groups = micro_compact(groups, keep_recent=self._policy.keep_recent_tool_results)
+        messages = restore_context_header(
+            run, investigation, memory, todos, task_prompt=self._task_prompt(run)
+        ) + flatten(groups)
+        budget = self._estimate_budget(run, investigation, messages, ())
+        return ActiveContext(
+            messages=messages, budget=budget, memory=memory, todos=todos
+        )
+
+    def _record_failure(self, run: AgentRun, state: CompactionState | None) -> None:
+        """Persist one more consecutive compaction failure (separate transaction)."""
+        prior = state or CompactionState(
+            agent_run_id=run.agent_run_id, updated_at=self._now()
+        )
+        incremented = prior.model_copy(
+            update={
+                "consecutive_failures": prior.consecutive_failures + 1,
+                "updated_at": self._now(),
+            }
+        )
+        self._store.put_compaction_state(incremented)
 
     # -- materialization ------------------------------------------------------
 

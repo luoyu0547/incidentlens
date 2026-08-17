@@ -1198,6 +1198,71 @@ class InvestigationStore:
             ).fetchone()
         return CompactionState.model_validate_json(row[1]) if row is not None else None
 
+    def commit_compaction(
+        self, memory: SessionMemory, boundary: CompactBoundary, state: CompactionState
+    ) -> tuple[SessionMemory, CompactBoundary, CompactionState]:
+        """Atomically append a memory revision, compact boundary and breaker state.
+
+        The memory insert, boundary insert and breaker-state upsert run in one
+        SQLite transaction, so a conflict or write failure on any one of them
+        rolls back all three: a run can never persist a memory revision without
+        its boundary, nor advance the boundary without resetting the breaker.
+        Raises ``MemoryConflict`` on a duplicate ``(run, revision)`` or
+        ``CompactBoundaryConflict`` on a duplicate ``(run, through_sequence)``.
+        """
+        with self._connection_factory() as conn:
+            try:
+                conn.execute(
+                    f"""
+                    INSERT INTO agent_session_memories (
+                        {", ".join(_SESSION_MEMORY_COLUMNS)}
+                    ) VALUES ({_placeholders(len(_SESSION_MEMORY_COLUMNS))})
+                    """,
+                    (
+                        memory.agent_run_id,
+                        memory.revision,
+                        memory.through_round,
+                        memory.model_dump_json(),
+                        _iso(memory.created_at),
+                    ),
+                )
+                conn.execute(
+                    f"""
+                    INSERT INTO agent_compact_boundaries (
+                        {", ".join(_COMPACT_BOUNDARY_COLUMNS)}
+                    ) VALUES ({_placeholders(len(_COMPACT_BOUNDARY_COLUMNS))})
+                    """,
+                    (
+                        boundary.agent_run_id,
+                        boundary.through_sequence,
+                        boundary.model_dump_json(),
+                        _iso(boundary.created_at),
+                    ),
+                )
+                conn.execute(
+                    f"""
+                    INSERT OR REPLACE INTO agent_compaction_state (
+                        {", ".join(_COMPACTION_STATE_COLUMNS)}
+                    ) VALUES ({_placeholders(len(_COMPACTION_STATE_COLUMNS))})
+                    """,
+                    (state.agent_run_id, state.model_dump_json(), _iso(state.updated_at)),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                message = str(exc)
+                if "agent_session_memories" in message:
+                    raise MemoryConflict(
+                        f"memory revision {memory.revision} already exists for "
+                        f"run {memory.agent_run_id}"
+                    ) from exc
+                if "agent_compact_boundaries" in message:
+                    raise CompactBoundaryConflict(
+                        f"compact boundary {boundary.through_sequence} already exists "
+                        f"for run {boundary.agent_run_id}"
+                    ) from exc
+                raise
+        return memory, boundary, state
+
     # -- tool calls ----------------------------------------------------------
 
     def create_tool_call(self, tool_call: ToolCall) -> ToolCall:
