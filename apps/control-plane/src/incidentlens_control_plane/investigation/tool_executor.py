@@ -49,6 +49,7 @@ from incidentlens_control_plane.investigation.provider import (
 from incidentlens_control_plane.investigation.state_machine import ToolCallStatus
 from incidentlens_control_plane.investigation.store import InvestigationStore
 from incidentlens_control_plane.investigation.tools import (
+    TOOL_COMPACT_CONTEXT,
     TOOL_CONTAINER_LIST,
     TOOL_CONTAINER_READ,
     TOOL_CONTAINER_SEARCH,
@@ -71,6 +72,7 @@ from incidentlens_control_plane.investigation.tools import (
     TOOL_SERVICE_INFO,
     TOOL_SHELL_EXEC,
     TOOL_SOURCE_DISCOVER,
+    TOOL_TODO_WRITE,
     ToolRegistry,
 )
 from incidentlens_control_plane.investigation.types import (
@@ -79,6 +81,8 @@ from incidentlens_control_plane.investigation.types import (
     AgentScope,
     DelegatedTaskPackage,
     EvidenceReference,
+    TodoItem,
+    TodoStatus,
 )
 from incidentlens_control_plane.logs.redaction import redact_message
 from incidentlens_control_plane.logs.service import LogService
@@ -1096,6 +1100,57 @@ class ToolExecutor:
             output_bytes=len(detail),
         )
 
+    # -- plan / control tools (local only, never remote) ---------------------
+
+    async def _handle_todo_write(self, ctx: ToolContext) -> ToolResult:
+        """Atomically replace the run's work plan with the validated items.
+
+        The tool is plan-only: it writes the run's ``agent_todos`` rows and
+        never touches remote state.  Every cited ``evidence_id`` must already be
+        owned by the run, and ``replace_todos`` enforces the whole-plan
+        invariants (unique ids, at most one in-progress item) transactionally.
+        """
+        args = ctx.arguments
+        owned = {reference.evidence_id for reference in ctx.run.evidence}
+        items: list[TodoItem] = []
+        for raw in args["todos"]:
+            evidence_ids = tuple(raw.get("evidence_ids") or ())
+            missing = set(evidence_ids) - owned
+            if missing:
+                raise ToolExecutionError(
+                    f"plan item {raw['todo_id']!r} cites evidence not owned by "
+                    f"this run: {sorted(missing)}"
+                )
+            items.append(
+                TodoItem(
+                    todo_id=raw["todo_id"],
+                    content=raw["content"],
+                    status=TodoStatus(raw["status"]),
+                    evidence_ids=evidence_ids,
+                    tool_call_ids=tuple(raw.get("tool_call_ids") or ()),
+                    updated_at=ctx.now,
+                )
+            )
+        try:
+            self._investigations.replace_todos(ctx.run.agent_run_id, tuple(items))
+        except ValueError as exc:
+            raise ToolExecutionError(str(exc))
+        summary = f"Updated {len(items)} plan items"
+        return ToolResult(summary=summary, output_bytes=len(summary))
+
+    async def _handle_compact_context(self, ctx: ToolContext) -> ToolResult:
+        """Resolve the manual-compact control request without remote execution.
+
+        ``compact_context`` is a local control tool: it is registered with an
+        empty argument object, requires no approval and must never reach the
+        remote gateway.  Task 6 wires the actual
+        ``AgentContextManager.semantic_compact(manual=True)`` call at the
+        harness layer; this handler guarantees the tool still resolves to a
+        bounded control outcome even if it ever reaches the executor directly.
+        """
+        summary = "[Context compacted]"
+        return ToolResult(summary=summary, output_bytes=len(summary))
+
     # -- validation helpers ---------------------------------------------------
 
     def _resolve_service(
@@ -1424,6 +1479,8 @@ def default_tool_registry(executor: ToolExecutor) -> ToolRegistry:
         TOOL_FILE_EDIT: executor._handle_file_edit,
         TOOL_FILE_WRITE: executor._handle_file_write,
         TOOL_DOCKER_ACTION: executor._handle_docker_action,
+        TOOL_TODO_WRITE: executor._handle_todo_write,
+        TOOL_COMPACT_CONTEXT: executor._handle_compact_context,
     }
     return ToolRegistry(TOOL_DEFINITIONS, handlers)
 

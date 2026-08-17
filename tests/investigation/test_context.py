@@ -44,10 +44,13 @@ from incidentlens_control_plane.investigation.types import (
     AgentRun,
     AgentRunKind,
     AgentScope,
+    ChildReport,
+    ChildReportStatus,
     EvidenceReference,
     Investigation,
     InvestigationBudget,
     MessageRole,
+    StopReason,
     TextBlock,
     TodoItem,
     TodoStatus,
@@ -569,6 +572,91 @@ def test_header_carries_memory_and_todos(store) -> None:
     assert "Session memory" in text
     assert "inspect order logs" in text
     assert "checkout requests return 502" in text
+
+
+def _evidence_run(*refs: EvidenceReference) -> AgentRun:
+    return run().model_copy(update={"evidence": refs})
+
+
+def _child_report(*, summary: str) -> ChildReport:
+    return ChildReport(
+        agent_run_id="child-1",
+        parent_run_id="run-1",
+        status=ChildReportStatus.COMPLETE,
+        summary=summary,
+        findings=("db pool exhausted",),
+        stop_reason=StopReason.COMPLETED,
+        created_at=NOW,
+    )
+
+
+def test_header_restores_plan_evidence_and_child_reports(store) -> None:
+    store.replace_todos(
+        "run-1",
+        (
+            TodoItem(
+                todo_id="inspect",
+                content="inspect order logs",
+                status=TodoStatus.IN_PROGRESS,
+                updated_at=NOW,
+            ),
+        ),
+    )
+    active = manager(store).build(
+        _evidence_run(
+            EvidenceReference(
+                evidence_id="ev-1", operation_id="op-1", summary="timeout burst in order logs"
+            )
+        ),
+        investigation(),
+        schemas(),
+        child_reports=(_child_report(summary="db connection pool exhausted"),),
+    )
+    text = active.messages[0].blocks[0].text
+    # The fixed restoration sections: plan, evidence refs, child reports.
+    assert "Work plan:" in text
+    assert "- [in_progress] inspect order logs" in text
+    assert "Evidence collected (recent):" in text
+    assert "ev-1" in text
+    assert "Latest child reports:" in text
+    assert "db connection pool exhausted" in text
+    # The instruction to keep the plan current is part of the fixed header.
+    assert "create or update the work plan" in text
+    # Restoration attachments precede the session memory section.
+    assert text.index("Work plan:") < text.index("Evidence collected (recent):")
+    assert text.index("Evidence collected (recent):") < text.index("Latest child reports:")
+
+
+def test_header_places_restoration_before_session_memory(store) -> None:
+    store.replace_todos(
+        "run-1",
+        (
+            TodoItem(
+                todo_id="inspect",
+                content="inspect order logs",
+                status=TodoStatus.IN_PROGRESS,
+                updated_at=NOW,
+            ),
+        ),
+    )
+    seed_many_message_groups(store, count=60, content_width=300)
+    active = manager(store, max_input_tokens=3_000).build(
+        _evidence_run(
+            EvidenceReference(
+                evidence_id="ev-1", operation_id="op-1", summary="timeout burst"
+            )
+        ),
+        investigation(),
+        schemas(),
+        child_reports=(_child_report(summary="db connection pool exhausted"),),
+    )
+    assert active.memory is not None
+    text = active.messages[0].blocks[0].text
+    assert "Session memory" in text
+    assert text.index("Work plan:") < text.index("Session memory")
+    assert text.index("Evidence collected (recent):") < text.index("Session memory")
+    assert text.index("Latest child reports:") < text.index("Session memory")
+    assert text.index("create or update the work plan") < text.index("Session memory")
 
 
 def test_child_header_includes_delegated_task(store) -> None:

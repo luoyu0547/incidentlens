@@ -44,6 +44,8 @@ TOOL_SHELL_EXEC = "shell_exec"
 TOOL_FILE_EDIT = "file_edit"
 TOOL_FILE_WRITE = "file_write"
 TOOL_DOCKER_ACTION = "docker_action"
+TOOL_TODO_WRITE = "todo_write"
+TOOL_COMPACT_CONTEXT = "compact_context"
 
 # ---------------------------------------------------------------------------
 # JSON-Schema fragments (the compact subset enforced by ``_validate_schema``)
@@ -173,6 +175,33 @@ def _file_scope_props() -> dict[str, Any]:
     }
 
 
+def _todo_item_schema() -> dict[str, Any]:
+    """The argument shape of one work-plan item for ``todo_write``.
+
+    ``todo_id``, ``content`` and ``status`` are required; ``evidence_ids`` and
+    ``tool_call_ids`` are optional provenance links validated by the executor
+    against the run's owned evidence.
+    """
+    return _obj(
+        {
+            "todo_id": {"type": "string", "minLength": 1, "maxLength": 120},
+            "content": {"type": "string", "minLength": 1, "maxLength": 1_000},
+            "status": {"enum": ["pending", "in_progress", "completed"]},
+            "evidence_ids": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {"type": "string", "minLength": 1, "maxLength": 120},
+            },
+            "tool_call_ids": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {"type": "string", "minLength": 1, "maxLength": 120},
+            },
+        },
+        required=["todo_id", "content", "status"],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tool definitions
 # ---------------------------------------------------------------------------
@@ -188,11 +217,13 @@ class ToolDefinition:
     allowed_scope: LogScope | None = None
     requires_approval: bool = False
     output_cap_bytes: int = 512 * 1024
+    concurrency_safe: bool = False
 
 
 TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ToolDefinition(
         tool_name=TOOL_LOG_QUERY,
+        concurrency_safe=True,
         description=(
             "Query the live tail of a log source (a registered docker container "
             "or an authorized host log file). Lines are redacted and persisted "
@@ -211,6 +242,7 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         tool_name=TOOL_LOG_SEARCH,
+        concurrency_safe=True,
         description=(
             "Search persisted redacted log records by severity, full-text, time "
             "bounds, correlation key or normal-signal label. Returns LOG_RECORD "
@@ -231,6 +263,7 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         tool_name=TOOL_LOG_CONTEXT,
+        concurrency_safe=True,
         description=(
             "Return the persisted log records sharing a correlation key (optionally "
             "bounded to a service and time window), so the correlated chain of "
@@ -249,6 +282,7 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         tool_name=TOOL_EVIDENCE_READ,
+        concurrency_safe=True,
         description=(
             "Read one evidence reference this run already collected, returning a "
             "bounded excerpt of its redacted content and metadata. Evidence not "
@@ -261,11 +295,13 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         tool_name=TOOL_EVIDENCE_LIST,
+        concurrency_safe=True,
         description="List the evidence references this run has collected, bounded.",
         parameters_json_schema=_obj({"limit": _LIMIT_200}),
     ),
     ToolDefinition(
         tool_name=TOOL_REGISTRY_INFO,
+        concurrency_safe=True,
         description=(
             "Describe the registered project: targets, services, containers and "
             "allowed log paths the investigation may touch."
@@ -274,6 +310,7 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         tool_name=TOOL_SERVICE_INFO,
+        concurrency_safe=True,
         description=(
             "Describe one registered service: containers, allowed host/container "
             "paths and log paths."
@@ -284,6 +321,7 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         tool_name=TOOL_HOST_READ,
+        concurrency_safe=True,
         description="Read a bounded slice of a file on the remote host.",
         parameters_json_schema=_obj(
             _file_read_props(container=False), required=["service_name", "path"]
@@ -291,11 +329,13 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         tool_name=TOOL_HOST_LIST,
+        concurrency_safe=True,
         description="List the entries of a directory on the remote host.",
         parameters_json_schema=_obj(_host_file_props(), required=["service_name", "path"]),
     ),
     ToolDefinition(
         tool_name=TOOL_HOST_SEARCH,
+        concurrency_safe=True,
         description="Recursively search host files under a path for a query string.",
         parameters_json_schema=_obj(
             _host_file_props(include_query=True),
@@ -304,11 +344,13 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         tool_name=TOOL_HOST_STAT,
+        concurrency_safe=True,
         description="Return file metadata (size, mode, uid, gid, mtime) for a host path.",
         parameters_json_schema=_obj(_host_file_props(), required=["service_name", "path"]),
     ),
     ToolDefinition(
         tool_name=TOOL_CONTAINER_READ,
+        concurrency_safe=True,
         description="Read a bounded slice of a file inside a registered container.",
         parameters_json_schema=_obj(
             _file_read_props(container=True),
@@ -317,6 +359,7 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         tool_name=TOOL_CONTAINER_LIST,
+        concurrency_safe=True,
         description="List the entries of a directory inside a registered container.",
         parameters_json_schema=_obj(
             _container_file_props(), required=["service_name", "container", "path"]
@@ -324,6 +367,7 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         tool_name=TOOL_CONTAINER_SEARCH,
+        concurrency_safe=True,
         description="Recursively search container files under a path for a query string.",
         parameters_json_schema=_obj(
             _container_file_props(include_query=True),
@@ -332,6 +376,7 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         tool_name=TOOL_CONTAINER_STAT,
+        concurrency_safe=True,
         description="Return file metadata for a path inside a registered container.",
         parameters_json_schema=_obj(
             _container_file_props(), required=["service_name", "container", "path"]
@@ -339,6 +384,7 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ),
     ToolDefinition(
         tool_name=TOOL_SOURCE_DISCOVER,
+        concurrency_safe=True,
         description=(
             "Discover candidate log sources for a service: registered containers, "
             "the allowed log paths, or the files under an authorized host path. "
@@ -455,6 +501,39 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         ),
         requires_approval=True,
     ),
+    ToolDefinition(
+        tool_name=TOOL_TODO_WRITE,
+        description=(
+            "Replace this run's work plan with the given items. Each item carries "
+            "a unique todo_id, the content, a status, and optional provenance "
+            "links (evidence/tool-call ids this run owns). At most one item may "
+            "be in_progress. The plan is local to the run and never touches "
+            "remote state, so complex investigations should keep it current "
+            "before running unrelated tools."
+        ),
+        parameters_json_schema=_obj(
+            {
+                "todos": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 64,
+                    "items": _todo_item_schema(),
+                }
+            },
+            required=["todos"],
+        ),
+        concurrency_safe=True,
+    ),
+    ToolDefinition(
+        tool_name=TOOL_COMPACT_CONTEXT,
+        description=(
+            "Ask the harness to compact this run's active context into a bounded "
+            "session memory revision. This is a local control request: it never "
+            "touches remote state and requires no approval. It is only "
+            "meaningful when the run is starting to exhaust its context window."
+        ),
+        parameters_json_schema={"type": "object", "additionalProperties": False},
+    ),
 )
 
 
@@ -507,12 +586,14 @@ class ToolRegistry:
                     allowed_scope=definition.allowed_scope,
                     output_cap_bytes=definition.output_cap_bytes,
                     requires_approval=definition.requires_approval,
+                    concurrency_safe=definition.concurrency_safe,
                 )
             )
         return tuple(schemas)
 
 
 __all__ = [
+    "TOOL_COMPACT_CONTEXT",
     "TOOL_CONTAINER_LIST",
     "TOOL_CONTAINER_READ",
     "TOOL_CONTAINER_SEARCH",
@@ -535,6 +616,7 @@ __all__ = [
     "TOOL_SERVICE_INFO",
     "TOOL_SHELL_EXEC",
     "TOOL_SOURCE_DISCOVER",
+    "TOOL_TODO_WRITE",
     "ToolDefinition",
     "ToolRegistry",
 ]

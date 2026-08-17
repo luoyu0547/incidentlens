@@ -282,6 +282,13 @@ class ToolSchema(BaseModel):
         "is guidance only and is not independently enforced.",
     )
     requires_approval: bool = False
+    concurrency_safe: bool = Field(
+        default=False,
+        description="When True, the tool only reads remote state or atomically "
+        "replaces the run's own plan, so a batched run may execute it alongside "
+        "other concurrency-safe calls. Mutations, approval-gated and control "
+        "tools stay serial.",
+    )
 
     @field_validator("parameters_json_schema")
     @classmethod

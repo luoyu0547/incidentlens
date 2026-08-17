@@ -60,8 +60,10 @@ from incidentlens_control_plane.investigation.transcript import (
 )
 from incidentlens_control_plane.investigation.types import (
     AgentRun,
+    ChildReport,
     CompactBoundary,
     CompactionState,
+    EvidenceReference,
     Investigation,
     MessageRole,
     SessionMemory,
@@ -88,6 +90,14 @@ _PROTECTED_RESULT_STATUSES: frozenset[ToolCallStatus] = frozenset(
         ToolCallStatus.WAITING_APPROVAL,
     }
 )
+
+# Bounds for the fixed header's restoration attachments.  The header is one
+# synthesized user message per build, so these caps keep its token cost stable
+# even as the run accumulates evidence and child reports.
+_HEADER_EVIDENCE_REFS_LIMIT = 24
+_HEADER_EVIDENCE_SUMMARY_WIDTH = 240
+_HEADER_CHILD_REPORTS_LIMIT = 4
+_HEADER_CHILD_REPORT_WIDTH = 400
 
 
 def _json_default(value: object) -> object:
@@ -368,13 +378,16 @@ def restore_context_header(
     todos: tuple[TodoItem, ...],
     *,
     task_prompt: str | None = None,
+    evidence_refs: tuple[EvidenceReference, ...] = (),
+    child_reports: tuple[ChildReport, ...] = (),
 ) -> tuple[TranscriptMessage, ...]:
     """Build the fixed leading user message for a provider context.
 
     The header carries the investigation/run context, the optional delegated
-    child task, the latest session memory and the current work plan.  It is
-    synthesized per build (never persisted) and is therefore immune to snip and
-    micro-compaction.
+    child task, the restoration attachments (current work plan, recently owned
+    evidence references and latest bounded child reports), the plan-keeping
+    instruction, and the latest session memory.  It is synthesized per build
+    (never persisted) and is therefore immune to snip and micro-compaction.
     """
     parts: list[str] = [
         f"Investigation {investigation.investigation_id} | incident "
@@ -385,16 +398,32 @@ def restore_context_header(
     ]
     if task_prompt:
         parts.append(f"Delegated task: {task_prompt}")
+    if todos:
+        parts.append("Work plan:")
+        for item in todos:
+            parts.append(f"- [{item.status.value}] {item.content}")
+    if evidence_refs:
+        parts.append("Evidence collected (recent):")
+        for ref in evidence_refs:
+            parts.append(
+                f"- {ref.evidence_id}: {ref.summary[:_HEADER_EVIDENCE_SUMMARY_WIDTH]}"
+            )
+    if child_reports:
+        parts.append("Latest child reports:")
+        for report in child_reports[-_HEADER_CHILD_REPORTS_LIMIT:]:
+            parts.append(
+                f"- {report.agent_run_id}: {report.summary[:_HEADER_CHILD_REPORT_WIDTH]}"
+            )
+    parts.append(
+        "For complex investigations, create or update the work plan before "
+        "running unrelated tools."
+    )
     if memory is not None:
         parts.append(
             f"Session memory (revision {memory.revision}, through transcript "
             f"sequence {memory.through_transcript_sequence}):"
         )
         parts.append(memory.model_dump_json())
-    if todos:
-        parts.append("Work plan:")
-        for item in todos:
-            parts.append(f"- [{item.status.value}] {item.content}")
     text = "\n".join(parts)
     return (
         TranscriptMessage(
@@ -442,21 +471,35 @@ class AgentContextManager:
         run: AgentRun,
         investigation: Investigation,
         tool_schemas: tuple[ToolSchema, ...],
+        *,
+        child_reports: tuple[ChildReport, ...] = (),
     ) -> ActiveContext:
-        """Materialize one bounded active context for a provider turn."""
+        """Materialize one bounded active context for a provider turn.
+
+        ``child_reports`` carries the latest structured reports returned by
+        delegated children (``()`` when the run has none); they are serialized
+        into the fixed header alongside the plan and recent evidence, never into
+        a compactable transcript group.
+        """
         boundary = self._store.get_latest_compact_boundary(run.agent_run_id)
         memory = self._store.get_latest_session_memory(run.agent_run_id)
         todos = self._store.list_todos(run.agent_run_id)
 
-        active = self._materialize(run, investigation, tool_schemas, boundary, memory, todos)
+        active = self._materialize(
+            run, investigation, tool_schemas, boundary, memory, todos, child_reports
+        )
         if active.budget.input_tokens <= active.budget.max_input_tokens:
             return active
 
         # Context pressure: build a deterministic memory revision, advance the
         # coverage boundary and re-materialize from it.
-        memory = self._compact(run, investigation, boundary, memory, todos, tool_schemas)
+        memory = self._compact(
+            run, investigation, boundary, memory, todos, tool_schemas, child_reports
+        )
         boundary = self._store.get_latest_compact_boundary(run.agent_run_id)
-        active = self._materialize(run, investigation, tool_schemas, boundary, memory, todos)
+        active = self._materialize(
+            run, investigation, tool_schemas, boundary, memory, todos, child_reports
+        )
 
         if (
             active.budget.input_tokens > active.budget.max_input_tokens
@@ -469,7 +512,7 @@ class AgentContextManager:
             # context is returned unchanged instead.  Protected groups are
             # never dropped.
             active = self._trim_to_budget(
-                run, investigation, tool_schemas, boundary, memory, todos
+                run, investigation, tool_schemas, boundary, memory, todos, child_reports
             )
         return active
 
@@ -650,7 +693,12 @@ class AgentContextManager:
         groups = tool_result_budget(tail, max_chars=self._policy.tool_result_budget_chars)
         groups = micro_compact(groups, keep_recent=self._policy.keep_recent_tool_results)
         messages = restore_context_header(
-            run, investigation, memory, todos, task_prompt=self._task_prompt(run)
+            run,
+            investigation,
+            memory,
+            todos,
+            task_prompt=self._task_prompt(run),
+            evidence_refs=self._header_evidence_refs(run),
         ) + flatten(groups)
         budget = self._estimate_budget(run, investigation, messages, ())
         return ActiveContext(
@@ -680,6 +728,7 @@ class AgentContextManager:
         boundary: CompactBoundary | None,
         memory: SessionMemory | None,
         todos: tuple[TodoItem, ...],
+        child_reports: tuple[ChildReport, ...] = (),
     ) -> ActiveContext:
         groups = self._transcript.group_messages(
             run.agent_run_id, after=boundary.through_sequence if boundary else 0
@@ -688,7 +737,13 @@ class AgentContextManager:
         groups = snip_groups(groups, max_groups=self._policy.max_message_groups)
         groups = micro_compact(groups, keep_recent=self._policy.keep_recent_tool_results)
         messages = restore_context_header(
-            run, investigation, memory, todos, task_prompt=self._task_prompt(run)
+            run,
+            investigation,
+            memory,
+            todos,
+            task_prompt=self._task_prompt(run),
+            evidence_refs=self._header_evidence_refs(run),
+            child_reports=child_reports,
         ) + flatten(groups)
         budget = self._estimate_budget(run, investigation, messages, tool_schemas)
         return ActiveContext(
@@ -703,6 +758,7 @@ class AgentContextManager:
         boundary: CompactBoundary | None,
         memory: SessionMemory | None,
         todos: tuple[TodoItem, ...],
+        child_reports: tuple[ChildReport, ...] = (),
     ) -> ActiveContext:
         """Drop the oldest eligible recent groups until the context fits.
 
@@ -718,7 +774,13 @@ class AgentContextManager:
         groups = micro_compact(groups, keep_recent=self._policy.keep_recent_tool_results)
         while True:
             messages = restore_context_header(
-                run, investigation, memory, todos, task_prompt=self._task_prompt(run)
+                run,
+                investigation,
+                memory,
+                todos,
+                task_prompt=self._task_prompt(run),
+                evidence_refs=self._header_evidence_refs(run),
+                child_reports=child_reports,
             ) + flatten(groups)
             budget = self._estimate_budget(run, investigation, messages, tool_schemas)
             if budget.input_tokens <= budget.max_input_tokens or len(groups) <= 1:
@@ -745,6 +807,7 @@ class AgentContextManager:
         latest_memory: SessionMemory | None,
         todos: tuple[TodoItem, ...],
         tool_schemas: tuple[ToolSchema, ...],
+        child_reports: tuple[ChildReport, ...] = (),
     ) -> SessionMemory:
         groups = self._transcript.group_messages(
             run.agent_run_id, after=boundary.through_sequence if boundary else 0
@@ -752,7 +815,14 @@ class AgentContextManager:
         groups = tool_result_budget(groups, max_chars=self._policy.tool_result_budget_chars)
         fields = self._memory_fields(run, investigation, todos)
         coverage = self._deterministic_coverage(
-            groups, run, investigation, latest_memory, todos, fields, tool_schemas
+            groups,
+            run,
+            investigation,
+            latest_memory,
+            todos,
+            fields,
+            tool_schemas,
+            child_reports,
         )
         if coverage <= (boundary.through_sequence if boundary else 0):
             # Nothing eligible to cover: the context cannot shrink by compacting.
@@ -787,6 +857,7 @@ class AgentContextManager:
         todos: tuple[TodoItem, ...],
         fields: dict[str, object],
         tool_schemas: tuple[ToolSchema, ...],
+        child_reports: tuple[ChildReport, ...] = (),
     ) -> int:
         """Return the transcript sequence the next memory revision covers.
 
@@ -812,7 +883,13 @@ class AgentContextManager:
         header_tokens = sum(
             self._estimator.count_json(message.model_dump())
             for message in restore_context_header(
-                run, investigation, latest_memory, todos, task_prompt=self._task_prompt(run)
+                run,
+                investigation,
+                latest_memory,
+                todos,
+                task_prompt=self._task_prompt(run),
+                evidence_refs=self._header_evidence_refs(run),
+                child_reports=child_reports,
             )
         )
         # Conservative allowance for the new memory section that will appear in
@@ -989,6 +1066,16 @@ class AgentContextManager:
             "budget": investigation.budget.model_dump(mode="json"),
             "usage": investigation.usage.model_dump(mode="json"),
         }
+
+    @staticmethod
+    def _header_evidence_refs(run: AgentRun) -> tuple[EvidenceReference, ...]:
+        """The most recent evidence references the run owns, for the fixed header.
+
+        The run's ``evidence`` is ordered oldest-first, so the trailing slice is
+        the newest ``_HEADER_EVIDENCE_REFS_LIMIT`` references; each summary is
+        further truncated when the header is rendered.
+        """
+        return run.evidence[-_HEADER_EVIDENCE_REFS_LIMIT:]
 
     # -- helpers --------------------------------------------------------------
 

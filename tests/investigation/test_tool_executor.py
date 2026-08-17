@@ -44,6 +44,7 @@ from incidentlens_control_plane.investigation.tools import (
     TOOL_EVIDENCE_LIST,
     TOOL_EVIDENCE_READ,
     TOOL_FILE_EDIT,
+    TOOL_FILE_WRITE,
     TOOL_HOST_LIST,
     TOOL_HOST_READ,
     TOOL_HOST_SEARCH,
@@ -612,6 +613,96 @@ def test_docker_action_is_statically_approval_gated(tmp_path: Path) -> None:
     harness = build_harness(tmp_path)
     assert harness.executor.requires_approval(TOOL_DOCKER_ACTION) is True
     assert harness.executor.requires_approval(TOOL_HOST_READ) is False
+
+
+def test_compact_context_is_registered_as_local_control_tool(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    schema = next(
+        item
+        for item in harness.executor.tool_schemas(scope=LogScope.HOST)
+        if item.tool_name == "compact_context"
+    )
+    assert schema.parameters_json_schema == {"type": "object", "additionalProperties": False}
+    assert schema.requires_approval is False
+    # The control tool is available to every run, regardless of scope.
+    container = {
+        s.tool_name for s in harness.executor.tool_schemas(scope=LogScope.CONTAINER)
+    }
+    assert "compact_context" in container
+
+
+def test_concurrency_safe_metadata_is_exposed_on_schemas(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    by_name = {
+        schema.tool_name: schema
+        for schema in harness.executor.tool_schemas(scope=LogScope.HOST)
+    }
+    # Pure reads and the plan-only tool are safe to batch.
+    assert by_name["todo_write"].concurrency_safe is True
+    assert by_name[TOOL_HOST_READ].concurrency_safe is True
+    assert by_name[TOOL_LOG_QUERY].concurrency_safe is True
+    assert by_name[TOOL_REGISTRY_INFO].concurrency_safe is True
+    # Mutations, approval-gated, delegation and control tools stay serial.
+    assert by_name["compact_context"].concurrency_safe is False
+    assert by_name[TOOL_SHELL_EXEC].concurrency_safe is False
+    assert by_name[TOOL_FILE_EDIT].concurrency_safe is False
+    assert by_name[TOOL_FILE_WRITE].concurrency_safe is False
+    assert by_name[TOOL_DOCKER_ACTION].concurrency_safe is False
+    assert by_name[TOOL_DELEGATE_CHILD].concurrency_safe is False
+
+
+@pytest.mark.asyncio
+async def test_todo_write_persists_plan_without_remote_execution(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    run = _new_run(harness.investigations)
+    outcome = await harness.executor.execute(
+        tool_request(
+            "todo_write",
+            tool_call_id="plan-1",
+            todos=[
+                {"todo_id": "inspect", "content": "inspect order logs", "status": "in_progress"},
+                {"todo_id": "verify", "content": "verify root cause", "status": "pending"},
+            ],
+        ),
+        run,
+        now=NOW,
+    )
+    assert outcome.status is ToolCallStatus.SUCCEEDED
+    assert [item.todo_id for item in harness.investigations.list_todos(run.agent_run_id)] == [
+        "inspect",
+        "verify",
+    ]
+    assert outcome.summary == "Updated 2 plan items"
+    # A plan-only tool carries no evidence reference of its own.
+    assert outcome.evidence == ()
+    # No remote transport was ever contacted.
+    assert harness.factory.transports == []
+
+
+@pytest.mark.asyncio
+async def test_todo_write_rejects_unowned_evidence(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    run = _new_run(harness.investigations)
+    outcome = await harness.executor.execute(
+        tool_request(
+            "todo_write",
+            tool_call_id="plan-x",
+            todos=[
+                {
+                    "todo_id": "inspect",
+                    "content": "inspect order logs",
+                    "status": "pending",
+                    "evidence_ids": ["ev-fabricated"],
+                }
+            ],
+        ),
+        run,
+        now=NOW,
+    )
+    assert outcome.status is ToolCallStatus.FAILED
+    assert "not owned by this run" in outcome.error_redacted
+    # The plan was not replaced by the rejected write.
+    assert harness.investigations.list_todos(run.agent_run_id) == ()
 
 
 # ---------------------------------------------------------------------------
