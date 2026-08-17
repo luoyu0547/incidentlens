@@ -31,9 +31,9 @@ from incidentlens_control_plane.investigation.fake_provider import (
     StopStep,
 )
 from incidentlens_control_plane.investigation.provider import (
-    AgentTurnRequest,
     AgentTurnResult,
     ChildDelegationRequest,
+    ConversationRequest,
     HypothesisProposal,
     InvestigationSnapshot,
     ModelProvider,
@@ -51,6 +51,7 @@ from incidentlens_control_plane.investigation.provider import (
 from incidentlens_control_plane.investigation.state_machine import (
     AgentRunStatus,
     InvestigationStatus,
+    ToolCallStatus,
 )
 from incidentlens_control_plane.investigation.types import (
     AgentBudget,
@@ -61,8 +62,13 @@ from incidentlens_control_plane.investigation.types import (
     EvidenceReference,
     Investigation,
     InvestigationBudget,
+    MessageRole,
     ProviderUsage,
     StopReason,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    TranscriptMessage,
     UsageCounters,
 )
 from incidentlens_control_plane.logs.types import LogScope
@@ -263,23 +269,81 @@ def make_request(
     run: AgentRun,
     investigation: Investigation,
     *,
-    evidence: tuple[EvidenceReference, ...] = (),
-    hypotheses: tuple = (),
-    child_reports: tuple = (),
+    task_prompt: str | None = None,
+    messages: tuple[TranscriptMessage, ...] = (),
     tool_schemas: tuple[ToolSchema, ...] | None = None,
-) -> AgentTurnRequest:
-    return AgentTurnRequest(
+) -> ConversationRequest:
+    return ConversationRequest(
         checkpoint=_checkpoint(run),
         investigation=_snapshot(investigation),
-        hypotheses=hypotheses,
-        evidence=evidence,
-        child_reports=child_reports,
+        task_prompt=task_prompt,
+        messages=messages,
         tool_schemas=tool_schemas or default_tool_schemas(),
     )
 
 
+def conversation_request(
+    *,
+    messages: tuple[TranscriptMessage, ...] = (),
+    task_prompt: str | None = None,
+) -> ConversationRequest:
+    """Build a conversation request for the default run and investigation."""
+    return make_request(
+        make_run(),
+        make_investigation(),
+        task_prompt=task_prompt,
+        messages=messages,
+    )
+
+
+def user_message(sequence: int, text: str) -> TranscriptMessage:
+    return TranscriptMessage(
+        agent_run_id="run-1",
+        sequence=sequence,
+        role=MessageRole.USER,
+        blocks=(TextBlock(text=text),),
+        created_at=NOW,
+    )
+
+
+def assistant_tool_message(
+    sequence: int, tool_call_id: str, tool_name: str
+) -> TranscriptMessage:
+    return TranscriptMessage(
+        agent_run_id="run-1",
+        sequence=sequence,
+        role=MessageRole.ASSISTANT,
+        blocks=(ToolUseBlock(tool_call_id=tool_call_id, tool_name=tool_name),),
+        created_at=NOW,
+    )
+
+
+def tool_result_message(
+    sequence: int, tool_call_id: str, content: str
+) -> TranscriptMessage:
+    return TranscriptMessage(
+        agent_run_id="run-1",
+        sequence=sequence,
+        role=MessageRole.USER,
+        blocks=(
+            ToolResultBlock(
+                tool_call_id=tool_call_id,
+                status=ToolCallStatus.SUCCEEDED,
+                content=content,
+            ),
+        ),
+        created_at=NOW,
+    )
+
+
+def completed_stop() -> StopSignal:
+    return StopSignal(
+        stop_reason=StopReason.COMPLETED, summary="investigation complete"
+    )
+
+
 def validate(
-    request: AgentTurnRequest, run: AgentRun, result: AgentTurnResult
+    request: ConversationRequest, run: AgentRun, result: AgentTurnResult
 ) -> ProviderValidation:
     return ProviderOutputValidator(request, run).validate(result)
 
@@ -299,20 +363,38 @@ def test_provider_interface_accepts_request_and_returns_result():
 def test_request_context_has_no_hidden_reasoning_field():
     request = make_request(make_run(), make_investigation())
     with pytest.raises(ValidationError):
-        AgentTurnRequest.model_validate(
+        ConversationRequest.model_validate(
             {**request.model_dump(), "hidden_reasoning": "draft chain of thought"}
         )
 
 
-def test_request_rejects_duplicate_evidence_ids():
-    run = make_run()
-    ref = EvidenceReference(evidence_id="ev-1", operation_id="op-1", summary="dup")
-    with pytest.raises(ValidationError, match="unique by evidence_id"):
-        AgentTurnRequest(
-            checkpoint=_checkpoint(run),
-            investigation=_snapshot(make_investigation()),
-            evidence=(ref, ref),
+def test_request_rejects_duplicate_tool_schemas():
+    schema = ToolSchema(
+        tool_name="logs.query",
+        description="Search bounded log records for a service.",
+        parameters_json_schema={"type": "object", "properties": {}},
+    )
+    with pytest.raises(ValidationError, match="unique by tool_name"):
+        make_request(
+            make_run(),
+            make_investigation(),
+            tool_schemas=(schema, schema),
         )
+
+
+@pytest.mark.asyncio
+async def test_provider_receives_continuous_messages() -> None:
+    registry = FakeProviderRegistry()
+    registry.script("run-1", [StopStep(stop_signal=completed_stop())])
+    request = conversation_request(
+        messages=(
+            user_message(1, "inspect checkout"),
+            assistant_tool_message(2, "call-1", "registry_info"),
+            tool_result_message(3, "call-1", "service orders"),
+        )
+    )
+    await FakeProvider(registry).generate_turn(request)
+    assert registry.requests("run-1")[0].messages == request.messages
 
 
 def test_tool_request_rejects_non_json_arguments():
@@ -734,7 +816,7 @@ def evidence_store(tmp_path) -> EvidenceStore:
 def test_validator_accepts_hypothesis_citing_owned_evidence(evidence_store):
     stored = evidence_store.create(make_evidence_ref("ev-1"))
     run = make_run(evidence=(reference_from_ref(stored),))
-    request = make_request(run, make_investigation(), evidence=(reference_from_ref(stored),))
+    request = make_request(run, make_investigation())
     result = AgentTurnResult(
         hypotheses=(
             HypothesisProposal(summary="db pool exhausted", evidence_ids=("ev-1",)),
@@ -769,7 +851,7 @@ def test_validator_accepts_hypothesis_before_it_has_evidence(evidence_store):
 def test_validator_accepts_conclusion_grounded_in_run_evidence(evidence_store):
     stored = evidence_store.create(make_evidence_ref("ev-1"))
     run = make_run(evidence=(reference_from_ref(stored),))
-    request = make_request(run, make_investigation(), evidence=(reference_from_ref(stored),))
+    request = make_request(run, make_investigation())
     result = AgentTurnResult(
         conclusions=(Conclusion(summary="pool exhaustion", evidence_ids=("ev-1",)),)
     )
@@ -945,7 +1027,7 @@ def test_validator_flags_requires_approval_for_approval_tool():
 def test_validator_accepts_clean_turn_with_owned_evidence(evidence_store):
     stored = evidence_store.create(make_evidence_ref("ev-1"))
     run = make_run(evidence=(reference_from_ref(stored),))
-    request = make_request(run, make_investigation(), evidence=(reference_from_ref(stored),))
+    request = make_request(run, make_investigation())
     result = AgentTurnResult(
         tool_requests=(
             ToolRequest(

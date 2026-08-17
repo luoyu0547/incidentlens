@@ -9,12 +9,21 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from incidentlens_control_plane.investigation.provider import (
-    AgentTurnRequest,
     AgentTurnResult,
+    ConversationRequest,
     ModelProvider,
+    PromptTooLongError,
     ProviderError,
+    ToolSchema,
 )
-from incidentlens_control_plane.investigation.types import ProviderUsage
+from incidentlens_control_plane.investigation.types import (
+    MessageRole,
+    ProviderUsage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    TranscriptMessage,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,20 +42,17 @@ class XfyunMaaSProvider(ModelProvider):
     def __init__(self, config: XfyunMaaSConfig) -> None:
         self._config = config
 
-    async def generate_turn(self, request: AgentTurnRequest) -> AgentTurnResult:
+    async def generate_turn(self, request: ConversationRequest) -> AgentTurnResult:
         payload = {
             "model": self._config.model,
             "temperature": 0.1,
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": _SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        request.model_dump(mode="json"), ensure_ascii=False
-                    ),
-                },
+                *_context_attachments(request),
+                *(_message_payload(message) for message in request.messages),
             ],
+            "tools": [_tool_payload(schema) for schema in request.tool_schemas],
         }
         response = await asyncio.to_thread(self._post, payload)
         try:
@@ -81,14 +87,105 @@ class XfyunMaaSProvider(ModelProvider):
         )
         try:
             with urlopen(request, timeout=self._config.timeout_seconds) as response:  # noqa: S310
-                return json.loads(response.read().decode("utf-8"))
+                body = json.loads(response.read().decode("utf-8"))
+                if _context_length_exceeded(body):
+                    raise PromptTooLongError()
+                return body
         except HTTPError as exc:
+            if exc.code == 413:
+                raise PromptTooLongError() from exc
             retryable = exc.code in {408, 429, 500, 502, 503, 504}
             raise ProviderError(
                 f"讯飞 MaaS 请求失败（HTTP {exc.code}）", retryable=retryable
             ) from exc
         except (TimeoutError, URLError) as exc:
             raise ProviderError("讯飞 MaaS 连接失败", retryable=True) from exc
+
+
+def _message_payload(message: TranscriptMessage) -> dict[str, object]:
+    if message.role is MessageRole.ASSISTANT:
+        return {"role": "assistant", "content": _assistant_content(message.blocks)}
+    return {"role": "user", "content": _user_content(message.blocks)}
+
+
+def _assistant_content(blocks: tuple) -> list[dict[str, object]]:
+    content: list[dict[str, object]] = []
+    for block in blocks:
+        if isinstance(block, TextBlock):
+            content.append({"type": "text", "text": block.text})
+        elif isinstance(block, ToolUseBlock):
+            content.append(
+                {
+                    "type": "tool_use",
+                    "id": block.tool_call_id,
+                    "name": block.tool_name,
+                    "input": block.arguments,
+                }
+            )
+    return content
+
+
+def _user_content(blocks: tuple) -> list[dict[str, object]]:
+    content: list[dict[str, object]] = []
+    for block in blocks:
+        if isinstance(block, TextBlock):
+            content.append({"type": "text", "text": block.text})
+        elif isinstance(block, ToolResultBlock):
+            item: dict[str, object] = {
+                "type": "tool_result",
+                "tool_call_id": block.tool_call_id,
+                "content": block.content,
+            }
+            if block.evidence_ids:
+                item["evidence_ids"] = block.evidence_ids
+            content.append(item)
+    return content
+
+
+def _context_attachments(request: ConversationRequest) -> tuple[dict[str, str], ...]:
+    """Render the bounded checkpoint/investigation context as a leading message.
+
+    The transcript carries the back-and-forth; the checkpoint and investigation
+    snapshot still need to be visible every turn so the model can stay in
+    bounds.  The child ``task_prompt`` (when present) rides along.
+    """
+    context: dict[str, object] = {
+        "checkpoint": request.checkpoint.model_dump(mode="json"),
+        "investigation": request.investigation.model_dump(mode="json"),
+    }
+    if request.task_prompt is not None:
+        context["task_prompt"] = request.task_prompt
+    return (
+        {
+            "role": "user",
+            "content": json.dumps(context, ensure_ascii=False),
+        },
+    )
+
+
+def _tool_payload(schema: ToolSchema) -> dict[str, object]:
+    return {
+        "type": "function",
+        "function": {
+            "name": schema.tool_name,
+            "description": schema.description,
+            "parameters": schema.parameters_json_schema,
+        },
+    }
+
+
+def _context_length_exceeded(payload: object) -> bool:
+    """Return True when an OpenAI-style error body names a context overflow."""
+    if not isinstance(payload, dict):
+        return False
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return False
+    code = error.get("code")
+    if isinstance(code, str) and "context_length_exceeded" in code:
+        return True
+    message = error.get("message")
+    return isinstance(message, str) and "context_length_exceeded" in message.lower()
 
 
 def _strip_fence(content: object) -> str:
@@ -140,16 +237,22 @@ _SYSTEM_PROMPT = """你是 IncidentLens 的受限事故调查规划器。
 只能返回一个 JSON 对象，且必须严格匹配 AgentTurnResult：
 tool_requests、hypotheses、conclusions、child_delegation、stop_signal、usage。
 不得输出 Markdown、解释、隐藏推理或额外字段。你只能提议请求中 tool_schemas 已允许的工具；
-所有 hypothesis/conclusion/child_delegation 的 evidence_ids 必须来自请求 evidence。
+所有 hypothesis/conclusion/child_delegation 的 evidence_ids 必须来自当前运行实际拥有的证据
+（即对话 tool_result 块中给出或可通过证据回读确认的 evidence_id）。
 可空字段 child_delegation 与 stop_signal 必须为 null，不能是 [] 或 {}。
 stop_signal 不为 null 时必须同时有 stop_reason 和 summary。
-模型只提出建议，绝不声称已经执行工具。首次回合且请求提供了与症状相关的
+模型只提出建议，绝不声称已经执行工具。
+若请求包含 task_prompt，当前运行是子任务，必须优先完成该任务而不是泛化处理整个事故。
+对话是当前运行的连续历史：assistant 消息提出工具请求，user 消息返回 tool_result 与文本。
+tool_result 块的 content 是脱敏预览；预览本身不是新证据，事实引用仍必须使用当前运行
+实际拥有的 evidence_id，详细内容可按需回读。
+首次回合且请求提供了与症状相关的
 只读工具时，优先从 tool_schemas 中选择一个最窄的工具请求来收集证据：例如
-已给出授权日志文件时可提出一次 log_query；不得因为 evidence 为空就直接停止。
+已给出授权日志文件时可提出一次 log_query；不得因为尚无工具结果就直接停止。
 对于 log_query，若 investigation.allowed_log_paths 非空，必须使用其中一个路径作为
 source_kind=file 的 source_ref，且 service_name 必须等于 investigation.service；不要猜测
 容器名或 Docker 日志源。
-当 evidence 已包含能直接解释 symptom 的可观察日志事实时，不要重复调用同一工具：提出
+当已有 tool_result 能直接解释 symptom 时，不要重复调用同一工具：提出
 一条仅引用这些 evidence_ids 的 conclusion，并设置 stop_signal 为 completed。结论的
 summary、facts、evidence_ids 必须使用 AgentTurnResult 的字段名。
 只有没有任何合法、相关的只读取证工具时，才使用 stop_signal，stop_reason 为

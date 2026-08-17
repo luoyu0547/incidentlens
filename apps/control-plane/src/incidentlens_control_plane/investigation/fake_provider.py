@@ -22,10 +22,10 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from incidentlens_control_plane.investigation.provider import (
-    AgentTurnRequest,
     AgentTurnResult,
     ChildDelegationRequest,
     Conclusion,
+    ConversationRequest,
     HypothesisProposal,
     ModelProvider,
     ProviderCrash,
@@ -135,14 +135,29 @@ class FakeProviderRegistry:
     Scripts survive across turns and across ``FakeProvider`` instances as long
     as they share the registry, so a test can arrange a run's steps up front
     and replay them turn after turn, peeking or indexing into them at will.
+    The registry also records every ``ConversationRequest`` a run received, so
+    tests can assert over the continuous message history the provider saw.
     """
 
     def __init__(self) -> None:
         self._scripts: dict[str, list[FakeScriptStep]] = {}
+        self._requests: dict[str, list[ConversationRequest]] = {}
 
     def set_script(self, run_id: str, steps: Sequence[FakeScriptStep]) -> None:
         """Replace the run's script with ``steps``, replayed in order."""
         self._scripts[run_id] = list(steps)
+
+    def script(
+        self, run_id: str, steps: Sequence[FakeScriptStep] | None = None
+    ) -> tuple[FakeScriptStep, ...]:
+        """Set or read the run's script, oldest first.
+
+        With ``steps``, replace the run's script and return the new tuple;
+        without, return a copy of the run's pending steps.
+        """
+        if steps is not None:
+            self._scripts[run_id] = list(steps)
+        return tuple(self._scripts.get(run_id, ()))
 
     def append_step(self, run_id: str, step: FakeScriptStep) -> None:
         """Append one step to the run's script, creating it if needed."""
@@ -151,10 +166,6 @@ class FakeProviderRegistry:
     def has_script(self, run_id: str) -> bool:
         """Return True when the run has at least one pending step."""
         return bool(self._scripts.get(run_id))
-
-    def script(self, run_id: str) -> tuple[FakeScriptStep, ...]:
-        """Return a copy of the run's pending steps, oldest first."""
-        return tuple(self._scripts.get(run_id, ()))
 
     def remaining(self, run_id: str) -> int:
         """Return how many steps the run still has to replay."""
@@ -176,13 +187,26 @@ class FakeProviderRegistry:
             raise ScriptExhausted(f"no script steps left for run {run_id!r}")
         return steps.pop(0)
 
+    def record_request(self, run_id: str, request: ConversationRequest) -> None:
+        """Append one provider request to the run's recorded history."""
+        self._requests.setdefault(run_id, []).append(request)
+
+    def requests(self, run_id: str) -> tuple[ConversationRequest, ...]:
+        """Return a copy of the requests recorded for the run, oldest first."""
+        return tuple(self._requests.get(run_id, ()))
+
     def clear(self) -> None:
-        """Drop every registered script (for test teardown)."""
+        """Drop every registered script and recorded request (test teardown)."""
         self._scripts.clear()
+        self._requests.clear()
 
 
 class FakeProvider(ModelProvider):
-    """A scripted provider that replays registry steps for the requested run."""
+    """A scripted provider that replays registry steps for the requested run.
+
+    Every ``ConversationRequest`` the provider receives is recorded on the
+    registry so tests can assert over the continuous message history.
+    """
 
     def __init__(self, registry: FakeProviderRegistry) -> None:
         self._registry = registry
@@ -191,7 +215,8 @@ class FakeProvider(ModelProvider):
     def registry(self) -> FakeProviderRegistry:
         return self._registry
 
-    async def generate_turn(self, request: AgentTurnRequest) -> AgentTurnResult:
+    async def generate_turn(self, request: ConversationRequest) -> AgentTurnResult:
+        self._registry.record_request(request.checkpoint.agent_run_id, request)
         step = self._registry.pop(request.checkpoint.agent_run_id)
         if isinstance(step, RequestToolsStep):
             return AgentTurnResult(

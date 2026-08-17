@@ -1,16 +1,16 @@
 """Provider-neutral model contract for the Phase 4 bounded investigation loop.
 
 The orchestrator never talks to a specific LLM or vendor SDK: it calls
-``ModelProvider.generate_turn(AgentTurnRequest)`` and receives an
+``ModelProvider.generate_turn(ConversationRequest)`` and receives an
 ``AgentTurnResult`` of *proposals*.  A provider may only propose tool
 requests, a child delegation, hypotheses, a conclusion and a stop signal — it
 never executes tools, never writes the store and never observes FastAPI or
 SQLite.  Everything the provider can see is spelled out in
-``AgentTurnRequest``: the symptom, a structured checkpoint of the run, the
-run's hypotheses, bounded evidence excerpts/IDs, completed child reports and
+``ConversationRequest``: the run checkpoint, the investigation snapshot, the
+task prompt and the append-only transcript ``messages`` it must continue, plus
 the tool schemas it is allowed to call.  There is deliberately no field for
-raw transcripts or hidden reasoning, and every model is ``extra="forbid"`` so
-a provider cannot smuggle either into a turn.
+raw hidden reasoning, and every model is ``extra="forbid"`` so a provider
+cannot smuggle either into a turn.
 
 ``ProviderOutputValidator`` is the orchestrator-side gatekeeper that rejects a
 provider result which names an un-allowlisted tool, fails a tool's argument
@@ -41,14 +41,13 @@ from incidentlens_control_plane.investigation.types import (
     AgentRun,
     AgentRunKind,
     AgentScope,
-    ChildReport,
     Conclusion,
-    EvidenceReference,
     Hypothesis,
     HypothesisStatus,
     InvestigationBudget,
     ProviderUsage,
     StopReason,
+    TranscriptMessage,
     UsageCounters,
 )
 from incidentlens_control_plane.logs.types import LogScope
@@ -89,7 +88,7 @@ class ProviderCrash(Exception):
 
 
 class ProviderContextMismatch(Exception):
-    """Raised when an ``AgentTurnRequest`` and its ``AgentRun`` disagree on identity.
+    """Raised when a ``ConversationRequest`` and its ``AgentRun`` disagree on identity.
 
     The validator derives the tool allowlist from the request but the budget,
     scope and evidence-ownership checks from the run, so handing it a
@@ -386,37 +385,37 @@ class InvestigationSnapshot(BaseModel):
     usage: UsageCounters
 
 
-class AgentTurnRequest(BaseModel):
-    """The complete, bounded context handed to a provider for one turn.
+class ConversationRequest(BaseModel):
+    """The continuous, bounded conversation handed to a provider for one turn.
 
-    Deliberately contains no raw transcripts, hidden reasoning or out-of-scope
-    references: a provider can only see the symptom, the run checkpoint, the
-    run's hypotheses, bounded evidence excerpts/IDs, completed child reports
-    and the tool schemas it may call.
+    Carries the run checkpoint and investigation snapshot for bounds, the
+    optional child task prompt, and the append-only transcript ``messages`` the
+    model must continue.  Every message block is a bounded text, tool_use or
+    tool_result block; there is no raw hidden reasoning and no out-of-scope
+    reference.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     checkpoint: RunCheckpoint
     investigation: InvestigationSnapshot
-    hypotheses: tuple[Hypothesis, ...] = Field(default=(), max_length=64)
-    evidence: tuple[EvidenceReference, ...] = Field(default=(), max_length=100)
-    child_reports: tuple[ChildReport, ...] = Field(default=(), max_length=8)
+    task_prompt: str | None = Field(default=None, min_length=1, max_length=4_000)
+    messages: tuple[TranscriptMessage, ...]
     tool_schemas: tuple[ToolSchema, ...] = Field(default=(), max_length=32)
 
     @model_validator(mode="after")
-    def _evidence_ids_must_be_unique(self) -> AgentTurnRequest:
-        ids = [reference.evidence_id for reference in self.evidence]
-        if len(ids) != len(set(ids)):
-            raise ValueError("evidence must be unique by evidence_id")
-        return self
-
-    @model_validator(mode="after")
-    def _tool_schemas_must_be_unique(self) -> AgentTurnRequest:
+    def _tool_schemas_must_be_unique(self) -> ConversationRequest:
         names = [schema.tool_name for schema in self.tool_schemas]
         if len(names) != len(set(names)):
             raise ValueError("tool_schemas must be unique by tool_name")
         return self
+
+
+class PromptTooLongError(ProviderError):
+    """The model context exceeded the provider's window; the turn cannot retry."""
+
+    def __init__(self, message: str = "model context is too long") -> None:
+        super().__init__(message, retryable=False)
 
 
 class AgentTurnResult(BaseModel):
@@ -467,7 +466,7 @@ class ProviderOutputValidator:
 
     def __init__(
         self,
-        request: AgentTurnRequest,
+        request: ConversationRequest,
         run: AgentRun,
         *,
         guard: InvestigationGuard | None = None,
@@ -479,7 +478,7 @@ class ProviderOutputValidator:
         self._schemas = {schema.tool_name: schema for schema in request.tool_schemas}
 
     @staticmethod
-    def _check_identity(request: AgentTurnRequest, run: AgentRun) -> None:
+    def _check_identity(request: ConversationRequest, run: AgentRun) -> None:
         """Fail fast when the request and run do not describe the same run.
 
         The tool allowlist comes from the request while the budget, scope and
@@ -626,22 +625,23 @@ class ModelProvider(ABC):
     """A provider-neutral model that proposes, never executes.
 
     Implementations must not execute tools, persist state or inspect the host
-    runtime; they only translate an ``AgentTurnRequest`` into an
+    runtime; they only translate a ``ConversationRequest`` into an
     ``AgentTurnResult`` for the orchestrator to validate and execute.
     """
 
     @abstractmethod
-    async def generate_turn(self, request: AgentTurnRequest) -> AgentTurnResult:
+    async def generate_turn(self, request: ConversationRequest) -> AgentTurnResult:
         """Return the proposed actions for one turn, without side effects."""
 
 
 __all__ = [
-    "AgentTurnRequest",
     "AgentTurnResult",
     "ChildDelegationRequest",
+    "ConversationRequest",
     "HypothesisProposal",
     "InvestigationSnapshot",
     "ModelProvider",
+    "PromptTooLongError",
     "ProviderCrash",
     "ProviderContextMismatch",
     "ProviderError",
