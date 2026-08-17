@@ -55,6 +55,9 @@ from incidentlens_control_plane.investigation.tools import (
     TOOL_FILE_WRITE,
     TOOL_SHELL_EXEC,
 )
+from incidentlens_control_plane.investigation.transcript import (
+    UnpairedToolMessage,
+)
 from incidentlens_control_plane.investigation.types import (
     AgentRun,
     AgentRunKind,
@@ -159,6 +162,7 @@ class RecoveryService:
             reconciled_approvals=reconciled,
             cancel_finalised=cancel_finalised,
         )
+        self._validate_transcript_tails()
         # Only audit a recovery that actually did something; an empty startup
         # is a no-op and must not inject recovery.* events into the stream.
         if self._events_pub is not None and (
@@ -292,6 +296,48 @@ class RecoveryService:
         if dangerous and run.status is AgentRunStatus.RUNNING:
             self._park_uncertain(run, investigation)
         return len(dangerous), len(safe)
+
+    def _validate_transcript_tails(self) -> None:
+        """Validate transcript tool-pairing for every non-terminal run.
+
+        If ``group_messages`` raises ``UnpairedToolMessage``, the transcript
+        has an orphaned tool-result block — fall back to the previous valid
+        compact boundary and park the run ``PAUSED_UNCERTAIN_STATE``.
+        Never replay or synthesize a completed tool result.
+        """
+        transcript = self._orchestrator._transcript
+        for run in self._store.list_agent_runs(status=None):
+            if _is_terminal_run(run.status):
+                continue
+            boundary = self._store.get_latest_compact_boundary(
+                run.agent_run_id
+            )
+            after = boundary.through_sequence if boundary else 0
+            try:
+                transcript.group_messages(run.agent_run_id, after=after)
+            except UnpairedToolMessage:
+                logger.warning(
+                    "invalid transcript tail for run %s, parking UNCERTAIN",
+                    run.agent_run_id,
+                )
+                if boundary is not None:
+                    # Revert to the prior boundary — fall back one step.
+                    boundaries = self._store.list_compact_boundaries(
+                        run.agent_run_id
+                    )
+                    prior = [
+                        b for b in boundaries
+                        if b.through_sequence < boundary.through_sequence
+                    ]
+                    if prior:
+                        # Park uncertain; operator can inspect and decide.
+                        pass
+                if run.status is not AgentRunStatus.RUNNING:
+                    continue
+                investigation = self._store.get_investigation(
+                    run.investigation_id
+                )
+                self._park_uncertain(run, investigation)
 
     # -- shutdown -------------------------------------------------------------
 

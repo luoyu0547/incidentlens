@@ -52,6 +52,19 @@ class RuntimeSettings(BaseModel):
     max_evidence_per_run: int = Field(default=100, ge=1, le=5_000)
     max_no_new_evidence_rounds: int = Field(default=3, ge=1, le=20)
 
+    # -- active context materialization ----------------------------------------
+    # The token-based budget that bounds every provider turn.
+    agent_context_window_tokens: int = Field(default=128_000, ge=8_000, le=2_000_000)
+    agent_context_max_output_tokens: int = Field(default=8_000, ge=256, le=128_000)
+    agent_context_reserve_tokens: int = Field(default=13_000, ge=1_000, le=128_000)
+    agent_tool_result_budget_chars: int = Field(
+        default=200_000, ge=10_000, le=5_000_000
+    )
+    agent_context_max_message_groups: int = Field(default=50, ge=10, le=500)
+    agent_context_keep_recent_tool_results: int = Field(default=3, ge=1, le=20)
+    agent_compact_max_failures: int = Field(default=3, ge=1, le=10)
+    agent_reactive_keep_recent_groups: int = Field(default=5, ge=1, le=20)
+
     # -- per-investigation default budget bounds ------------------------------
     max_investigation_rounds: int = Field(default=32, ge=1, le=1_000)
     max_investigation_tool_calls: int = Field(default=64, ge=1, le=2_000)

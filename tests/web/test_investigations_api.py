@@ -22,6 +22,7 @@ from incidentlens_control_plane.investigation.types import (
     RegistryProposalStatus,
     RegistryUpdateKind,
     RegistryUpdateProposal,
+    SessionMemory,
     StopReason,
     ToolCall,
     ToolCallStatus,
@@ -303,6 +304,18 @@ def _seed_entity_records(runtime, investigation_id: str, run_id: str) -> None:
             created_at=now,
         )
     )
+    store.append_session_memory(
+        SessionMemory(
+            memory_id="mem-api-1",
+            agent_run_id=run_id,
+            investigation_id=investigation_id,
+            revision=1,
+            through_round=1,
+            objective="diagnose checkout failures",
+            active_hypotheses=("db pool exhaustion",),
+            created_at=now,
+        )
+    )
     store.create_hypothesis(
         Hypothesis(
             hypothesis_id="hyp-api-1",
@@ -376,6 +389,12 @@ def test_run_and_entity_queries(client, runtime, registered_project) -> None:
     )
     assert checkpoints.status_code == 200
     assert checkpoints.json()[0]["checkpoint_id"] == "cp-api-1"
+
+    memories = client.get(
+        f"/api/investigations/{inv_id}/runs/run-api-1/memories"
+    )
+    assert memories.status_code == 200
+    assert memories.json()[0]["memory_id"] == "mem-api-1"
 
     hypotheses = client.get(f"/api/investigations/{inv_id}/hypotheses")
     assert hypotheses.status_code == 200
@@ -471,3 +490,72 @@ def test_tool_calls_rejects_invalid_status_enum(
         params={"status": "not-a-status"},
     )
     assert response.status_code == 422
+
+
+def test_investigation_context_api(client, runtime) -> None:
+    """GET /api/investigations/{id}/context returns memory, plan, boundaries, transcript."""
+    from incidentlens_control_plane.investigation.transcript import (
+        TranscriptMessage,
+    )
+    from incidentlens_control_plane.investigation.types import (
+        CompactBoundary,
+        TextBlock,
+        TodoItem,
+        TodoStatus,
+    )
+
+    inv_id = _create(client)["investigation_id"]
+    _make_parent_run(runtime, inv_id, run_id="run-ctx-1")
+    # Seed transcript, plan, memory, and boundary
+    store = runtime.investigation_store
+    msg = TranscriptMessage(
+        agent_run_id="run-ctx-1",
+        sequence=1,
+        role="user",
+        blocks=(TextBlock(text="inspect checkout"),),
+        created_at=NOW,
+    )
+    store.append_transcript_message(msg)
+    store.replace_todos(
+        "run-ctx-1",
+        (
+            TodoItem(
+                todo_id="inspect",
+                content="inspect logs",
+                status=TodoStatus.IN_PROGRESS,
+                updated_at=NOW,
+            ),
+        ),
+    )
+    store.append_session_memory(
+        SessionMemory(
+            memory_id="mem-ctx-1",
+            agent_run_id="run-ctx-1",
+            investigation_id=inv_id,
+            revision=1,
+            through_round=1,
+            objective="diagnose checkout failures",
+            created_at=NOW,
+        )
+    )
+    store.append_compact_boundary(
+        CompactBoundary(
+            agent_run_id="run-ctx-1",
+            through_sequence=1,
+            memory_revision=1,
+            summary="initial compact",
+            created_at=NOW,
+        )
+    )
+    response = client.get(f"/api/investigations/{inv_id}/context")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["investigation_id"] == inv_id
+    assert len(data["runs"]) == 1
+    run_data = data["runs"][0]
+    assert run_data["agent_run_id"] == "run-ctx-1"
+    assert run_data["latest_memory"]["revision"] == 1
+    assert run_data["todos"][0]["todo_id"] == "inspect"
+    assert len(run_data["compact_boundaries"]) == 1
+    assert len(run_data["transcript"]) == 1
+    assert run_data["transcript"][0]["sequence"] == 1

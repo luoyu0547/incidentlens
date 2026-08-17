@@ -332,6 +332,22 @@ async def list_run_rounds(
     return [record.model_dump(mode="json") for record in records]
 
 
+@router.get("/{investigation_id}/runs/{agent_run_id}/memories")
+async def list_run_memories(
+    request: Request, investigation_id: str, agent_run_id: str
+) -> list[dict[str, Any]]:
+    """List append-only compact memory revisions for an agent run."""
+    runtime = get_runtime(request)
+    try:
+        run = runtime.investigations.get_run(agent_run_id)
+    except AgentRunNotFound:
+        raise _run_not_found(agent_run_id)
+    if run.investigation_id != investigation_id:
+        raise _run_not_found(agent_run_id)
+    records = runtime.investigations.list_session_memories(agent_run_id)
+    return [record.model_dump(mode="json") for record in records]
+
+
 @router.get("/{investigation_id}/runs/{agent_run_id}/delegated-tasks")
 async def list_run_delegated_tasks(
     request: Request, investigation_id: str, agent_run_id: str
@@ -430,3 +446,58 @@ async def list_investigation_evidence(
         limit=limit,
     )
     return [record.model_dump(mode="json") for record in records]
+
+
+@router.get("/{investigation_id}/context")
+async def get_investigation_context(
+    request: Request,
+    investigation_id: str,
+    transcript_limit: int = Query(default=100, ge=1, le=1_000),
+) -> dict[str, Any]:
+    """Read-only inspection of a run's context: memory, plan, boundaries, transcript.
+
+    Returns the latest memory, todos, compact boundaries and paginated transcript
+    messages for each run in the investigation.  Evidence content is NOT
+    included — transcript entries already carry model-visible previews and
+    evidence references.
+    """
+    runtime = get_runtime(request)
+    try:
+        runtime.investigations.get_investigation(investigation_id)
+    except InvestigationNotFound:
+        raise _investigation_not_found(investigation_id)
+    runs = runtime.investigations.list_runs(investigation_id=investigation_id)
+    result: dict[str, Any] = {"investigation_id": investigation_id, "runs": []}
+    for run in runs:
+        run_data: dict[str, Any] = {
+            "agent_run_id": run.agent_run_id,
+            "status": run.status.value,
+        }
+        latest_memory = runtime.investigations.list_session_memories(
+            run.agent_run_id
+        )
+        if latest_memory:
+            run_data["latest_memory"] = latest_memory[-1].model_dump(
+                mode="json"
+            )
+        run_data["todos"] = [
+            item.model_dump(mode="json")
+            for item in runtime.investigation_store.list_todos(
+                run.agent_run_id
+            )
+        ]
+        boundaries = runtime.investigation_store.list_compact_boundaries(
+            run.agent_run_id
+        )
+        run_data["compact_boundaries"] = [
+            b.model_dump(mode="json") for b in boundaries
+        ]
+        transcript_msgs = runtime.investigation_store.list_transcript_messages(
+            run.agent_run_id
+        )
+        run_data["transcript"] = [
+            msg.model_dump(mode="json")
+            for msg in transcript_msgs[-transcript_limit:]
+        ]
+        result["runs"].append(run_data)
+    return result

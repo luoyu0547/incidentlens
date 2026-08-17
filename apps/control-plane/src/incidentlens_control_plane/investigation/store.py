@@ -1107,6 +1107,22 @@ class InvestigationStore:
             ).fetchone()
         return CompactBoundary.model_validate_json(row[2]) if row is not None else None
 
+    def list_compact_boundaries(
+        self, agent_run_id: str
+    ) -> tuple[CompactBoundary, ...]:
+        """Return all compact boundaries for a run, ordered ascending."""
+        with self._connection_factory() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {", ".join(_COMPACT_BOUNDARY_COLUMNS)}
+                FROM agent_compact_boundaries
+                WHERE agent_run_id = ?
+                ORDER BY through_sequence ASC
+                """,
+                (agent_run_id,),
+            ).fetchall()
+        return tuple(CompactBoundary.model_validate_json(row[2]) for row in rows)
+
     # -- work plan ------------------------------------------------------------
 
     def replace_todos(

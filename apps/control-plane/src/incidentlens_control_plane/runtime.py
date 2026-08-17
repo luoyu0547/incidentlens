@@ -15,6 +15,10 @@ from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.evidence.service import EvidenceService
 from incidentlens_control_plane.evidence.store import EvidenceStore
+from incidentlens_control_plane.investigation.context import (
+    AgentContextManager,
+    ContextBudgetPolicy,
+)
 from incidentlens_control_plane.investigation.fake_provider import (
     FakeProvider,
     FakeProviderRegistry,
@@ -69,6 +73,7 @@ class RuntimeServices:
     registry_proposals: RegistryProposalService
     source_discovery: SourceDiscoveryService
     fake_provider: FakeProviderRegistry
+    context_manager: AgentContextManager
     recovery: RecoveryService
     reports: object  # ReportService — 前向引用避免循环导入
 
@@ -188,6 +193,17 @@ def build_runtime(
                 model=settings.llm_active_model.removeprefix("xfyun-"),
             )
         )
+    context_manager = AgentContextManager(
+        investigation_store,
+        policy=ContextBudgetPolicy(
+            context_window=settings.agent_context_window_tokens,
+            max_output_tokens=settings.agent_context_max_output_tokens,
+            reserve_tokens=settings.agent_context_reserve_tokens,
+            tool_result_budget_chars=settings.agent_tool_result_budget_chars,
+            max_message_groups=settings.agent_context_max_message_groups,
+            keep_recent_tool_results=settings.agent_context_keep_recent_tool_results,
+        ),
+    )
     orchestrator = AgentOrchestrator(
         store=investigation_store,
         provider=provider,
@@ -199,6 +215,7 @@ def build_runtime(
         default_budget=settings.default_run_budget(),
         events=events,
         broker=broker,
+        context_manager=context_manager,
     )
     source_discovery = SourceDiscoveryService(
         projects=projects,
@@ -268,6 +285,7 @@ def build_runtime(
         registry_proposals=registry_proposals,
         source_discovery=source_discovery,
         fake_provider=fake_provider,
+        context_manager=context_manager,
         recovery=recovery,
         reports=reports,
     )
