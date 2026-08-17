@@ -446,9 +446,16 @@ class AgentContextManager:
         boundary = self._store.get_latest_compact_boundary(run.agent_run_id)
         active = self._materialize(run, investigation, tool_schemas, boundary, memory, todos)
 
-        if active.budget.input_tokens > active.budget.max_input_tokens:
-            # Memory now exists; the oldest eligible recent groups may be
-            # dropped to fit the budget.  Protected groups are never dropped.
+        if (
+            active.budget.input_tokens > active.budget.max_input_tokens
+            and memory is not None
+        ):
+            # Only the oldest eligible recent groups may be dropped once a
+            # Session Memory exists to summarize them.  When no memory could be
+            # built (nothing eligible to cover), dropping would lose history
+            # the active context would never see again, so the over-budget
+            # context is returned unchanged instead.  Protected groups are
+            # never dropped.
             active = self._trim_to_budget(
                 run, investigation, tool_schemas, boundary, memory, todos
             )
@@ -488,7 +495,13 @@ class AgentContextManager:
         memory: SessionMemory | None,
         todos: tuple[TodoItem, ...],
     ) -> ActiveContext:
-        """Drop the oldest eligible recent groups until the context fits."""
+        """Drop the oldest eligible recent groups until the context fits.
+
+        Precondition: ``memory`` is not ``None`` — the dropped groups must be
+        summarized by a Session Memory revision, otherwise their history would
+        be lost from every future context.  The caller only invokes this after
+        a memory revision exists; protected groups are never dropped.
+        """
         groups = self._transcript.group_messages(
             run.agent_run_id, after=boundary.through_sequence if boundary else 0
         )

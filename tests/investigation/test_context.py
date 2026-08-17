@@ -472,6 +472,32 @@ def test_oversized_context_builds_deterministic_memory_and_boundary(store) -> No
         assert message.sequence > active.memory.through_transcript_sequence
 
 
+def test_no_memory_means_no_trim_even_when_over_budget(store) -> None:
+    """Groups are never dropped when no Session Memory exists to summarize them.
+
+    A degenerate input budget (smaller than the system/tool/header overhead)
+    makes the coverage scan unable to compact: no boundary candidate fits, so
+    no memory revision is built.  The active context is then over budget but
+    must still replay every recent group -- trimming would silently lose
+    history no memory records.
+    """
+    seed_many_message_groups(store, count=10, content_width=200)
+    active = manager(
+        store, context_window=8_000, max_output_tokens=7_900, reserve_tokens=0
+    ).build(run(), investigation(), schemas())
+    assert active.memory is None
+    assert store.get_latest_compact_boundary("run-1") is None
+    assert active.budget.input_tokens > active.budget.max_input_tokens
+    # every seeded tool pair is still replayed -- no trimming without memory
+    assert_tool_pairs_are_complete(active.messages)
+    assert {f"call-{index}" for index in range(10)} <= {
+        block.tool_call_id
+        for message in active.messages
+        for block in message.blocks
+        if isinstance(block, ToolUseBlock)
+    }
+
+
 def test_deterministic_memory_captures_durable_work_state(store) -> None:
     store.replace_todos(
         "run-1",
