@@ -221,3 +221,21 @@ def test_transcript_service_append_rejects_duplicate_sequence(tmp_path) -> None:
     service.append_message(text_message(1, "hello"))
     with pytest.raises(TranscriptConflict):
         service.append_message(text_message(1, "again"))
+
+
+def test_transcript_service_after_never_splits_tool_pair(tmp_path) -> None:
+    """An ``after`` cut inside a tool pair must keep the pair whole (T1)."""
+    store = make_store(tmp_path)
+    service = TranscriptService(store)
+    service.append_message(text_message(1, "hello"))
+    use, result = tool_pair(2)
+    service.append_message(use)
+    service.append_message(result)
+
+    # after=2 lands between the tool use (seq 2) and its result (seq 3); the
+    # pair must survive intact rather than degrade into a lone tool result.
+    assert service.group_messages("run-1", after=2) == (
+        MessageGroup((use, result)),
+    )
+    # after=3 drops the whole pair, never a lone tool result.
+    assert service.group_messages("run-1", after=3) == ()

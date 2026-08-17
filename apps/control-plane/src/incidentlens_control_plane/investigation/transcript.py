@@ -84,15 +84,19 @@ class TranscriptService:
     ) -> tuple[MessageGroup, ...]:
         """Return message groups for a run whose sequence is greater than ``after``.
 
-        A compact boundary's ``through_sequence`` is the usual ``after`` value so
-        a resumed context replays only the messages written since the boundary.
+        The full message list is grouped *first* so a tool-use message and its
+        matching result are never split by the ``after`` filter: a group is
+        kept whole when any of its messages has ``sequence > after`` and
+        dropped whole otherwise.  A compact boundary's ``through_sequence`` is
+        the usual ``after`` value so a resumed context replays only the groups
+        written since the boundary.
         """
-        messages = tuple(
-            message
-            for message in self._store.list_transcript_messages(agent_run_id)
-            if message.sequence > after
+        groups = group_messages(self._store.list_transcript_messages(agent_run_id))
+        return tuple(
+            group
+            for group in groups
+            if any(message.sequence > after for message in group.messages)
         )
-        return group_messages(messages)
 
 
 __all__ = [
