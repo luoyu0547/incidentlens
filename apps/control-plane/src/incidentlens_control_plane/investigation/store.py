@@ -38,6 +38,8 @@ from incidentlens_control_plane.investigation.types import (
     AgentRun,
     AgentRunKind,
     Checkpoint,
+    CompactBoundary,
+    CompactionState,
     Conclusion,
     DelegatedTaskPackage,
     Hypothesis,
@@ -46,8 +48,12 @@ from incidentlens_control_plane.investigation.types import (
     ProviderUsage,
     RegistryProposalStatus,
     RegistryUpdateProposal,
+    SessionMemory,
     StopReason,
+    TodoItem,
+    TodoStatus,
     ToolCall,
+    TranscriptMessage,
     UsageCounters,
 )
 
@@ -90,6 +96,18 @@ class CheckpointConflict(Exception):
 
 class RoundConflict(Exception):
     """Raised when a round summary already exists for (run, round_number)."""
+
+
+class MemoryConflict(Exception):
+    """Raised when a session-memory revision already exists for a run."""
+
+
+class TranscriptConflict(Exception):
+    """Raised when a transcript message already exists for (run, sequence)."""
+
+
+class CompactBoundaryConflict(Exception):
+    """Raised when a compact boundary already exists for (run, through_sequence)."""
 
 
 class AgentRound(BaseModel):
@@ -147,6 +165,41 @@ _CHECKPOINT_COLUMNS = (
     "sequence",
     "record_json",
     "created_at",
+)
+
+_SESSION_MEMORY_COLUMNS = (
+    "agent_run_id",
+    "revision",
+    "through_round",
+    "record_json",
+    "created_at",
+)
+
+_TRANSCRIPT_MESSAGE_COLUMNS = (
+    "agent_run_id",
+    "sequence",
+    "record_json",
+    "created_at",
+)
+
+_COMPACT_BOUNDARY_COLUMNS = (
+    "agent_run_id",
+    "through_sequence",
+    "record_json",
+    "created_at",
+)
+
+_TODO_COLUMNS = (
+    "agent_run_id",
+    "todo_id",
+    "record_json",
+    "updated_at",
+)
+
+_COMPACTION_STATE_COLUMNS = (
+    "agent_run_id",
+    "record_json",
+    "updated_at",
 )
 
 _TOOL_CALL_COLUMNS = (
@@ -299,6 +352,47 @@ class InvestigationStore:
                     record_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (agent_run_id, sequence)
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_session_memories (
+                    agent_run_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    through_round INTEGER NOT NULL,
+                    record_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (agent_run_id, revision)
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_session_memories_round
+                    ON agent_session_memories(agent_run_id, through_round);
+
+                CREATE TABLE IF NOT EXISTS agent_transcript_messages (
+                    agent_run_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    record_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (agent_run_id, sequence)
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_compact_boundaries (
+                    agent_run_id TEXT NOT NULL,
+                    through_sequence INTEGER NOT NULL,
+                    record_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (agent_run_id, through_sequence)
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_todos (
+                    agent_run_id TEXT NOT NULL,
+                    todo_id TEXT NOT NULL,
+                    record_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (agent_run_id, todo_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_compaction_state (
+                    agent_run_id TEXT PRIMARY KEY,
+                    record_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS tool_calls (
@@ -859,6 +953,227 @@ class InvestigationStore:
                 (agent_run_id,),
             ).fetchone()
         return Checkpoint.model_validate_json(row[2]) if row is not None else None
+
+    # -- compact session memory (append-only) --------------------------------
+
+    def append_session_memory(self, memory: SessionMemory) -> SessionMemory:
+        """Append one immutable memory revision for an agent run."""
+        with self._connection_factory() as conn:
+            try:
+                conn.execute(
+                    f"""
+                    INSERT INTO agent_session_memories (
+                        {", ".join(_SESSION_MEMORY_COLUMNS)}
+                    ) VALUES ({_placeholders(len(_SESSION_MEMORY_COLUMNS))})
+                    """,
+                    (
+                        memory.agent_run_id,
+                        memory.revision,
+                        memory.through_round,
+                        memory.model_dump_json(),
+                        _iso(memory.created_at),
+                    ),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                raise MemoryConflict(
+                    f"memory revision {memory.revision} already exists for "
+                    f"run {memory.agent_run_id}"
+                ) from exc
+        return memory
+
+    def list_session_memories(self, agent_run_id: str) -> tuple[SessionMemory, ...]:
+        """Return memory revisions for a run, oldest first."""
+        with self._connection_factory() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {", ".join(_SESSION_MEMORY_COLUMNS)}
+                FROM agent_session_memories
+                WHERE agent_run_id = ?
+                ORDER BY revision ASC
+                """,
+                (agent_run_id,),
+            ).fetchall()
+        return tuple(SessionMemory.model_validate_json(row[3]) for row in rows)
+
+    def get_latest_session_memory(self, agent_run_id: str) -> SessionMemory | None:
+        """Return the newest compact memory for a run, if one exists."""
+        with self._connection_factory() as conn:
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(_SESSION_MEMORY_COLUMNS)}
+                FROM agent_session_memories
+                WHERE agent_run_id = ?
+                ORDER BY revision DESC LIMIT 1
+                """,
+                (agent_run_id,),
+            ).fetchone()
+        return SessionMemory.model_validate_json(row[3]) if row is not None else None
+
+    # -- transcript messages (append-only) ------------------------------------
+
+    def append_transcript_message(
+        self, message: TranscriptMessage
+    ) -> TranscriptMessage:
+        """Append one transcript message; raise TranscriptConflict on a duplicate."""
+        with self._connection_factory() as conn:
+            try:
+                conn.execute(
+                    f"""
+                    INSERT INTO agent_transcript_messages (
+                        {", ".join(_TRANSCRIPT_MESSAGE_COLUMNS)}
+                    ) VALUES ({_placeholders(len(_TRANSCRIPT_MESSAGE_COLUMNS))})
+                    """,
+                    (
+                        message.agent_run_id,
+                        message.sequence,
+                        message.model_dump_json(),
+                        _iso(message.created_at),
+                    ),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                raise TranscriptConflict(
+                    f"transcript message {message.sequence} already exists for "
+                    f"run {message.agent_run_id}"
+                ) from exc
+        return message
+
+    def list_transcript_messages(self, agent_run_id: str) -> tuple[TranscriptMessage, ...]:
+        """Return transcript messages for a run, oldest first."""
+        with self._connection_factory() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {", ".join(_TRANSCRIPT_MESSAGE_COLUMNS)}
+                FROM agent_transcript_messages
+                WHERE agent_run_id = ?
+                ORDER BY sequence ASC
+                """,
+                (agent_run_id,),
+            ).fetchall()
+        return tuple(TranscriptMessage.model_validate_json(row[2]) for row in rows)
+
+    # -- compact boundaries (append-only) -------------------------------------
+
+    def append_compact_boundary(self, boundary: CompactBoundary) -> CompactBoundary:
+        """Append one compact boundary; raise CompactBoundaryConflict on duplicate."""
+        with self._connection_factory() as conn:
+            try:
+                conn.execute(
+                    f"""
+                    INSERT INTO agent_compact_boundaries (
+                        {", ".join(_COMPACT_BOUNDARY_COLUMNS)}
+                    ) VALUES ({_placeholders(len(_COMPACT_BOUNDARY_COLUMNS))})
+                    """,
+                    (
+                        boundary.agent_run_id,
+                        boundary.through_sequence,
+                        boundary.model_dump_json(),
+                        _iso(boundary.created_at),
+                    ),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                raise CompactBoundaryConflict(
+                    f"compact boundary {boundary.through_sequence} already exists "
+                    f"for run {boundary.agent_run_id}"
+                ) from exc
+        return boundary
+
+    def get_latest_compact_boundary(self, agent_run_id: str) -> CompactBoundary | None:
+        """Return the highest-through-sequence compact boundary for a run."""
+        with self._connection_factory() as conn:
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(_COMPACT_BOUNDARY_COLUMNS)}
+                FROM agent_compact_boundaries
+                WHERE agent_run_id = ?
+                ORDER BY through_sequence DESC LIMIT 1
+                """,
+                (agent_run_id,),
+            ).fetchone()
+        return CompactBoundary.model_validate_json(row[2]) if row is not None else None
+
+    # -- work plan ------------------------------------------------------------
+
+    def replace_todos(
+        self, agent_run_id: str, items: tuple[TodoItem, ...]
+    ) -> tuple[TodoItem, ...]:
+        """Validate the whole plan, then atomically replace the run's rows.
+
+        At most one item may be ``IN_PROGRESS`` and every ``todo_id`` must be
+        unique; both are rejected before any row is touched.  An empty ``items``
+        clears the run's plan.
+        """
+        if sum(item.status is TodoStatus.IN_PROGRESS for item in items) > 1:
+            raise ValueError("at most one todo item may be in_progress")
+        seen: set[str] = set()
+        for item in items:
+            if item.todo_id in seen:
+                raise ValueError(f"duplicate todo_id in plan: {item.todo_id}")
+            seen.add(item.todo_id)
+        with self._connection_factory() as conn:
+            conn.execute(
+                "DELETE FROM agent_todos WHERE agent_run_id = ?", (agent_run_id,)
+            )
+            conn.executemany(
+                f"""
+                INSERT INTO agent_todos ({", ".join(_TODO_COLUMNS)})
+                VALUES ({_placeholders(len(_TODO_COLUMNS))})
+                """,
+                (
+                    (
+                        agent_run_id,
+                        item.todo_id,
+                        item.model_dump_json(),
+                        _iso(item.updated_at),
+                    )
+                    for item in items
+                ),
+            )
+            conn.commit()
+        return items
+
+    def list_todos(self, agent_run_id: str) -> tuple[TodoItem, ...]:
+        """Return the run's work-plan items in the order the plan was written."""
+        with self._connection_factory() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {", ".join(_TODO_COLUMNS)}
+                FROM agent_todos WHERE agent_run_id = ?
+                ORDER BY rowid ASC
+                """,
+                (agent_run_id,),
+            ).fetchall()
+        return tuple(TodoItem.model_validate_json(row[2]) for row in rows)
+
+    # -- semantic compaction breaker state ------------------------------------
+
+    def put_compaction_state(self, state: CompactionState) -> CompactionState:
+        """Upsert the semantic-compaction breaker/coverage row for a run."""
+        with self._connection_factory() as conn:
+            conn.execute(
+                f"""
+                INSERT OR REPLACE INTO agent_compaction_state (
+                    {", ".join(_COMPACTION_STATE_COLUMNS)}
+                ) VALUES ({_placeholders(len(_COMPACTION_STATE_COLUMNS))})
+                """,
+                (state.agent_run_id, state.model_dump_json(), _iso(state.updated_at)),
+            )
+            conn.commit()
+        return state
+
+    def get_compaction_state(self, agent_run_id: str) -> CompactionState | None:
+        """Return the run's compaction breaker state, if one exists."""
+        with self._connection_factory() as conn:
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(_COMPACTION_STATE_COLUMNS)}
+                FROM agent_compaction_state WHERE agent_run_id = ?
+                """,
+                (agent_run_id,),
+            ).fetchone()
+        return CompactionState.model_validate_json(row[1]) if row is not None else None
 
     # -- tool calls ----------------------------------------------------------
 

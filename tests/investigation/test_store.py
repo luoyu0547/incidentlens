@@ -20,6 +20,7 @@ from incidentlens_control_plane.investigation.store import (
     AgentRunNotFound,
     AlreadyExists,
     CheckpointConflict,
+    CompactBoundaryConflict,
     ConcurrentModification,
     DelegatedTaskNotFound,
     InvestigationNotFound,
@@ -34,6 +35,8 @@ from incidentlens_control_plane.investigation.types import (
     AgentRunKind,
     AgentScope,
     Checkpoint,
+    CompactBoundary,
+    CompactionState,
     Conclusion,
     DelegatedTaskPackage,
     Hypothesis,
@@ -44,7 +47,10 @@ from incidentlens_control_plane.investigation.types import (
     RegistryProposalStatus,
     RegistryUpdateKind,
     RegistryUpdateProposal,
+    SessionMemory,
     StopReason,
+    TodoItem,
+    TodoStatus,
     ToolCall,
     UsageCounters,
 )
@@ -194,6 +200,18 @@ def make_checkpoint(*, sequence: int = 1, **kwargs: object) -> Checkpoint:
     return Checkpoint(**fields)
 
 
+def make_boundary(*, through_sequence: int = 10, **kwargs: object) -> CompactBoundary:
+    fields: dict[str, object] = {
+        "agent_run_id": "run-1",
+        "through_sequence": through_sequence,
+        "memory_revision": 1,
+        "summary": "compacted transcript",
+        "created_at": NOW,
+    }
+    fields.update(kwargs)
+    return CompactBoundary(**fields)
+
+
 # -- migration ----------------------------------------------------------------
 
 
@@ -212,11 +230,16 @@ def test_migrate_is_idempotent_and_creates_all_tables(tmp_path) -> None:
         "agent_runs",
         "agent_rounds",
         "agent_checkpoints",
+        "agent_session_memories",
         "tool_calls",
         "hypotheses",
         "conclusions",
         "delegated_tasks",
         "registry_update_proposals",
+        "agent_transcript_messages",
+        "agent_compact_boundaries",
+        "agent_todos",
+        "agent_compaction_state",
     }
     assert expected <= tables
 
@@ -560,6 +583,194 @@ def test_checkpoint_append_only_rejects_duplicate_sequence(tmp_path) -> None:
 def test_get_latest_checkpoint_none_when_empty(tmp_path) -> None:
     store = make_store(tmp_path)
     assert store.get_latest_checkpoint("run-1") is None
+
+
+def test_session_memory_is_append_only_and_latest_is_queryable(tmp_path) -> None:
+    store = make_store(tmp_path)
+    store.create_investigation(make_investigation())
+    store.create_agent_run(make_run())
+    first = SessionMemory(
+        memory_id="mem-run-1-1",
+        agent_run_id="run-1",
+        investigation_id="inv-1",
+        revision=1,
+        through_round=4,
+        objective="find checkout failures",
+        evidence_ids=("ev-1",),
+        created_at=NOW,
+    )
+    second = first.model_copy(
+        update={
+            "memory_id": "mem-run-1-2",
+            "revision": 2,
+            "through_round": 8,
+            "evidence_ids": ("ev-1", "ev-2"),
+        }
+    )
+
+    store.append_session_memory(first)
+    store.append_session_memory(second)
+
+    assert store.list_session_memories("run-1") == (first, second)
+    assert store.get_latest_session_memory("run-1") == second
+
+
+def test_session_memory_new_fields_have_backward_compatible_defaults(tmp_path) -> None:
+    """Rows written by the pre-transcript prototype stay readable (T1)."""
+    store = make_store(tmp_path)
+    memory = SessionMemory(
+        memory_id="mem-run-1-1",
+        agent_run_id="run-1",
+        investigation_id="inv-1",
+        revision=1,
+        through_round=4,
+        objective="find checkout failures",
+        created_at=NOW,
+    )
+    store.append_session_memory(memory)
+    loaded = store.get_latest_session_memory("run-1")
+    assert loaded is not None
+    assert loaded.through_transcript_sequence == 0
+    assert loaded.user_constraints == ()
+    assert loaded.todos == ()
+    assert loaded.next_actions == ()
+
+
+# -- transcript messages, compact boundaries, work plan, compaction state -----
+
+
+def test_compact_boundary_append_and_latest(tmp_path) -> None:
+    store = make_store(tmp_path)
+    first = make_boundary(through_sequence=10)
+    second = make_boundary(
+        through_sequence=20,
+        memory_revision=2,
+        summary="compacted through message 20",
+    )
+    store.append_compact_boundary(first)
+    store.append_compact_boundary(second)
+    assert store.get_latest_compact_boundary("run-1") == second
+
+
+def test_compact_boundary_rejects_duplicate_through_sequence(tmp_path) -> None:
+    store = make_store(tmp_path)
+    store.append_compact_boundary(make_boundary(through_sequence=10))
+    with pytest.raises(CompactBoundaryConflict):
+        store.append_compact_boundary(make_boundary(through_sequence=10))
+
+
+def test_get_latest_compact_boundary_none_when_empty(tmp_path) -> None:
+    store = make_store(tmp_path)
+    assert store.get_latest_compact_boundary("run-1") is None
+
+
+def test_replace_todos_roundtrip_and_clears_prior_plan(tmp_path) -> None:
+    store = make_store(tmp_path)
+    first = (
+        TodoItem(
+            todo_id="one",
+            content="inspect logs",
+            status=TodoStatus.PENDING,
+            updated_at=NOW,
+        ),
+        TodoItem(
+            todo_id="two",
+            content="check database",
+            status=TodoStatus.IN_PROGRESS,
+            updated_at=NOW,
+        ),
+    )
+    store.replace_todos("run-1", first)
+    assert store.list_todos("run-1") == first
+
+    second = (
+        TodoItem(
+            todo_id="two",
+            content="check database",
+            status=TodoStatus.COMPLETED,
+            updated_at=NOW,
+        ),
+        TodoItem(
+            todo_id="three",
+            content="verify root cause",
+            status=TodoStatus.PENDING,
+            updated_at=NOW,
+        ),
+    )
+    store.replace_todos("run-1", second)
+    assert store.list_todos("run-1") == second
+
+
+def test_replace_todos_empty_clears_plan(tmp_path) -> None:
+    store = make_store(tmp_path)
+    store.replace_todos(
+        "run-1",
+        (
+            TodoItem(
+                todo_id="one",
+                content="inspect logs",
+                status=TodoStatus.PENDING,
+                updated_at=NOW,
+            ),
+        ),
+    )
+    store.replace_todos("run-1", ())
+    assert store.list_todos("run-1") == ()
+
+
+def test_replace_todos_rejects_duplicate_todo_id(tmp_path) -> None:
+    store = make_store(tmp_path)
+    with pytest.raises(ValueError, match="duplicate"):
+        store.replace_todos(
+            "run-1",
+            (
+                TodoItem(
+                    todo_id="one",
+                    content="inspect logs",
+                    status=TodoStatus.PENDING,
+                    updated_at=NOW,
+                ),
+                TodoItem(
+                    todo_id="one",
+                    content="check database",
+                    status=TodoStatus.PENDING,
+                    updated_at=NOW,
+                ),
+            ),
+        )
+
+
+def test_compaction_state_put_and_get(tmp_path) -> None:
+    store = make_store(tmp_path)
+    state = CompactionState(
+        agent_run_id="run-1",
+        consecutive_failures=2,
+        reactive_round=5,
+        latest_boundary_sequence=20,
+        updated_at=NOW,
+    )
+    store.put_compaction_state(state)
+    assert store.get_compaction_state("run-1") == state
+
+
+def test_put_compaction_state_overwrites(tmp_path) -> None:
+    store = make_store(tmp_path)
+    store.put_compaction_state(
+        CompactionState(
+            agent_run_id="run-1", consecutive_failures=1, updated_at=NOW
+        )
+    )
+    store.put_compaction_state(
+        CompactionState(
+            agent_run_id="run-1", consecutive_failures=0, updated_at=NOW
+        )
+    )
+    assert store.get_compaction_state("run-1").consecutive_failures == 0
+
+
+def test_get_compaction_state_none_when_empty(tmp_path) -> None:
+    store = make_store(tmp_path)
+    assert store.get_compaction_state("run-1") is None
 
 
 # -- tool calls ---------------------------------------------------------------

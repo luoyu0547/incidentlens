@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -333,6 +333,156 @@ class Checkpoint(BaseModel):
     round_number: int = Field(ge=0)
     usage: UsageCounters
     created_at: datetime
+
+
+class MessageRole(StrEnum):
+    """Roles that may appear in a persisted transcript message."""
+
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class TodoStatus(StrEnum):
+    """Lifecycle status of a persistent work-plan item."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+
+
+class TextBlock(BaseModel):
+    """A plain-text content block in a transcript message."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["text"] = "text"
+    text: str = Field(min_length=1, max_length=200_000)
+
+
+class ToolUseBlock(BaseModel):
+    """An assistant tool request that must be paired with a tool result."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["tool_use"] = "tool_use"
+    tool_call_id: str = Field(min_length=1, max_length=120)
+    tool_name: str = Field(min_length=1, max_length=120)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolResultBlock(BaseModel):
+    """The model-visible outcome of one tool call.
+
+    Complete tool output lives in the evidence store; this block carries the
+    bounded preview plus evidence references so a later reader can reload the
+    full content on demand.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["tool_result"] = "tool_result"
+    tool_call_id: str = Field(min_length=1, max_length=120)
+    status: ToolCallStatus
+    content: str = Field(max_length=200_000)
+    evidence_ids: tuple[str, ...] = Field(default=(), max_length=100)
+    persisted_output: bool = False
+
+
+MessageBlock = Annotated[
+    TextBlock | ToolUseBlock | ToolResultBlock,
+    Field(discriminator="type"),
+]
+
+
+class TranscriptMessage(BaseModel):
+    """One append-only, model-visible message in an agent run's transcript.
+
+    ``sequence`` is the writer-assigned position in the run's message history;
+    a run can never overwrite or renumber a message.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    agent_run_id: str = Field(min_length=1, max_length=120)
+    sequence: int = Field(ge=1)
+    role: MessageRole
+    blocks: tuple[MessageBlock, ...] = Field(min_length=1)
+    created_at: datetime
+
+
+class TodoItem(BaseModel):
+    """One persistent work-plan item owned by an agent run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    todo_id: str = Field(min_length=1, max_length=120)
+    content: str = Field(min_length=1, max_length=1_000)
+    status: TodoStatus
+    evidence_ids: tuple[str, ...] = Field(default=(), max_length=32)
+    tool_call_ids: tuple[str, ...] = Field(default=(), max_length=32)
+    updated_at: datetime
+
+
+class CompactBoundary(BaseModel):
+    """Coverage marker for one compaction of an agent run's transcript.
+
+    Messages with ``sequence <= through_sequence`` are summarized by
+    ``memory_revision`` (0 when no memory revision exists yet) and are no longer
+    replayed as recent deltas.  Boundaries are append-only per
+    ``(agent_run_id, through_sequence)``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    agent_run_id: str = Field(min_length=1, max_length=120)
+    through_sequence: int = Field(ge=1)
+    memory_revision: int = Field(default=0, ge=0)
+    summary: str = Field(min_length=1, max_length=4_000)
+    created_at: datetime
+
+
+class CompactionState(BaseModel):
+    """Durable semantic-compaction breaker and coverage state for a run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    agent_run_id: str = Field(min_length=1, max_length=120)
+    consecutive_failures: int = Field(default=0, ge=0)
+    reactive_round: int | None = Field(default=None, ge=1)
+    latest_boundary_sequence: int | None = Field(default=None, ge=1)
+    updated_at: datetime
+
+
+class SessionMemory(BaseModel):
+    """Versioned, bounded memory for one agent run.
+
+    The full investigation state remains in the domain stores.  This model is
+    the compact projection that survives context compaction and process
+    restarts: it keeps the task, durable findings and provenance needed to
+    rebuild a provider turn without replaying a raw transcript.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    memory_id: str = Field(min_length=1, max_length=160)
+    agent_run_id: str = Field(min_length=1, max_length=120)
+    investigation_id: str = Field(min_length=1, max_length=120)
+    revision: int = Field(ge=1)
+    through_round: int = Field(ge=0)
+    through_transcript_sequence: int = Field(default=0, ge=0)
+    objective: str = Field(min_length=1, max_length=4_000)
+    confirmed_facts: tuple[str, ...] = Field(default=(), max_length=64)
+    active_hypotheses: tuple[str, ...] = Field(default=(), max_length=32)
+    open_questions: tuple[str, ...] = Field(default=(), max_length=32)
+    completed_actions: tuple[str, ...] = Field(default=(), max_length=64)
+    child_findings: tuple[str, ...] = Field(default=(), max_length=32)
+    evidence_ids: tuple[str, ...] = Field(default=(), max_length=100)
+    user_constraints: tuple[str, ...] = Field(default=(), max_length=32)
+    todos: tuple[str, ...] = Field(default=(), max_length=64)
+    next_actions: tuple[str, ...] = Field(default=(), max_length=32)
+    created_at: datetime
+
+    _validate_evidence_ids = field_validator("evidence_ids")(_validate_unique_citations)
 
 
 class RegistryUpdateProposal(BaseModel):
