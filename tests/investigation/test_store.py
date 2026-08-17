@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
@@ -1010,6 +1011,33 @@ def test_record_json_only_serializes_validated_contracts(tmp_path) -> None:
     assert Investigation.model_validate_json(inv_json) == investigation
     assert AgentRun.model_validate_json(run_json) == make_run()
     assert ToolCall.model_validate_json(tool_json) == tool_call
+
+
+def test_get_evidence_reads_shared_evidence_store(tmp_path) -> None:
+    """InvestigationStore.get_evidence reloads the complete tool output (T3)."""
+    from incidentlens_control_plane.evidence.store import EvidenceStore
+    from incidentlens_control_plane.evidence.types import EvidenceKind, EvidenceRef
+
+    store = make_store(tmp_path)
+    evidence_store = EvidenceStore(store.connection_factory)
+    evidence_store.migrate()
+    ref = evidence_store.create(
+        EvidenceRef(
+            evidence_ref_id="ev-tool-1",
+            incident_id="inc-123",
+            evidence_kind=EvidenceKind.COMMAND_OUTPUT,
+            agent_run_id="run-1",
+            project_id="proj-1",
+            target_id="prod-a",
+            service_name="orders",
+            content_redacted="x" * 250_000,
+            content_sha256=hashlib.sha256(b"x" * 250_000).hexdigest(),
+            redaction_summary={},
+            created_at=NOW,
+            created_by="agent",
+        )
+    )
+    assert store.get_evidence("ev-tool-1").content_redacted == ref.content_redacted
 
 
 def test_raw_transcript_never_enters_round_json(tmp_path) -> None:

@@ -22,6 +22,8 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from incidentlens_control_plane.evidence.store import EvidenceStore
+from incidentlens_control_plane.evidence.types import EvidenceRef
 from incidentlens_control_plane.investigation.state_machine import (
     AGENT_RUN_STATE_MACHINE,
     AGENT_RUN_TERMINAL,
@@ -298,6 +300,17 @@ class InvestigationStore:
 
     def __init__(self, connection_factory: Callable[[], sqlite3.Connection]) -> None:
         self._connection_factory = connection_factory
+
+    @property
+    def connection_factory(self) -> Callable[[], sqlite3.Connection]:
+        """The connection factory shared with sibling stores (evidence, logs...).
+
+        ``EvidenceStore`` and ``InvestigationStore`` both live in the same
+        SQLite database (``runtime.db``), so sibling stores can be constructed
+        over this factory to read or write their tables through the shared
+        connection.
+        """
+        return self._connection_factory
 
     def migrate(self) -> None:
         """Create the investigation tables and indexes if they don't exist."""
@@ -1146,6 +1159,16 @@ class InvestigationStore:
                 (agent_run_id,),
             ).fetchall()
         return tuple(TodoItem.model_validate_json(row[2]) for row in rows)
+
+    def get_evidence(self, evidence_ref_id: str) -> EvidenceRef:
+        """Return the evidence ref with the given id, or raise ``KeyError``.
+
+        Evidence lives in the shared ``evidence_refs`` table; this method
+        delegates to the ``EvidenceStore`` over the same connection factory so
+        the investigation stack can reload the complete tool output that a
+        ``ToolResultBlock``'s bounded preview references.
+        """
+        return EvidenceStore(self._connection_factory).get(evidence_ref_id)
 
     # -- semantic compaction breaker state ------------------------------------
 
