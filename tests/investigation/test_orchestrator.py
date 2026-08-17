@@ -1594,3 +1594,69 @@ async def test_manual_compact_commits_memory_and_continues(runtime: SimpleNamesp
     assert run.status is AgentRunStatus.COMPLETED
     assert runtime.store.get_latest_session_memory("run-1") is not None
     assert runtime.store.get_latest_compact_boundary("run-1") is not None
+
+
+def _registry_pair() -> RequestToolsStep:
+    """Two concurrency-safe ``registry_info`` calls (same gather batch)."""
+    return RequestToolsStep(
+        tool_requests=(
+            ToolRequest(
+                tool_call_id="safe-call-1",
+                tool_name="registry_info",
+                arguments={},
+            ),
+            ToolRequest(
+                tool_call_id="safe-call-2",
+                tool_name="registry_info",
+                arguments={},
+            ),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_safe_batch_emits_results_in_order(runtime: SimpleNamespace) -> None:
+    """Two gathered safe tools both fold; results land in original order."""
+    runtime.fake.script("run-1", [_registry_pair(), completed_step("ev-1")])
+    run = await runtime.orchestrator.run("run-1")
+    assert run.status is AgentRunStatus.COMPLETED
+    second = runtime.fake.requests("run-1")[1]
+    result_blocks = [
+        block
+        for message in second.messages
+        for block in message.blocks
+        if isinstance(block, ToolResultBlock)
+    ]
+    assert [b.tool_call_id for b in result_blocks] == ["safe-call-1", "safe-call-2"]
+    assert all(b.status is ToolCallStatus.SUCCEEDED for b in result_blocks)
+    calls = runtime.store.list_tool_calls(agent_run_id="run-1")
+    assert {c.tool_call_id for c in calls} == {"safe-call-1", "safe-call-2"}
+    assert all(c.status is ToolCallStatus.SUCCEEDED for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_batch_folds_all_outcomes_when_one_pauses(runtime: SimpleNamespace) -> None:
+    """A batch that pauses mid-fold still folds its already-executed sibling.
+
+    A tiny output budget makes the first gathered tool's fold pause the round;
+    the sibling already ran and must NOT be left RUNNING nor misreported as
+    "tool call was not executed".
+    """
+    run = runtime.store.get_agent_run("run-1")
+    run = run.model_copy(update={"budget": AgentBudget(max_total_output_bytes=1)})
+    runtime.store.update_agent_run(run)
+    runtime.fake.script("run-1", [_registry_pair()])
+    final = await runtime.orchestrator.run("run-1")
+    assert final.status is AgentRunStatus.PAUSED_BUDGET
+    calls = runtime.store.list_tool_calls(agent_run_id="run-1")
+    assert {c.tool_call_id for c in calls} == {"safe-call-1", "safe-call-2"}
+    assert all(c.status is ToolCallStatus.SUCCEEDED for c in calls)
+    result_blocks = [
+        block
+        for message in runtime.store.list_transcript_messages("run-1")
+        for block in message.blocks
+        if isinstance(block, ToolResultBlock)
+    ]
+    assert [b.tool_call_id for b in result_blocks] == ["safe-call-1", "safe-call-2"]
+    assert all(b.status is ToolCallStatus.SUCCEEDED for b in result_blocks)
+    assert all("not executed" not in b.content for b in result_blocks)

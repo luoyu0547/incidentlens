@@ -961,6 +961,34 @@ class AgentOrchestrator:
         )
         return self._store.get_agent_run(run.agent_run_id)
 
+    def _pause_round(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        run_status: AgentRunStatus,
+        *,
+        now: datetime,
+        reason: str,
+        stop_reason: StopReason,
+    ) -> tuple[AgentRun, Investigation]:
+        """Pause the round unless a prior gathered outcome already paused it.
+
+        A batch gathers several concurrency-safe tools; when one outcome folds
+        to a pause, the later already-executed outcomes are still folded (their
+        tool calls reach a terminal status and their evidence is attached) but
+        the round is not paused a second time.
+        """
+        if run.status is not AgentRunStatus.RUNNING:
+            return run, investigation
+        self._pause(
+            run, investigation, run_status, now=now, reason=reason,
+            stop_reason=stop_reason,
+        )
+        return (
+            self._store.get_agent_run(run.agent_run_id),
+            self._store.get_investigation(run.investigation_id),
+        )
+
     @staticmethod
     def _pause_status_for(reason: str) -> AgentRunStatus:
         if "no-new-evidence" in reason or "no new evidence" in reason:
@@ -1070,10 +1098,11 @@ class AgentOrchestrator:
         Every ``ToolCall`` that passes the guard is persisted as ``RUNNING``
         before its coroutine starts (C1), and after the await the
         run/investigation are reloaded so a concurrent child's usage increments
-        are never clobbered (I3).  A guard failure or a folded outcome that
-        pauses the round stops the rest of the batch; the already-started
-        coroutines always run.  Returns ``(run, investigation, result_blocks,
-        stop)`` where ``result_blocks`` covers the requests that actually ran.
+        are never clobbered (I3).  A guard failure stops the rest of the batch
+        before their coroutines start, but every already-gathered outcome is
+        folded -- even when one of them pauses the round -- so no executed tool
+        is left ``RUNNING`` or misreported as "not executed".  Returns
+        ``(run, investigation, result_blocks, stop)``.
         """
         pending: list[tuple[Any, Any]] = []
         terminal_blocks: list[tuple[Any, ToolResultBlock]] = []
@@ -1139,6 +1168,9 @@ class AgentOrchestrator:
         else:
             outcomes = []
 
+        # Fold EVERY gathered outcome, in original request order.  A pause from
+        # one outcome never discards its siblings: their tool calls still reach
+        # a terminal status and their evidence is still attached.
         folded: list[tuple[Any, ToolResultBlock]] = []
         for request, _ in pending:
             outcome = next(
@@ -1150,9 +1182,7 @@ class AgentOrchestrator:
                 run, investigation, request, outcome, now
             )
             folded.append((request, self._tool_result_block(outcome)))
-            if inner_stop:
-                stop = True
-                break
+            stop = stop or inner_stop
         blocks = self._ordered_blocks(batch, terminal_blocks, folded)
         return run, investigation, blocks, stop
 
@@ -1193,11 +1223,11 @@ class AgentOrchestrator:
             )
             self._store.update_agent_run(run)
             self._store.update_investigation(investigation)
-            self._pause(
+            run, investigation = self._pause_round(
                 run, investigation, AgentRunStatus.WAITING_APPROVAL, now=now,
                 reason="tool requires approval", stop_reason=StopReason.PENDING_APPROVAL,
             )
-            return self._store.get_agent_run(run.agent_run_id), investigation, True
+            return run, investigation, True
 
         # I2: cumulative output budgets (run + investigation) before counting.
         ok, reason = self._guard.can_accept_output(run, outcome.output_bytes)
@@ -1209,11 +1239,11 @@ class AgentOrchestrator:
                 evidence_ids=tuple(ref.evidence_id for ref in outcome.evidence),
                 error_redacted=outcome.error_redacted,
             )
-            self._pause(
-                run, investigation, AgentRunStatus.PAUSED_BUDGET,
-                now=now, reason=reason, stop_reason=StopReason.BUDGET_OUTPUT,
+            run, investigation = self._pause_round(
+                run, investigation, AgentRunStatus.PAUSED_BUDGET, now=now,
+                reason=reason, stop_reason=StopReason.BUDGET_OUTPUT,
             )
-            return self._store.get_agent_run(run.agent_run_id), investigation, True
+            return run, investigation, True
         ok, reason = self._guard.can_investigation_accept_output(
             investigation, outcome.output_bytes
         )
@@ -1225,11 +1255,11 @@ class AgentOrchestrator:
                 evidence_ids=tuple(ref.evidence_id for ref in outcome.evidence),
                 error_redacted=outcome.error_redacted,
             )
-            self._pause(
-                run, investigation, AgentRunStatus.PAUSED_BUDGET,
-                now=now, reason=reason, stop_reason=StopReason.BUDGET_OUTPUT,
+            run, investigation = self._pause_round(
+                run, investigation, AgentRunStatus.PAUSED_BUDGET, now=now,
+                reason=reason, stop_reason=StopReason.BUDGET_OUTPUT,
             )
-            return self._store.get_agent_run(run.agent_run_id), investigation, True
+            return run, investigation, True
 
         self._transition_tool_call(
             self._store.get_tool_call(request.tool_call_id),
@@ -1244,12 +1274,11 @@ class AgentOrchestrator:
                 run, investigation, outcome.evidence, now
             )
         except _EvidenceBudgetExceeded:
-            self._pause(
-                run, investigation, AgentRunStatus.PAUSED_BUDGET,
-                now=now, reason="evidence budget exhausted",
-                stop_reason=StopReason.BUDGET_EVIDENCE,
+            run, investigation = self._pause_round(
+                run, investigation, AgentRunStatus.PAUSED_BUDGET, now=now,
+                reason="evidence budget exhausted", stop_reason=StopReason.BUDGET_EVIDENCE,
             )
-            return self._store.get_agent_run(run.agent_run_id), investigation, True
+            return run, investigation, True
         run = self._bump_usage(
             run,
             tool_calls=run.usage.tool_calls + 1,
@@ -1267,11 +1296,11 @@ class AgentOrchestrator:
         investigation = self._store.get_investigation(investigation.investigation_id)
 
         if outcome.status is ToolCallStatus.UNCERTAIN:
-            self._pause(
+            run, investigation = self._pause_round(
                 run, investigation, AgentRunStatus.PAUSED_UNCERTAIN_STATE, now=now,
                 reason=outcome.summary, stop_reason=StopReason.UNCERTAIN_STATE,
             )
-            return self._store.get_agent_run(run.agent_run_id), investigation, True
+            return run, investigation, True
         return run, investigation, False
 
     @staticmethod
