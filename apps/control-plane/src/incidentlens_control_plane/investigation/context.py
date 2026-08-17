@@ -502,7 +502,10 @@ class AgentContextManager:
         summarized into a new memory revision, after which the context is
         re-materialized from the new boundary with the tail preserved.  Only one
         reactive compaction is allowed per round: a second attempt in the same
-        round is refused using ``CompactionState.reactive_round``.
+        round is refused using ``CompactionState.reactive_round``.  Groups are
+        read *after* the latest compact boundary (mirroring the deterministic
+        path), so a reactive compaction never re-compacts or re-summarizes
+        history an earlier compact already covered.
         """
         state = self._store.get_compaction_state(run.agent_run_id)
         if state is not None and state.reactive_round == run.usage.rounds:
@@ -513,7 +516,10 @@ class AgentContextManager:
         if keep_recent_groups < 1:
             raise ValueError("keep_recent_groups must be >= 1")
         investigation = self._store.get_investigation(run.investigation_id)
-        groups = self._transcript.group_messages(run.agent_run_id)
+        boundary = self._store.get_latest_compact_boundary(run.agent_run_id)
+        groups = self._transcript.group_messages(
+            run.agent_run_id, after=boundary.through_sequence if boundary else 0
+        )
         head, tail = groups[:-keep_recent_groups], groups[-keep_recent_groups:]
         memory = await self._semantic_compact_groups(
             run, head, reactive_round=run.usage.rounds

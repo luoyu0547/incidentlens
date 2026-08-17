@@ -168,6 +168,17 @@ def seed_groups(store: InvestigationStore, *, count: int = 8) -> None:
         )
 
 
+def boundary_sequences(store: InvestigationStore, agent_run_id: str) -> set[int]:
+    """Return the through-sequences of every compact boundary for a run."""
+    with store.connection_factory() as conn:
+        rows = conn.execute(
+            "SELECT through_sequence FROM agent_compact_boundaries "
+            "WHERE agent_run_id = ?",
+            (agent_run_id,),
+        ).fetchall()
+    return {row[0] for row in rows}
+
+
 class RecordingCompactor:
     """A compactor that records every request and returns a scripted memory.
 
@@ -427,3 +438,54 @@ async def test_reactive_compact_refuses_second_attempt_in_same_round(store) -> N
     with pytest.raises(CompactionRejected, match="reactive"):
         await manager_.reactive_compact(run, keep_recent_groups=5)
     assert len(compactor.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_reactive_compact_never_goes_backward_after_deterministic_boundary(
+    store,
+) -> None:
+    """Reactive compaction reads after the latest boundary, never re-summarizing.
+
+    A deterministic compact already summarized call-0..call-4 (boundary at
+    sequence 10, which falls *inside* the tail a full-transcript split would
+    preserve).  Reactive compaction must not build a memory revision whose
+    coverage trails that boundary, must not insert a boundary row behind it, and
+    must not replay the pre-boundary groups the prior memory already covers.
+    """
+    store.create_investigation(investigation())
+    seed_groups(store, count=8)  # call-0..call-7, sequences 1-16
+    prior_memory = memory_with(
+        evidence_ids=("ev-1",),
+        through_transcript_sequence=10,
+        revision=1,
+        memory_id="mem-run-1-1",
+    )
+    store.append_session_memory(prior_memory)
+    store.append_compact_boundary(
+        CompactBoundary(
+            agent_run_id="run-1",
+            through_sequence=10,
+            memory_revision=1,
+            summary="deterministic compact through sequence 10",
+            created_at=NOW,
+        )
+    )
+    compactor = RecordingCompactor(memory_with(evidence_ids=("ev-1",)), adapt=True)
+    run = run_with("ev-1")
+    active = await manager(store, compactor=compactor).reactive_compact(
+        run, keep_recent_groups=5
+    )
+    # No out-of-order boundary row was inserted behind the deterministic one.
+    assert boundary_sequences(store, "run-1") == {10}
+    # The memory coverage never went backward (no re-summarized revision < 10).
+    assert active.memory is not None
+    assert active.memory.through_transcript_sequence == 10
+    assert len(store.list_session_memories("run-1")) == 1
+    # Only the post-boundary groups are replayed, preserved whole.
+    replay_ids = {
+        block.tool_call_id
+        for message in active.messages
+        for block in message.blocks
+        if isinstance(block, ToolUseBlock)
+    }
+    assert replay_ids == {f"call-{index}" for index in range(5, 8)}
