@@ -47,6 +47,11 @@ from incidentlens_control_plane.investigation.compactor import (
     CompactionValidator,
     ContextCompactor,
 )
+from incidentlens_control_plane.investigation.provider import (
+    ConversationRequest,
+    InvestigationSnapshot,
+    RunCheckpoint,
+)
 from incidentlens_control_plane.investigation.state_machine import HypothesisStatus
 from incidentlens_control_plane.investigation.store import (
     CompactBoundaryConflict,
@@ -57,6 +62,7 @@ from incidentlens_control_plane.investigation.store import (
 from incidentlens_control_plane.investigation.transcript import (
     MessageGroup,
     TranscriptService,
+    group_messages,
 )
 from incidentlens_control_plane.investigation.types import (
     AgentRun,
@@ -518,7 +524,7 @@ class AgentContextManager:
 
     # -- semantic / reactive compaction ---------------------------------------
 
-    async def semantic_compact(self, run: AgentRun) -> SessionMemory:
+    async def semantic_compact(self, run: AgentRun, *, manual: bool = False) -> SessionMemory:
         """Ask the injected ``ContextCompactor`` to summarize the recent transcript.
 
         The manager builds a tool-free ``CompactionRequest`` over the groups
@@ -527,13 +533,15 @@ class AgentContextManager:
         length) and commits it with its boundary and a reset breaker state in
         one transaction.  A provider failure or an invalid revision increments
         the durable breaker; the fourth consecutive failure raises
-        ``CompactionCircuitOpen``.
+        ``CompactionCircuitOpen`` until a successful *manual* compact resets
+        the breaker -- a manual request is the one path that may attempt a
+        compaction even while the breaker is open.
         """
         boundary = self._store.get_latest_compact_boundary(run.agent_run_id)
-        groups = self._transcript.group_messages(
-            run.agent_run_id, after=boundary.through_sequence if boundary else 0
+        groups = self._tolerant_groups(
+            run.agent_run_id, boundary.through_sequence if boundary else 0
         )
-        return await self._semantic_compact_groups(run, groups)
+        return await self._semantic_compact_groups(run, groups, manual=manual)
 
     async def reactive_compact(
         self, run: AgentRun, *, keep_recent_groups: int = 5
@@ -560,15 +568,151 @@ class AgentContextManager:
             raise ValueError("keep_recent_groups must be >= 1")
         investigation = self._store.get_investigation(run.investigation_id)
         boundary = self._store.get_latest_compact_boundary(run.agent_run_id)
-        groups = self._transcript.group_messages(
-            run.agent_run_id, after=boundary.through_sequence if boundary else 0
+        groups = self._tolerant_groups(
+            run.agent_run_id, boundary.through_sequence if boundary else 0
         )
         head, tail = groups[:-keep_recent_groups], groups[-keep_recent_groups:]
+        if not head:
+            # Nothing old enough to summarize (the whole transcript is the
+            # preserved tail).  Record the one-shot reactive attempt so a second
+            # prompt-too-long in the same round pauses instead of re-compacting,
+            # then re-materialize with the existing boundary and the tail.
+            self._record_reactive_attempt(run, boundary)
+            return self._materialize_after(
+                run,
+                investigation,
+                boundary.through_sequence if boundary else 0,
+                tail,
+            )
         memory = await self._semantic_compact_groups(
             run, head, reactive_round=run.usage.rounds
         )
         return self._materialize_after(
             run, investigation, memory.through_transcript_sequence, tail
+        )
+
+    def reactive_attempted(self, agent_run_id: str, round_number: int) -> bool:
+        """Return True when a reactive compaction already ran for this round.
+
+        ``round_number`` is the run's completed-round count (``run.usage.rounds``)
+        at the time of the attempt, the same value ``reactive_compact`` stamps
+        into ``CompactionState.reactive_round``.  The orchestrator calls this
+        before attempting a second reactive compaction in one round.
+        """
+        state = self._store.get_compaction_state(agent_run_id)
+        return state is not None and state.reactive_round == round_number
+
+    async def reactive_request(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        round_number: int,
+        *,
+        tool_schemas: tuple[ToolSchema, ...] = (),
+    ) -> ConversationRequest:
+        """Compact reactively and build the retry ``ConversationRequest``.
+
+        The caller must check ``reactive_attempted`` first: only one reactive
+        compaction is allowed per round, and this method raises
+        ``CompactionRejected`` on a second attempt.  The retry request carries
+        the freshly materialized (compacted) messages; the checkpoint round is
+        the round the provider is retrying.
+        """
+        active = await self.reactive_compact(run, keep_recent_groups=5)
+        return self._conversation_request(
+            run, investigation, round_number, active, tool_schemas
+        )
+
+    def _record_reactive_attempt(self, run: AgentRun, boundary: CompactBoundary | None) -> None:
+        """Stamp ``CompactionState.reactive_round`` for the current round.
+
+        Used when a reactive compaction has nothing old enough to summarize but
+        still must count as the one-shot attempt, so a second prompt-too-long in
+        the same round pauses instead of re-compacting.
+        """
+        state = self._store.get_compaction_state(run.agent_run_id)
+        next_state = CompactionState(
+            agent_run_id=run.agent_run_id,
+            consecutive_failures=state.consecutive_failures if state else 0,
+            reactive_round=run.usage.rounds,
+            latest_boundary_sequence=(
+                boundary.through_sequence if boundary else None
+            ),
+            updated_at=self._now(),
+        )
+        self._store.put_compaction_state(next_state)
+
+    def _conversation_request(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        round_number: int,
+        active: ActiveContext,
+        tool_schemas: tuple[ToolSchema, ...],
+    ) -> ConversationRequest:
+        """Build the provider-visible ``ConversationRequest`` from an active context.
+
+        The reactive-retry path has no tool registry / project store, so the
+        investigation snapshot's ``allowed_log_paths`` is empty; the provider
+        still sees the full transcript plus the checkpoint and investigation
+        snapshot, which is what a context-overflow retry needs.
+        """
+        return ConversationRequest(
+            checkpoint=RunCheckpoint(
+                agent_run_id=run.agent_run_id,
+                kind=run.kind,
+                status=run.status,
+                round_number=round_number,
+                parent_run_id=run.parent_run_id,
+                scope=run.scope,
+                budget=run.budget,
+                usage=run.usage,
+            ),
+            investigation=InvestigationSnapshot(
+                investigation_id=investigation.investigation_id,
+                incident_id=investigation.incident_id,
+                service=investigation.service,
+                allowed_log_paths=(),
+                symptom=investigation.symptom,
+                status=investigation.status,
+                budget=investigation.budget,
+                usage=investigation.usage,
+            ),
+            task_prompt=self._task_prompt(run),
+            messages=active.messages,
+            tool_schemas=tool_schemas,
+        )
+
+    def _tolerant_groups(
+        self, agent_run_id: str, after: int
+    ) -> tuple[MessageGroup, ...]:
+        """Group a transcript, tolerating a trailing unpaired assistant tool-use.
+
+        A manual compact reads the transcript after the current round's
+        ``compact_context`` tool-use was appended but before its result, so the
+        tail is a not-yet-resolved action rather than a corrupt history.  The
+        trailing unpaired tool-use is dropped before grouping; any *interior*
+        unpaired tool-use still raises ``UnpairedToolMessage`` (a genuinely
+        corrupt transcript).  Groups whose messages are all ``<= after`` are
+        filtered out exactly like ``TranscriptService.group_messages``.
+        """
+        messages = list(self._store.list_transcript_messages(agent_run_id))
+        while messages:
+            tool_ids = {
+                block.tool_call_id
+                for block in messages[-1].blocks
+                if isinstance(block, ToolUseBlock)
+            }
+            if not tool_ids:
+                break
+            if any(isinstance(block, ToolResultBlock) for block in messages[-1].blocks):
+                break
+            messages.pop()
+        groups = group_messages(tuple(messages))
+        return tuple(
+            group
+            for group in groups
+            if any(message.sequence > after for message in group.messages)
         )
 
     async def _semantic_compact_groups(
@@ -577,10 +721,11 @@ class AgentContextManager:
         groups: tuple[MessageGroup, ...],
         *,
         reactive_round: int | None = None,
+        manual: bool = False,
     ) -> SessionMemory:
         """Compact ``groups`` through the injected compactor and commit atomically."""
         state = self._store.get_compaction_state(run.agent_run_id)
-        if state is not None and state.consecutive_failures >= 3:
+        if not manual and state is not None and state.consecutive_failures >= 3:
             raise CompactionCircuitOpen(
                 f"semantic compaction tripped the breaker for run {run.agent_run_id}: "
                 f"{state.consecutive_failures} consecutive failures"

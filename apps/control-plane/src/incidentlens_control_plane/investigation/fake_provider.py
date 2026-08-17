@@ -137,19 +137,24 @@ class FakeProviderRegistry:
     and replay them turn after turn, peeking or indexing into them at will.
     The registry also records every ``ConversationRequest`` a run received, so
     tests can assert over the continuous message history the provider saw.
+
+    A script item may be a ``FakeScriptStep`` *or* a concrete ``BaseException``
+    instance (e.g. ``PromptTooLongError()``): the provider raises exception
+    items on pop, which lets a test arrange a provider failure without wrapping
+    it in an ``ErrorStep``.
     """
 
     def __init__(self) -> None:
-        self._scripts: dict[str, list[FakeScriptStep]] = {}
+        self._scripts: dict[str, list[object]] = {}
         self._requests: dict[str, list[ConversationRequest]] = {}
 
-    def set_script(self, run_id: str, steps: Sequence[FakeScriptStep]) -> None:
+    def set_script(self, run_id: str, steps: Sequence[object]) -> None:
         """Replace the run's script with ``steps``, replayed in order."""
         self._scripts[run_id] = list(steps)
 
     def script(
-        self, run_id: str, steps: Sequence[FakeScriptStep] | None = None
-    ) -> tuple[FakeScriptStep, ...]:
+        self, run_id: str, steps: Sequence[object] | None = None
+    ) -> tuple[object, ...]:
         """Set or read the run's script, oldest first.
 
         With ``steps``, replace the run's script and return the new tuple;
@@ -159,7 +164,7 @@ class FakeProviderRegistry:
             self._scripts[run_id] = list(steps)
         return tuple(self._scripts.get(run_id, ()))
 
-    def append_step(self, run_id: str, step: FakeScriptStep) -> None:
+    def append_step(self, run_id: str, step: object) -> None:
         """Append one step to the run's script, creating it if needed."""
         self._scripts.setdefault(run_id, []).append(step)
 
@@ -171,7 +176,7 @@ class FakeProviderRegistry:
         """Return how many steps the run still has to replay."""
         return len(self._scripts.get(run_id, ()))
 
-    def peek(self, run_id: str, index: int = 0) -> FakeScriptStep:
+    def peek(self, run_id: str, index: int = 0) -> object:
         """Return step ``index`` of the run's script without consuming it."""
         steps = self._scripts.get(run_id, ())
         if index < 0 or index >= len(steps):
@@ -180,7 +185,7 @@ class FakeProviderRegistry:
             )
         return steps[index]
 
-    def pop(self, run_id: str) -> FakeScriptStep:
+    def pop(self, run_id: str) -> object:
         """Consume and return the run's next step, raising when exhausted."""
         steps = self._scripts.get(run_id)
         if not steps:
@@ -218,6 +223,10 @@ class FakeProvider(ModelProvider):
     async def generate_turn(self, request: ConversationRequest) -> AgentTurnResult:
         self._registry.record_request(request.checkpoint.agent_run_id, request)
         step = self._registry.pop(request.checkpoint.agent_run_id)
+        if isinstance(step, BaseException):
+            # A script item may be a concrete exception (e.g.
+            # ``PromptTooLongError()``) that the provider raises on pop.
+            raise step
         if isinstance(step, RequestToolsStep):
             return AgentTurnResult(
                 tool_requests=step.tool_requests,
@@ -243,6 +252,20 @@ class FakeProvider(ModelProvider):
         if isinstance(step, CrashStep):
             raise ProviderCrash(step.message)
         raise AssertionError(f"unknown script step: {step!r}")
+
+    # -- registry passthroughs used by the orchestrator test harness ----------
+
+    def script(self, run_id: str, steps: Sequence[object] | None = None) -> tuple[object, ...]:
+        """Set or read the run's script through the shared registry."""
+        return self._registry.script(run_id, steps)
+
+    def requests(self, run_id: str) -> tuple[ConversationRequest, ...]:
+        """Return a copy of the requests recorded for the run, oldest first."""
+        return self._registry.requests(run_id)
+
+    def call_count(self, run_id: str) -> int:
+        """Return how many provider calls the run has received."""
+        return len(self._registry.requests(run_id))
 
 
 __all__ = [

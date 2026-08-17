@@ -448,7 +448,14 @@ class CompactionState(BaseModel):
 
     agent_run_id: str = Field(min_length=1, max_length=120)
     consecutive_failures: int = Field(default=0, ge=0)
-    reactive_round: int | None = Field(default=None, ge=1)
+    reactive_round: int | None = Field(
+        default=None,
+        ge=0,
+        description="The run's completed-round count (``usage.rounds``) when a "
+        "one-shot reactive compaction ran, so a second prompt-too-long in the "
+        "same round pauses instead of re-compacting.  0 marks a reactive "
+        "attempt on the very first round.",
+    )
     latest_boundary_sequence: int | None = Field(default=None, ge=1)
     updated_at: datetime
 

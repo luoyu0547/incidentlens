@@ -30,6 +30,7 @@ be resumed from its latest checkpoint after a restart.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -38,20 +39,27 @@ from typing import Any
 from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.evidence.service import EvidenceService
+from incidentlens_control_plane.investigation.compactor import (
+    CompactionCircuitOpen,
+    CompactionRejected,
+)
+from incidentlens_control_plane.investigation.context import AgentContextManager
 from incidentlens_control_plane.investigation.events import InvestigationEventPublisher
 from incidentlens_control_plane.investigation.guard import InvestigationGuard
 from incidentlens_control_plane.investigation.provider import (
-    AgentTurnRequest,
     AgentTurnResult,
     ChildDelegationRequest,
+    ConversationRequest,
     InvestigationSnapshot,
     ModelProvider,
+    PromptTooLongError,
     ProviderContextMismatch,
     ProviderCrash,
     ProviderError,
     ProviderOutputRejected,
     ProviderOutputValidator,
     RunCheckpoint,
+    ToolSchema,
 )
 from incidentlens_control_plane.investigation.state_machine import (
     AGENT_RUN_STATE_MACHINE,
@@ -65,10 +73,12 @@ from incidentlens_control_plane.investigation.store import (
     AgentRunNotFound,
     AlreadyExists,
     CheckpointConflict,
+    DelegatedTaskNotFound,
     InvestigationStore,
     RoundConflict,
 )
 from incidentlens_control_plane.investigation.tool_executor import ToolExecutor
+from incidentlens_control_plane.investigation.transcript import TranscriptService
 from incidentlens_control_plane.investigation.types import (
     AgentBudget,
     AgentRun,
@@ -82,8 +92,13 @@ from incidentlens_control_plane.investigation.types import (
     Hypothesis,
     HypothesisStatus,
     Investigation,
+    MessageRole,
     StopReason,
+    TextBlock,
     ToolCall,
+    ToolResultBlock,
+    ToolUseBlock,
+    TranscriptMessage,
     UsageCounters,
 )
 from incidentlens_control_plane.logs.redaction import redact_message
@@ -124,6 +139,8 @@ class AgentOrchestrator:
         now: Callable[[], datetime] | None = None,
         events: RuntimeEventStore | None = None,
         broker: RuntimeEventBroker | None = None,
+        context_manager: AgentContextManager | None = None,
+        transcript: TranscriptService | None = None,
     ) -> None:
         if global_child_limit < 1:
             raise ValueError("global_child_limit must be >= 1")
@@ -138,6 +155,8 @@ class AgentOrchestrator:
         self._default_budget = default_budget or AgentBudget()
         self._max_provider_retries = max_provider_retries
         self._now = now or (lambda: datetime.now(UTC))
+        self._context = context_manager or AgentContextManager(store, now=self._now)
+        self._transcript = transcript or TranscriptService(store)
         self._events_pub = (
             InvestigationEventPublisher(events, broker)
             if events is not None and broker is not None
@@ -351,11 +370,51 @@ class AgentOrchestrator:
         round_number = run.usage.rounds + 1
         before_seq = 2 * round_number - 1
         post_seq = 2 * round_number
+
+        # Step 3: the initial user message is appended exactly once; a resumed
+        # run never appends a duplicate.  An append failure pauses the run
+        # UNCERTAIN before any provider turn or tool execution.
+        try:
+            self._ensure_initial_message(run, investigation, now)
+        except Exception as exc:  # noqa: BLE001 - a transcript failure must not execute
+            self._pause(
+                run, investigation, AgentRunStatus.PAUSED_UNCERTAIN_STATE,
+                now=now, reason=f"transcript append failed: {exc}",
+                stop_reason=StopReason.UNCERTAIN_STATE,
+            )
+            return self._store.get_agent_run(agent_run_id)
+
         self._write_checkpoint(run, sequence=before_seq, round_number=round_number, now=now)
 
-        request = self._build_request(run, investigation, round_number, child_reports)
+        try:
+            request = self._build_request(run, investigation, round_number, child_reports)
+        except Exception as exc:  # noqa: BLE001 - a corrupt transcript must pause, not crash
+            self._pause(
+                run, investigation, AgentRunStatus.PAUSED_UNCERTAIN_STATE,
+                now=now, reason=f"could not build provider context: {exc}",
+                stop_reason=StopReason.UNCERTAIN_STATE,
+            )
+            return self._store.get_agent_run(agent_run_id)
+
+        # Step 8: one-shot reactive retry on PromptTooLongError.  The failed
+        # prompt-too-long attempt is never counted as a completed round; both
+        # attempts are recorded in compaction state and runtime events.
         try:
             result = await self._call_provider(request)
+        except PromptTooLongError:
+            if self._context.reactive_attempted(run.agent_run_id, run.usage.rounds):
+                return self._pause_prompt_too_long(run, investigation, now)
+            try:
+                request = await self._context.reactive_request(
+                    run, investigation, round_number,
+                    tool_schemas=self._executor.tool_schemas(scope=run.scope.scope),
+                )
+            except (CompactionRejected, CompactionCircuitOpen) as exc:
+                return self._pause_prompt_too_long(run, investigation, now, reason=str(exc))
+            try:
+                result = await self._call_provider(request)
+            except PromptTooLongError:
+                return self._pause_prompt_too_long(run, investigation, now)
         except ProviderCrash as exc:
             run, investigation = await self._drain_all_children(
                 run, investigation, pending_children, child_reports, now
@@ -372,6 +431,7 @@ class AgentOrchestrator:
             )
             return self._fail(run, investigation, now, reason=str(exc))
 
+        # Count the round only after a successful provider turn.
         run = self._bump_usage(run, rounds=run.usage.rounds + 1)
         self._store.update_agent_run(run)
         run = self._store.get_agent_run(agent_run_id)
@@ -393,6 +453,20 @@ class AgentOrchestrator:
             )
             return self._fail(run, investigation, now, reason=str(exc))
 
+        # Step 4: append the assistant message BEFORE executing any tool or
+        # spawning any child (append-before-act).  On an append failure the
+        # run pauses UNCERTAIN and nothing is executed.
+        assistant_message = self._assistant_message(run, result, now)
+        try:
+            self._transcript.append_message(assistant_message)
+        except Exception as exc:  # noqa: BLE001 - a transcript failure must never execute
+            self._pause(
+                run, investigation, AgentRunStatus.PAUSED_UNCERTAIN_STATE,
+                now=now, reason=f"transcript append failed: {exc}",
+                stop_reason=StopReason.UNCERTAIN_STATE,
+            )
+            return self._store.get_agent_run(agent_run_id)
+
         # Materialize and persist proposed hypotheses.
         for proposal in result.hypotheses:
             hypothesis = self._materialize_hypothesis(run, proposal, now)
@@ -403,7 +477,52 @@ class AgentOrchestrator:
 
         evidence_before = {ref.evidence_id for ref in run.evidence}
 
-        # Act on the validated turn: stop, delegate, tools, or continue.
+        # Step 6: continue based on tool-use content in the assistant message,
+        # never on an upstream HTTP stream stop reason.
+        tool_blocks = tuple(
+            block for block in assistant_message.blocks if isinstance(block, ToolUseBlock)
+        )
+
+        if tool_blocks:
+            # Step 9: intercept the manual compact request in the loop -- it is
+            # a local control request and never reaches remote execution.
+            compact_block = next(
+                (
+                    block
+                    for block in tool_blocks
+                    if block.tool_name == "compact_context"
+                ),
+                None,
+            )
+            if compact_block is not None:
+                return await self._handle_manual_compact(
+                    run, investigation, evidence_before,
+                    round_number, post_seq, compact_block, now,
+                )
+
+            # Step 5/7: execute in concurrency-safe batches and append one
+            # matching tool-result user message.
+            run, investigation, stop, result_blocks = await self._execute_tools(
+                run, investigation, result.tool_requests, now
+            )
+            try:
+                self._append_tool_result_message(run, result_blocks, now)
+            except Exception:  # noqa: BLE001 - the next build pauses UNCERTAIN on an unpaired use
+                pass
+            run, investigation = self._reload_pair(run)
+            run, investigation = self._finish_round_counters(
+                run, investigation, evidence_before, now
+            )
+            self._store.update_agent_run(run)
+            self._store.update_investigation(investigation)
+            self._write_checkpoint(run, sequence=post_seq, round_number=round_number, now=now)
+            if stop:
+                return self._store.get_agent_run(agent_run_id)
+            # A ``delegate_child`` tool persisted a delegated-task package
+            # without spawning its loop; launch those children now.
+            self._spawn_delegated_packages(run, pending_children, now)
+            return None
+
         if result.stop_signal is not None:
             run, investigation = await self._drain_all_children(
                 run, investigation, pending_children, child_reports, now
@@ -433,24 +552,6 @@ class AgentOrchestrator:
             self._write_checkpoint(run, sequence=post_seq, round_number=round_number, now=now)
             if stop:
                 return self._store.get_agent_run(agent_run_id)
-            return None
-
-        if result.tool_requests:
-            run, investigation, stop = await self._execute_tools(
-                run, investigation, result.tool_requests, now
-            )
-            run, investigation = self._reload_pair(run)
-            run, investigation = self._finish_round_counters(
-                run, investigation, evidence_before, now
-            )
-            self._store.update_agent_run(run)
-            self._store.update_investigation(investigation)
-            self._write_checkpoint(run, sequence=post_seq, round_number=round_number, now=now)
-            if stop:
-                return self._store.get_agent_run(agent_run_id)
-            # A ``delegate_child`` tool persisted a delegated-task package
-            # without spawning its loop; launch those children now.
-            self._spawn_delegated_packages(run, pending_children, now)
             return None
 
         # Hypotheses/conclusions with no stop, delegation or tool: an
@@ -494,7 +595,7 @@ class AgentOrchestrator:
 
     # -- provider -------------------------------------------------------------
 
-    async def _call_provider(self, request: AgentTurnRequest) -> AgentTurnResult:
+    async def _call_provider(self, request: ConversationRequest) -> AgentTurnResult:
         retries = 0
         while True:
             try:
@@ -516,12 +617,16 @@ class AgentOrchestrator:
         investigation: Investigation,
         round_number: int,
         child_reports: list[ChildReport],
-    ) -> AgentTurnRequest:
+    ) -> ConversationRequest:
         project = self._projects.get(investigation.project_id)
         service = next(
             item for item in project.services if item.compose_service == investigation.service
         )
-        return AgentTurnRequest(
+        tool_schemas = self._executor.tool_schemas(scope=run.scope.scope)
+        context = self._context.build(
+            run, investigation, tool_schemas, child_reports=tuple(child_reports)
+        )
+        return ConversationRequest(
             checkpoint=RunCheckpoint(
                 agent_run_id=run.agent_run_id,
                 kind=run.kind,
@@ -542,11 +647,159 @@ class AgentOrchestrator:
                 budget=investigation.budget,
                 usage=investigation.usage,
             ),
-            hypotheses=run.hypotheses[-64:],
-            evidence=run.evidence[-100:],
-            child_reports=tuple(child_reports)[-8:],
-            tool_schemas=self._executor.tool_schemas(scope=run.scope.scope),
+            task_prompt=self._task_prompt(run),
+            messages=context.messages,
+            tool_schemas=tool_schemas,
         )
+
+    # -- transcript plumbing ---------------------------------------------------
+
+    def _task_prompt(self, run: AgentRun) -> str | None:
+        """The delegated child task prompt, or ``None`` for a parent run."""
+        if run.parent_run_id is None:
+            return None
+        try:
+            return self._store.get_delegated_task(run.agent_run_id).task_prompt
+        except DelegatedTaskNotFound:
+            return None
+
+    def _next_sequence(self, agent_run_id: str) -> int:
+        """Return the next transcript sequence for a run (append-only writer)."""
+        messages = self._store.list_transcript_messages(agent_run_id)
+        return (messages[-1].sequence + 1) if messages else 1
+
+    def _ensure_initial_message(
+        self, run: AgentRun, investigation: Investigation, now: datetime
+    ) -> None:
+        """Append the initial user message exactly once.
+
+        A run with no transcript gets a user message carrying the investigation
+        symptom (or the delegated child task prompt) plus the fixed
+        scope/budget attachment; a resumed run already has a transcript and
+        never appends a duplicate initial message.
+        """
+        if self._store.list_transcript_messages(run.agent_run_id):
+            return
+        if run.parent_run_id is None:
+            task = f"Symptom: {investigation.symptom}"
+        else:
+            task = f"Delegated task: {self._task_prompt(run)}"
+        text = "\n".join(
+            (
+                f"Investigation {investigation.investigation_id} | incident "
+                f"{investigation.incident_id} | service {investigation.service}",
+                task,
+                f"Scope: {run.scope.model_dump_json()}",
+                f"Budget: {run.budget.model_dump_json()}",
+            )
+        )
+        message = TranscriptMessage(
+            agent_run_id=run.agent_run_id,
+            sequence=1,
+            role=MessageRole.USER,
+            blocks=(TextBlock(text=text),),
+            created_at=now,
+        )
+        self._transcript.append_message(message)
+
+    def _assistant_message(
+        self, run: AgentRun, result: AgentTurnResult, now: datetime
+    ) -> TranscriptMessage:
+        """Convert a validated turn into ONE assistant transcript message.
+
+        Tool requests become ``ToolUseBlock`` values; hypotheses, conclusions,
+        delegation, the stop signal and any textual status remain a bounded text
+        JSON block (the structured copy stays in the domain stores).
+        """
+        if result.tool_requests:
+            blocks = tuple(
+                ToolUseBlock(
+                    tool_call_id=request.tool_call_id,
+                    tool_name=request.tool_name,
+                    arguments=request.arguments,
+                )
+                for request in result.tool_requests
+            )
+        else:
+            payload = {
+                "hypotheses": [
+                    proposal.model_dump(mode="json")
+                    for proposal in result.hypotheses
+                ],
+                "conclusions": [
+                    conclusion.model_dump(mode="json")
+                    for conclusion in result.conclusions
+                ],
+                "delegation": (
+                    result.child_delegation.model_dump(mode="json")
+                    if result.child_delegation is not None
+                    else None
+                ),
+                "stop": (
+                    result.stop_signal.model_dump(mode="json")
+                    if result.stop_signal is not None
+                    else None
+                ),
+            }
+            text = json.dumps(payload, default=str, sort_keys=True)[:100_000]
+            blocks = (TextBlock(text=text),)
+        return TranscriptMessage(
+            agent_run_id=run.agent_run_id,
+            sequence=self._next_sequence(run.agent_run_id),
+            role=MessageRole.ASSISTANT,
+            blocks=blocks,
+            created_at=now,
+        )
+
+    def append_tool_result(
+        self,
+        agent_run_id: str,
+        blocks: tuple[ToolResultBlock, ...],
+        now: datetime,
+    ) -> None:
+        """Append one user transcript message carrying tool-result blocks.
+
+        Public so the approval-decision path can append the FINAL result of a
+        resolved approval instead of mutating the old WAITING_APPROVAL entry.
+        """
+        if not blocks:
+            return
+        message = TranscriptMessage(
+            agent_run_id=agent_run_id,
+            sequence=self._next_sequence(agent_run_id),
+            role=MessageRole.USER,
+            blocks=blocks,
+            created_at=now,
+        )
+        self._transcript.append_message(message)
+
+    def _append_tool_result_message(
+        self, run: AgentRun, blocks: tuple[ToolResultBlock, ...], now: datetime
+    ) -> None:
+        """Append one matching tool-result user message for an assistant turn."""
+        self.append_tool_result(run.agent_run_id, blocks, now)
+
+    def _append_child_report_notification(
+        self, parent_run_id: str, report: ChildReport, now: datetime
+    ) -> None:
+        """Append a bounded ``ChildReport`` notification to the PARENT transcript.
+
+        The child's own transcript is never copied into the parent; the parent
+        only receives this bounded notification plus the recorded evidence
+        reference.  Best-effort: a failed append must not crash the parent loop.
+        """
+        text = (
+            f"Child report {report.agent_run_id} ({report.status.value}): "
+            f"{report.summary[:600]}"
+        )
+        message = TranscriptMessage(
+            agent_run_id=parent_run_id,
+            sequence=self._next_sequence(parent_run_id),
+            role=MessageRole.USER,
+            blocks=(TextBlock(text=text),),
+            created_at=now,
+        )
+        self._transcript.append_message(message)
 
     # -- stop / pause / fail --------------------------------------------------
 
@@ -693,6 +946,21 @@ class AgentOrchestrator:
             return InvestigationStatus.PAUSED_UNCERTAIN_STATE
         return InvestigationStatus.PAUSED_BUDGET
 
+    def _pause_prompt_too_long(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        now: datetime,
+        *,
+        reason: str = "model context too long after reactive compaction",
+    ) -> AgentRun:
+        """Pause a run whose context overflowed and cannot be compacted again."""
+        self._pause(
+            run, investigation, AgentRunStatus.PAUSED_BUDGET,
+            now=now, reason=reason, stop_reason=StopReason.BUDGET_OUTPUT,
+        )
+        return self._store.get_agent_run(run.agent_run_id)
+
     @staticmethod
     def _pause_status_for(reason: str) -> AgentRunStatus:
         if "no-new-evidence" in reason or "no new evidence" in reason:
@@ -725,136 +993,350 @@ class AgentOrchestrator:
         investigation: Investigation,
         tool_requests: tuple[Any, ...],
         now: datetime,
-    ) -> tuple[AgentRun, Investigation, bool]:
+    ) -> tuple[AgentRun, Investigation, bool, tuple[ToolResultBlock, ...]]:
+        """Execute tool requests in concurrency-safe batches.
+
+        Returns ``(run, investigation, stop, result_blocks)``.  ``stop`` is
+        True when the round must stop (a pause was applied); ``result_blocks``
+        carries one ``ToolResultBlock`` per request in the original order so the
+        caller can append one matching user transcript message.  A request whose
+        tool never ran (guard-blocked, or a later batch that never started
+        because an earlier batch stopped) gets a FAILED block so every assistant
+        tool-use stays paired.
+        """
+        schemas = self._executor.tool_schemas(scope=run.scope.scope)
+        schema_by_name = {schema.tool_name: schema for schema in schemas}
+        batches = self._partition_tool_batches(tool_requests, schema_by_name)
+        block_by_id: dict[str, ToolResultBlock] = {}
+        stop = False
+        for batch in batches:
+            run, investigation, blocks, stop = await self._execute_batch(
+                run, investigation, batch, now
+            )
+            for block in blocks:
+                block_by_id[block.tool_call_id] = block
+            if stop:
+                break
+        ordered: list[ToolResultBlock] = []
         for request in tool_requests:
-            # I3: reload fresh before each tool so a concurrent child's
-            # investigation-usage increments are never clobbered by a stale copy.
+            block = block_by_id.get(request.tool_call_id)
+            if block is None:
+                block = ToolResultBlock(
+                    tool_call_id=request.tool_call_id,
+                    status=ToolCallStatus.FAILED,
+                    content="tool call was not executed",
+                )
+            ordered.append(block)
+        return run, investigation, stop, tuple(ordered)
+
+    @staticmethod
+    def _partition_tool_batches(
+        tool_requests: tuple[Any, ...],
+        schema_by_name: dict[str, ToolSchema],
+    ) -> list[tuple[Any, ...]]:
+        """Partition tool requests without reordering.
+
+        Consecutive ``concurrency_safe=True`` requests share one batch (run via
+        ``asyncio.gather``); each unsafe request forms its own serial batch so a
+        mutation is never concurrent with anything else.  A failed or
+        approval-blocked serial batch therefore stops later batches before they
+        start.
+        """
+        batches: list[tuple[Any, ...]] = []
+        current: list[Any] = []
+        for request in tool_requests:
+            schema = schema_by_name.get(request.tool_name)
+            safe = bool(schema is not None and schema.concurrency_safe)
+            if not safe:
+                if current:
+                    batches.append(tuple(current))
+                    current = []
+                batches.append((request,))
+            else:
+                current.append(request)
+        if current:
+            batches.append(tuple(current))
+        return batches
+
+    async def _execute_batch(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        batch: tuple[Any, ...],
+        now: datetime,
+    ) -> tuple[AgentRun, Investigation, list[ToolResultBlock], bool]:
+        """Execute one batch and fold every outcome into the stores.
+
+        Every ``ToolCall`` that passes the guard is persisted as ``RUNNING``
+        before its coroutine starts (C1), and after the await the
+        run/investigation are reloaded so a concurrent child's usage increments
+        are never clobbered (I3).  A guard failure or a folded outcome that
+        pauses the round stops the rest of the batch; the already-started
+        coroutines always run.  Returns ``(run, investigation, result_blocks,
+        stop)`` where ``result_blocks`` covers the requests that actually ran.
+        """
+        pending: list[tuple[Any, Any]] = []
+        terminal_blocks: list[tuple[Any, ToolResultBlock]] = []
+        reserved = run.usage.tool_calls
+        stop = False
+        for request in batch:
             run = self._store.get_agent_run(run.agent_run_id)
             investigation = self._store.get_investigation(run.investigation_id)
 
-            ok, reason = self._guard.check_before_tool_execution(run, now=now)
+            # Batch-aware budget gate: reserve this tool's slot so a concurrent
+            # batch never overshoots a tool-call budget a serial loop would have
+            # caught between calls.
+            simulated = self._bump_usage(run, tool_calls=reserved)
+            ok, reason = self._guard.check_before_tool_execution(simulated, now=now)
             if not ok:
                 self._pause(
                     run, investigation, self._pause_status_for(reason), now=now,
                     reason=reason, stop_reason=self._stop_reason_for(reason),
                 )
-                return self._store.get_agent_run(run.agent_run_id), investigation, True
-
+                stop = True
+                break
+            simulated_inv = self._bump_investigation_usage(
+                investigation, tool_calls=reserved
+            )
             ok, reason = self._guard.check_investigation_before_tool_execution(
-                investigation, now=now
+                simulated_inv, now=now
             )
             if not ok:
                 self._pause(
                     run, investigation, self._pause_status_for(reason), now=now,
                     reason=reason, stop_reason=self._stop_reason_for(reason),
                 )
-                return self._store.get_agent_run(run.agent_run_id), investigation, True
+                stop = True
+                break
+            reserved += 1
 
             tool_call = self._load_or_create_tool_call(run, request, now)
             if TOOL_CALL_STATE_MACHINE.is_terminal(tool_call.status):
+                # A terminal call (resume re-entry) is never re-executed; emit a
+                # matching result so the assistant tool-use stays paired.
+                terminal_blocks.append(
+                    (
+                        request,
+                        ToolResultBlock(
+                            tool_call_id=request.tool_call_id,
+                            status=tool_call.status,
+                            content="tool call already resolved",
+                        ),
+                    )
+                )
                 continue
-            # C1: persist the execution before the executor runs, so a crash
-            # mid-tool leaves a RUNNING call that startup recovery can
-            # classify (a dangerous call is parked UNCERTAIN, never replayed).
-            # A pre-existing RUNNING call is a resume re-entry, left untouched.
             if tool_call.status is not ToolCallStatus.RUNNING:
                 tool_call = self._transition_tool_call(
                     tool_call, ToolCallStatus.RUNNING, now=now
                 )
+            pending.append((request, self._executor.execute(request, run, now=now)))
 
-            outcome = await self._executor.execute(request, run, now=now)
+        if pending:
+            if len(pending) > 1:
+                outcomes = await asyncio.gather(*(coro for _, coro in pending))
+            else:
+                outcomes = [await pending[0][1]]
+        else:
+            outcomes = []
 
-            # I3: reload fresh after the tool await so a concurrent child's
-            # investigation-usage increments are never clobbered by a stale copy.
+        folded: list[tuple[Any, ToolResultBlock]] = []
+        for request, _ in pending:
+            outcome = next(
+                item for item in outcomes if item.tool_call_id == request.tool_call_id
+            )
             run = self._store.get_agent_run(run.agent_run_id)
             investigation = self._store.get_investigation(run.investigation_id)
-
-            if outcome.status is ToolCallStatus.WAITING_APPROVAL:
-                # The call is already RUNNING (stamped before the executor ran);
-                # the executor decided approval dynamically, so the call parks
-                # on WAITING_APPROVAL until the decision lands.
-                self._transition_tool_call(
-                    tool_call, ToolCallStatus.WAITING_APPROVAL, now=now,
-                    approval_id=outcome.approval_id,
-                )
-                self._store.update_agent_run(run)
-                self._store.update_investigation(investigation)
-                self._pause(
-                    run, investigation, AgentRunStatus.WAITING_APPROVAL, now=now,
-                    reason="tool requires approval", stop_reason=StopReason.PENDING_APPROVAL,
-                )
-                return self._store.get_agent_run(run.agent_run_id), investigation, True
-
-            # I2: cumulative output budgets (run + investigation) before counting.
-            ok, reason = self._guard.can_accept_output(run, outcome.output_bytes)
-            if not ok:
-                self._transition_tool_call(
-                    tool_call, outcome.status, now=now,
-                    output_bytes=outcome.output_bytes,
-                    evidence_ids=tuple(ref.evidence_id for ref in outcome.evidence),
-                    error_redacted=outcome.error_redacted,
-                )
-                self._pause(
-                    run, investigation, AgentRunStatus.PAUSED_BUDGET,
-                    now=now, reason=reason, stop_reason=StopReason.BUDGET_OUTPUT,
-                )
-                return self._store.get_agent_run(run.agent_run_id), investigation, True
-            ok, reason = self._guard.can_investigation_accept_output(
-                investigation, outcome.output_bytes
+            run, investigation, inner_stop = await self._fold_tool_outcome(
+                run, investigation, request, outcome, now
             )
-            if not ok:
-                self._transition_tool_call(
-                    tool_call, outcome.status, now=now,
-                    output_bytes=outcome.output_bytes,
-                    evidence_ids=tuple(ref.evidence_id for ref in outcome.evidence),
-                    error_redacted=outcome.error_redacted,
-                )
-                self._pause(
-                    run, investigation, AgentRunStatus.PAUSED_BUDGET,
-                    now=now, reason=reason, stop_reason=StopReason.BUDGET_OUTPUT,
-                )
-                return self._store.get_agent_run(run.agent_run_id), investigation, True
+            folded.append((request, self._tool_result_block(outcome)))
+            if inner_stop:
+                stop = True
+                break
+        blocks = self._ordered_blocks(batch, terminal_blocks, folded)
+        return run, investigation, blocks, stop
 
+    @staticmethod
+    def _ordered_blocks(
+        batch: tuple[Any, ...],
+        terminal_blocks: list[tuple[Any, ToolResultBlock]],
+        folded: list[tuple[Any, ToolResultBlock]],
+    ) -> list[ToolResultBlock]:
+        """Merge folded and terminal result blocks in the original request order."""
+        order = {
+            request.tool_call_id: index for index, request in enumerate(batch)
+        }
+        merged = terminal_blocks + folded
+        return [block for _, block in sorted(merged, key=lambda item: order[item[0].tool_call_id])]
+
+    async def _fold_tool_outcome(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        request: Any,
+        outcome: Any,
+        now: datetime,
+    ) -> tuple[AgentRun, Investigation, bool]:
+        """Fold one executed tool outcome into the stores.
+
+        Returns ``(run, investigation, stop)`` where ``stop`` is True when the
+        round must stop (a pause was already applied).
+        """
+        if outcome.status is ToolCallStatus.WAITING_APPROVAL:
+            # The call is already RUNNING (stamped before the executor ran); the
+            # executor decided approval dynamically, so the call parks on
+            # WAITING_APPROVAL until the decision lands.
+            tool_call = self._store.get_tool_call(request.tool_call_id)
             self._transition_tool_call(
-                tool_call, outcome.status, now=now,
+                tool_call, ToolCallStatus.WAITING_APPROVAL, now=now,
+                approval_id=outcome.approval_id,
+            )
+            self._store.update_agent_run(run)
+            self._store.update_investigation(investigation)
+            self._pause(
+                run, investigation, AgentRunStatus.WAITING_APPROVAL, now=now,
+                reason="tool requires approval", stop_reason=StopReason.PENDING_APPROVAL,
+            )
+            return self._store.get_agent_run(run.agent_run_id), investigation, True
+
+        # I2: cumulative output budgets (run + investigation) before counting.
+        ok, reason = self._guard.can_accept_output(run, outcome.output_bytes)
+        if not ok:
+            self._transition_tool_call(
+                self._store.get_tool_call(request.tool_call_id),
+                outcome.status, now=now,
                 output_bytes=outcome.output_bytes,
                 evidence_ids=tuple(ref.evidence_id for ref in outcome.evidence),
                 error_redacted=outcome.error_redacted,
             )
-            # I1: enforce the evidence budget (run + investigation) when attaching.
-            try:
-                run, new_evidence = self._append_evidence(
-                    run, investigation, outcome.evidence, now
-                )
-            except _EvidenceBudgetExceeded:
-                self._pause(
-                    run, investigation, AgentRunStatus.PAUSED_BUDGET,
-                    now=now, reason="evidence budget exhausted",
-                    stop_reason=StopReason.BUDGET_EVIDENCE,
-                )
-                return self._store.get_agent_run(run.agent_run_id), investigation, True
-            run = self._bump_usage(
-                run,
-                tool_calls=run.usage.tool_calls + 1,
-                total_output_bytes=run.usage.total_output_bytes + outcome.output_bytes,
+            self._pause(
+                run, investigation, AgentRunStatus.PAUSED_BUDGET,
+                now=now, reason=reason, stop_reason=StopReason.BUDGET_OUTPUT,
             )
-            investigation = self._bump_investigation_usage(
-                investigation,
-                tool_calls=investigation.usage.tool_calls + 1,
-                total_output_bytes=investigation.usage.total_output_bytes + outcome.output_bytes,
-                evidence_count=investigation.usage.evidence_count + new_evidence,
+            return self._store.get_agent_run(run.agent_run_id), investigation, True
+        ok, reason = self._guard.can_investigation_accept_output(
+            investigation, outcome.output_bytes
+        )
+        if not ok:
+            self._transition_tool_call(
+                self._store.get_tool_call(request.tool_call_id),
+                outcome.status, now=now,
+                output_bytes=outcome.output_bytes,
+                evidence_ids=tuple(ref.evidence_id for ref in outcome.evidence),
+                error_redacted=outcome.error_redacted,
             )
-            self._store.update_agent_run(run)
-            self._store.update_investigation(investigation)
-            run = self._store.get_agent_run(run.agent_run_id)
-            investigation = self._store.get_investigation(investigation.investigation_id)
+            self._pause(
+                run, investigation, AgentRunStatus.PAUSED_BUDGET,
+                now=now, reason=reason, stop_reason=StopReason.BUDGET_OUTPUT,
+            )
+            return self._store.get_agent_run(run.agent_run_id), investigation, True
 
-            if outcome.status is ToolCallStatus.UNCERTAIN:
-                self._pause(run, investigation, AgentRunStatus.PAUSED_UNCERTAIN_STATE, now=now,
-                            reason=outcome.summary, stop_reason=StopReason.UNCERTAIN_STATE)
-                return self._store.get_agent_run(run.agent_run_id), investigation, True
+        self._transition_tool_call(
+            self._store.get_tool_call(request.tool_call_id),
+            outcome.status, now=now,
+            output_bytes=outcome.output_bytes,
+            evidence_ids=tuple(ref.evidence_id for ref in outcome.evidence),
+            error_redacted=outcome.error_redacted,
+        )
+        # I1: enforce the evidence budget (run + investigation) when attaching.
+        try:
+            run, new_evidence = self._append_evidence(
+                run, investigation, outcome.evidence, now
+            )
+        except _EvidenceBudgetExceeded:
+            self._pause(
+                run, investigation, AgentRunStatus.PAUSED_BUDGET,
+                now=now, reason="evidence budget exhausted",
+                stop_reason=StopReason.BUDGET_EVIDENCE,
+            )
+            return self._store.get_agent_run(run.agent_run_id), investigation, True
+        run = self._bump_usage(
+            run,
+            tool_calls=run.usage.tool_calls + 1,
+            total_output_bytes=run.usage.total_output_bytes + outcome.output_bytes,
+        )
+        investigation = self._bump_investigation_usage(
+            investigation,
+            tool_calls=investigation.usage.tool_calls + 1,
+            total_output_bytes=investigation.usage.total_output_bytes + outcome.output_bytes,
+            evidence_count=investigation.usage.evidence_count + new_evidence,
+        )
+        self._store.update_agent_run(run)
+        self._store.update_investigation(investigation)
+        run = self._store.get_agent_run(run.agent_run_id)
+        investigation = self._store.get_investigation(investigation.investigation_id)
 
+        if outcome.status is ToolCallStatus.UNCERTAIN:
+            self._pause(
+                run, investigation, AgentRunStatus.PAUSED_UNCERTAIN_STATE, now=now,
+                reason=outcome.summary, stop_reason=StopReason.UNCERTAIN_STATE,
+            )
+            return self._store.get_agent_run(run.agent_run_id), investigation, True
         return run, investigation, False
+
+    @staticmethod
+    def _tool_result_block(outcome: Any) -> ToolResultBlock:
+        """Build the model-visible result block for one tool outcome."""
+        content = outcome.summary or (outcome.error_redacted or "")
+        if outcome.status is ToolCallStatus.WAITING_APPROVAL and outcome.approval_id:
+            content = content or f"approval_id={outcome.approval_id}"
+        return ToolResultBlock(
+            tool_call_id=outcome.tool_call_id,
+            status=outcome.status,
+            content=content[:200_000],
+            evidence_ids=tuple(ref.evidence_id for ref in outcome.evidence),
+        )
+
+    async def _handle_manual_compact(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        evidence_before: set[str],
+        round_number: int,
+        post_seq: int,
+        block: ToolUseBlock,
+        now: datetime,
+    ) -> AgentRun | None:
+        """Resolve a manual ``compact_context`` request without remote execution.
+
+        On success the compact boundary and memory revision are committed by the
+        context manager (which also resets the failure breaker) and a matching
+        ``[Context compacted]`` tool result is appended; on failure a FAILED
+        tool result is appended and the run continues under the existing
+        deterministic compaction path -- the previous valid boundary is never
+        erased.
+        """
+        try:
+            await self._context.semantic_compact(run, manual=True)
+            result_block = ToolResultBlock(
+                tool_call_id=block.tool_call_id,
+                status=ToolCallStatus.SUCCEEDED,
+                content="[Context compacted]",
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed compact is safe to continue from
+            result_block = ToolResultBlock(
+                tool_call_id=block.tool_call_id,
+                status=ToolCallStatus.FAILED,
+                content=redact_message(str(exc), max_length=2_000).message_redacted,
+            )
+        try:
+            self._append_tool_result_message(run, (result_block,), now)
+        except Exception as exc:  # noqa: BLE001 - a transcript failure must pause
+            self._pause(
+                run, investigation, AgentRunStatus.PAUSED_UNCERTAIN_STATE,
+                now=now, reason=f"transcript append failed: {exc}",
+                stop_reason=StopReason.UNCERTAIN_STATE,
+            )
+            return self._store.get_agent_run(run.agent_run_id)
+        run = self._store.get_agent_run(run.agent_run_id)
+        investigation = self._store.get_investigation(run.investigation_id)
+        run, investigation = self._finish_round_counters(
+            run, investigation, evidence_before, now
+        )
+        self._store.update_agent_run(run)
+        self._store.update_investigation(investigation)
+        self._write_checkpoint(run, sequence=post_seq, round_number=round_number, now=now)
+        return None
 
     def _load_or_create_tool_call(self, run: AgentRun, request: Any, now: datetime) -> ToolCall:
         try:
@@ -1203,6 +1685,10 @@ class AgentOrchestrator:
                     report, ref = task.result()
                 except BaseException:
                     continue
+                try:
+                    self._append_child_report_notification(run.agent_run_id, report, now)
+                except Exception:  # noqa: BLE001 - the report still rides in child_reports
+                    pass
                 run, new_evidence = self._append_evidence(
                     run, investigation, (ref,), now
                 )
@@ -1250,6 +1736,10 @@ class AgentOrchestrator:
                 if isinstance(outcome, BaseException):
                     continue
                 report, ref = outcome
+                try:
+                    self._append_child_report_notification(run.agent_run_id, report, now)
+                except Exception:  # noqa: BLE001 - the report still rides in child_reports
+                    pass
                 run, new_evidence = self._append_evidence(
                     run, investigation, (ref,), now
                 )

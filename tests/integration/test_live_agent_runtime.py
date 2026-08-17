@@ -65,10 +65,10 @@ from incidentlens_control_plane.investigation.fake_provider import (
     StopStep,
 )
 from incidentlens_control_plane.investigation.provider import (
-    AgentTurnRequest,
     AgentTurnResult,
     ChildDelegationRequest,
     Conclusion,
+    ConversationRequest,
     ModelProvider,
     StopReason,
     StopSignal,
@@ -86,7 +86,9 @@ from incidentlens_control_plane.investigation.types import (
     AgentScope,
     Investigation,
     InvestigationBudget,
+    TextBlock,
     ToolCall,
+    ToolResultBlock,
     UsageCounters,
 )
 from incidentlens_control_plane.logs.types import LogScope
@@ -301,34 +303,61 @@ class _GroundedStopProvider(ModelProvider):
 
     A ``StopStep`` that declares COMPLETED without a conclusion is completed
     with a grounded conclusion citing the run's latest evidence (from the
-    bounded request context), so the live test does not need to predict
+    bounded conversation messages), so the live test does not need to predict
     hash-derived evidence ids.
     """
 
     def __init__(self, delegate: ModelProvider) -> None:
         self._delegate = delegate
 
-    async def generate_turn(self, request: AgentTurnRequest) -> AgentTurnResult:
+    async def generate_turn(self, request: ConversationRequest) -> AgentTurnResult:
         result = await self._delegate.generate_turn(request)
         if (
             result.stop_signal is not None
             and result.stop_signal.stop_reason is StopReason.COMPLETED
             and not result.conclusions
-            and request.evidence
         ):
-            latest = request.evidence[-1]
-            result = result.model_copy(
-                update={
-                    "conclusions": (
-                        Conclusion(
-                            summary="root cause identified from collected evidence",
-                            facts=(latest.summary[:200],),
-                            evidence_ids=(latest.evidence_id,),
-                        ),
-                    )
-                }
-            )
+            latest = _latest_owned_evidence_id(request)
+            if latest is not None:
+                result = result.model_copy(
+                    update={
+                        "conclusions": (
+                            Conclusion(
+                                summary="root cause identified from collected evidence",
+                                facts=(latest,),
+                                evidence_ids=(latest,),
+                            ),
+                        )
+                    }
+                )
         return result
+
+
+def _latest_owned_evidence_id(request: ConversationRequest) -> str | None:
+    """Return the most recent evidence id the run owns, from the bounded context.
+
+    Scans the transcript for the newest tool-result evidence, falling back to
+    the synthesized header's "Evidence collected (recent)" list when no tool
+    result has been persisted yet.
+    """
+    header_ids: list[str] = []
+    for message in request.messages:
+        for block in message.blocks:
+            if isinstance(block, ToolResultBlock) and block.evidence_ids:
+                return block.evidence_ids[0]
+            if isinstance(block, TextBlock):
+                marker = "Evidence collected (recent):"
+                if marker in block.text:
+                    tail = block.text.split(marker, 1)[1]
+                    for line in tail.splitlines()[1:]:
+                        if not line.startswith("- "):
+                            break
+                        candidate = line[2:].split(":", 1)[0].strip()
+                        if candidate:
+                            header_ids.append(candidate)
+    if header_ids:
+        return header_ids[-1]
+    return None
 
 
 def _build_runtime(

@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from incidentlens_control_plane.evidence.types import EvidenceKind
+from incidentlens_control_plane.investigation.context import AgentContextManager
 from incidentlens_control_plane.investigation.fake_provider import (
     CrashStep,
     DelegateChildStep,
@@ -24,13 +26,15 @@ from incidentlens_control_plane.investigation.fake_provider import (
 )
 from incidentlens_control_plane.investigation.orchestrator import AgentOrchestrator
 from incidentlens_control_plane.investigation.provider import (
-    AgentTurnRequest,
     AgentTurnResult,
     ChildDelegationRequest,
     Conclusion,
+    ConversationRequest,
     HypothesisProposal,
     ModelProvider,
+    PromptTooLongError,
     StopSignal,
+    ToolRequest,
 )
 from incidentlens_control_plane.investigation.service import (
     InvestigationAlreadyTerminal,
@@ -41,6 +45,7 @@ from incidentlens_control_plane.investigation.state_machine import (
     InvestigationStatus,
     ToolCallStatus,
 )
+from incidentlens_control_plane.investigation.transcript import TranscriptService
 from incidentlens_control_plane.investigation.types import (
     AgentBudget,
     AgentRun,
@@ -51,7 +56,12 @@ from incidentlens_control_plane.investigation.types import (
     EvidenceReference,
     Investigation,
     InvestigationBudget,
+    MessageRole,
+    SessionMemory,
     StopReason,
+    TextBlock,
+    ToolResultBlock,
+    TranscriptMessage,
     UsageCounters,
 )
 from incidentlens_control_plane.logs.types import LogScope
@@ -74,38 +84,65 @@ from investigation.test_tool_executor import (
 NOW = datetime(2026, 8, 12, 10, 0, 0, tzinfo=UTC)
 
 
+def _latest_owned_evidence_id(request: ConversationRequest) -> str | None:
+    """Return the most recent evidence id the run owns, from the bounded context.
+
+    Scans the transcript for the newest tool-result evidence, falling back to
+    the synthesized header's "Evidence collected (recent)" list when no tool
+    result has been persisted yet (a seeded-evidence run).
+    """
+    header_ids: list[str] = []
+    for message in request.messages:
+        for block in message.blocks:
+            if isinstance(block, ToolResultBlock) and block.evidence_ids:
+                return block.evidence_ids[0]
+            if isinstance(block, TextBlock):
+                marker = "Evidence collected (recent):"
+                if marker in block.text:
+                    tail = block.text.split(marker, 1)[1]
+                    for line in tail.splitlines()[1:]:
+                        if not line.startswith("- "):
+                            break
+                        candidate = line[2:].split(":", 1)[0].strip()
+                        if candidate:
+                            header_ids.append(candidate)
+    if header_ids:
+        return header_ids[-1]
+    return None
+
+
 class GroundedStopProvider(ModelProvider):
     """Wrap a scripted provider to ground a bare COMPLETED stop.
 
     A ``StopStep`` that declares COMPLETED without a conclusion is completed
-    with a grounded conclusion citing the run's latest evidence (from the
-    bounded request context), so tests do not need to predict hash-derived
-    evidence ids.
+    with a grounded conclusion citing the run's latest evidence (derived from
+    the bounded conversation messages), so tests do not need to predict
+    hash-derived evidence ids.
     """
 
     def __init__(self, delegate: ModelProvider) -> None:
         self._delegate = delegate
 
-    async def generate_turn(self, request: AgentTurnRequest) -> AgentTurnResult:
+    async def generate_turn(self, request: ConversationRequest) -> AgentTurnResult:
         result = await self._delegate.generate_turn(request)
         if (
             result.stop_signal is not None
             and result.stop_signal.stop_reason is StopReason.COMPLETED
             and not result.conclusions
-            and request.evidence
         ):
-            latest = request.evidence[-1]
-            result = result.model_copy(
-                update={
-                    "conclusions": (
-                        Conclusion(
-                            summary="root cause identified from collected evidence",
-                            facts=(latest.summary[:200],),
-                            evidence_ids=(latest.evidence_id,),
-                        ),
-                    )
-                }
-            )
+            latest = _latest_owned_evidence_id(request)
+            if latest is not None:
+                result = result.model_copy(
+                    update={
+                        "conclusions": (
+                            Conclusion(
+                                summary="root cause identified from collected evidence",
+                                facts=(latest,),
+                                evidence_ids=(latest,),
+                            ),
+                        )
+                    }
+                )
         return result
 
 
@@ -1301,3 +1338,259 @@ async def test_provider_crash_fails_run(tmp_path: Any) -> None:
 
     assert final.status is AgentRunStatus.FAILED
     assert service.get_investigation("inv-1").status is InvestigationStatus.FAILED
+
+
+# ---------------------------------------------------------------------------
+# Continuous-loop harness (runtime fixture) + Step 1 loop continuity / retry
+# ---------------------------------------------------------------------------
+
+
+class _RemoteSpy:
+    """Counts remote write_bytes calls seen by the harness transports."""
+
+    def __init__(self) -> None:
+        self.write_calls = 0
+
+
+class _WriteCountingTransport:
+    """Proxies a HarnessTransport and counts write_bytes calls."""
+
+    def __init__(self, inner: Any, spy: _RemoteSpy) -> None:
+        self._inner = inner
+        self._spy = spy
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def write_bytes(
+        self, path: Any, content: bytes, *, mode: int = 0o644, exclusive: bool = False
+    ) -> None:
+        self._spy.write_calls += 1
+        return await self._inner.write_bytes(path, content, mode=mode, exclusive=exclusive)
+
+
+class _WriteCountingFactory:
+    """A transport factory wrapper that counts remote writes."""
+
+    def __init__(self, factory: Any, spy: _RemoteSpy) -> None:
+        self._factory = factory
+        self._spy = spy
+
+    async def connect(self, target: Any) -> _WriteCountingTransport:
+        transport = await self._factory.connect(target)
+        return _WriteCountingTransport(transport, self._spy)
+
+
+class _FailingTranscriptService(TranscriptService):
+    """A transcript service that can fail the next append (disk-full simulation)."""
+
+    def __init__(self, store: Any) -> None:
+        super().__init__(store)
+        self.fail_next_append: Exception | None = None
+
+    def append_message(self, message: TranscriptMessage) -> TranscriptMessage:
+        if self.fail_next_append is not None:
+            error = self.fail_next_append
+            self.fail_next_append = None
+            raise error
+        return super().append_message(message)
+
+
+class _FakeCompactor:
+    """Deterministic semantic compactor for the harness (no model involved)."""
+
+    def __init__(self, store: Any) -> None:
+        self._store = store
+
+    async def compact(self, request: Any) -> SessionMemory:
+        run = self._store.get_agent_run(request.agent_run_id)
+        investigation = self._store.get_investigation(run.investigation_id)
+        prior = request.prior_memory
+        revision = (prior.revision + 1) if prior is not None else 1
+        return SessionMemory(
+            memory_id=f"mem-{request.agent_run_id}-{revision}",
+            agent_run_id=request.agent_run_id,
+            investigation_id=investigation.investigation_id,
+            revision=revision,
+            through_round=run.usage.rounds,
+            through_transcript_sequence=request.through_sequence,
+            objective="compacted transcript summary",
+            confirmed_facts=(),
+            active_hypotheses=(),
+            open_questions=(),
+            completed_actions=(),
+            child_findings=(),
+            evidence_ids=tuple(
+                dict.fromkeys(ref.evidence_id for ref in run.evidence)
+            ),
+            user_constraints=(),
+            todos=(),
+            next_actions=(),
+            created_at=NOW,
+        )
+
+
+@pytest.fixture
+def runtime(tmp_path: Any) -> SimpleNamespace:
+    """Wire the continuous-loop harness: store + transcript + context + fake.
+
+    ``runtime.fake`` is the scripted ``FakeProvider``, ``runtime.orchestrator``
+    runs the loop, ``runtime.transcript`` can fail its next append, and
+    ``runtime.remote`` counts remote write calls so append-before-act tests can
+    prove nothing executed.
+    """
+    base_factory = HarnessTransportFactory()
+    remote = _RemoteSpy()
+    harness = build_harness(
+        tmp_path, transport_factory=_WriteCountingFactory(base_factory, remote)
+    )
+    _make_investigation(harness, status=InvestigationStatus.RUNNING)
+    _make_parent_run(
+        harness,
+        evidence=(
+            EvidenceReference(
+                evidence_id="ev-1",
+                operation_id="seed",
+                summary="seeded evidence",
+            ),
+        ),
+    )
+    store = harness.investigations
+    transcript = _FailingTranscriptService(store)
+    # Pre-seed the initial user message so ``_ensure_initial_message`` is a
+    # no-op and ``fail_next_append`` targets the assistant message.
+    transcript.append_message(
+        TranscriptMessage(
+            agent_run_id="run-1",
+            sequence=1,
+            role=MessageRole.USER,
+            blocks=(TextBlock(text="Symptom: checkout requests are failing"),),
+            created_at=NOW,
+        )
+    )
+    registry = FakeProviderRegistry()
+    provider = FakeProvider(registry)
+    context = AgentContextManager(
+        store,
+        now=lambda: NOW,
+        compactor=_FakeCompactor(store),
+    )
+    orchestrator = AgentOrchestrator(
+        store=store,
+        provider=provider,
+        executor=harness.executor,
+        evidence=harness.evidence,
+        projects=harness.projects,
+        sessions=harness.sessions,
+        now=lambda: NOW,
+        transcript=transcript,
+        context_manager=context,
+    )
+    return SimpleNamespace(
+        fake=provider,
+        orchestrator=orchestrator,
+        transcript=transcript,
+        remote=remote,
+        harness=harness,
+        store=store,
+    )
+
+
+def request_registry_info() -> RequestToolsStep:
+    """One turn proposing a registry_info call with a stable tool_call_id."""
+    return RequestToolsStep(
+        tool_requests=(
+            ToolRequest(
+                tool_call_id="registry-call",
+                tool_name="registry_info",
+                arguments={},
+            ),
+        )
+    )
+
+
+def request_file_write() -> RequestToolsStep:
+    """One turn proposing a file_write call (never reached when append fails)."""
+    return RequestToolsStep(
+        tool_requests=(
+            ToolRequest(
+                tool_call_id="write-call-1",
+                tool_name="file_write",
+                arguments={
+                    "service_name": SERVICE,
+                    "path": "/opt/payments/new-file.txt",
+                    "content": "hello",
+                },
+            ),
+        )
+    )
+
+
+def completed_step(evidence_id: str) -> StopStep:
+    """A COMPLETED stop grounded in the named evidence id."""
+    return StopStep(
+        stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="done"),
+        conclusion=Conclusion(
+            summary="root cause identified", evidence_ids=(evidence_id,)
+        ),
+    )
+
+
+def compact_context_request() -> RequestToolsStep:
+    """One turn proposing the local ``compact_context`` control request."""
+    return RequestToolsStep(
+        tool_requests=(
+            ToolRequest(
+                tool_call_id="compact-call",
+                tool_name="compact_context",
+                arguments={},
+            ),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_result_is_in_next_model_conversation(runtime: SimpleNamespace) -> None:
+    runtime.fake.script("run-1", [request_registry_info(), completed_step("ev-1")])
+    await runtime.orchestrator.run("run-1")
+    second = runtime.fake.requests("run-1")[1]
+    assert any(
+        isinstance(block, ToolResultBlock) and block.tool_call_id == "registry-call"
+        for message in second.messages
+        for block in message.blocks
+    )
+
+
+@pytest.mark.asyncio
+async def test_prompt_too_long_compacts_once_then_retries(runtime: SimpleNamespace) -> None:
+    runtime.fake.script("run-1", [PromptTooLongError(), completed_step("ev-1")])
+    run = await runtime.orchestrator.run("run-1")
+    assert run.status is AgentRunStatus.COMPLETED
+    assert runtime.fake.call_count("run-1") == 2
+
+
+@pytest.mark.asyncio
+async def test_second_prompt_too_long_pauses(runtime: SimpleNamespace) -> None:
+    runtime.fake.script("run-1", [PromptTooLongError(), PromptTooLongError()])
+    run = await runtime.orchestrator.run("run-1")
+    assert run.status is AgentRunStatus.PAUSED_BUDGET
+    assert runtime.fake.call_count("run-1") == 2
+
+
+@pytest.mark.asyncio
+async def test_transcript_failure_prevents_tool_execution(runtime: SimpleNamespace) -> None:
+    runtime.fake.script("run-1", [request_file_write()])
+    runtime.transcript.fail_next_append = OSError("disk full")
+    run = await runtime.orchestrator.run("run-1")
+    assert run.status is AgentRunStatus.PAUSED_UNCERTAIN_STATE
+    assert runtime.remote.write_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_manual_compact_commits_memory_and_continues(runtime: SimpleNamespace) -> None:
+    """A ``compact_context`` request compacts locally and the run continues."""
+    runtime.fake.script("run-1", [compact_context_request(), completed_step("ev-1")])
+    run = await runtime.orchestrator.run("run-1")
+    assert run.status is AgentRunStatus.COMPLETED
+    assert runtime.store.get_latest_session_memory("run-1") is not None
+    assert runtime.store.get_latest_compact_boundary("run-1") is not None

@@ -42,7 +42,7 @@ from incidentlens_control_plane.investigation.store import (
     InvestigationNotFound,
     InvestigationStore,
 )
-from incidentlens_control_plane.investigation.tool_executor import ToolExecutor
+from incidentlens_control_plane.investigation.tool_executor import ToolExecutor, ToolOutcome
 from incidentlens_control_plane.investigation.types import (
     AgentBudget,
     AgentRun,
@@ -54,8 +54,10 @@ from incidentlens_control_plane.investigation.types import (
     InvestigationBudget,
     RegistryProposalStatus,
     RegistryUpdateProposal,
+    SessionMemory,
     StopReason,
     ToolCall,
+    ToolResultBlock,
 )
 
 # States from which an approval decision may resume an agent run.  A CREATED or
@@ -310,6 +312,10 @@ class InvestigationService:
     def list_checkpoints(self, agent_run_id: str) -> tuple[Checkpoint, ...]:
         return self._store.list_checkpoints(agent_run_id)
 
+    def list_session_memories(self, agent_run_id: str) -> tuple[SessionMemory, ...]:
+        """Return compact memory revisions for an agent run."""
+        return self._store.list_session_memories(agent_run_id)
+
     def list_waiting_approval_runs(self) -> tuple[AgentRun, ...]:
         return self._store.list_waiting_approval_runs()
 
@@ -411,6 +417,15 @@ class InvestigationService:
             self._store.transition_tool_call_status(
                 tool_call.tool_call_id, ToolCallStatus.CANCELLED, now=now
             )
+            self._append_approval_result(
+                tool_call.agent_run_id,
+                ToolResultBlock(
+                    tool_call_id=tool_call.tool_call_id,
+                    status=ToolCallStatus.CANCELLED,
+                    content="approval rejected",
+                ),
+                now,
+            )
             await self._resume_after_decision(tool_call.agent_run_id, now)
             return ApprovalDecisionOutcome(
                 approval_id=approval.approval_id,
@@ -483,6 +498,11 @@ class InvestigationService:
             self._append_tool_outcome_evidence(
                 self._store.get_agent_run(tool_call.agent_run_id), outcome, now
             )
+        # The final result is appended as a NEW transcript message; the old
+        # WAITING_APPROVAL entry is never mutated.
+        self._append_approval_result(
+            tool_call.agent_run_id, _approval_result_block(outcome), now
+        )
         if outcome.status is ToolCallStatus.UNCERTAIN:
             # Mirror the main loop: an approved tool whose result could not be
             # confirmed parks the run (and its parent investigation)
@@ -509,6 +529,19 @@ class InvestigationService:
             applied=outcome.status is ToolCallStatus.SUCCEEDED,
             consumed=True,
         )
+
+    def _append_approval_result(
+        self, agent_run_id: str, block: ToolResultBlock, now: datetime
+    ) -> None:
+        """Append the final tool result of a resolved approval to the transcript.
+
+        Best-effort: the tool call and evidence stores are the durable source of
+        truth; a transcript append failure must not break the decision flow.
+        """
+        try:
+            self._orchestrator.append_tool_result(agent_run_id, (block,), now)
+        except Exception:  # noqa: BLE001 - the decision path must not fail on a transcript write
+            pass
 
     async def _handle_proposal_approval(
         self,
@@ -711,6 +744,19 @@ class TooManyActiveInvestigations(Exception):
 
 class NotAcceptingInvestigations(Exception):
     """Raised when the runtime is shutting down and refuses new investigations."""
+
+
+def _approval_result_block(outcome: ToolOutcome) -> ToolResultBlock:
+    """Build the final tool-result block for a resolved approval re-execution."""
+    content = outcome.summary or (outcome.error_redacted or "")
+    if outcome.status is ToolCallStatus.WAITING_APPROVAL and outcome.approval_id:
+        content = content or f"approval_id={outcome.approval_id}"
+    return ToolResultBlock(
+        tool_call_id=outcome.tool_call_id,
+        status=outcome.status,
+        content=content[:200_000],
+        evidence_ids=tuple(ref.evidence_id for ref in outcome.evidence),
+    )
 
 
 def _empty_usage():
