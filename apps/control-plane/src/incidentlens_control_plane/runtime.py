@@ -202,6 +202,8 @@ def build_runtime(
             tool_result_budget_chars=settings.agent_tool_result_budget_chars,
             max_message_groups=settings.agent_context_max_message_groups,
             keep_recent_tool_results=settings.agent_context_keep_recent_tool_results,
+            compact_max_failures=settings.agent_compact_max_failures,
+            reactive_keep_recent_groups=settings.agent_reactive_keep_recent_groups,
         ),
     )
     orchestrator = AgentOrchestrator(
