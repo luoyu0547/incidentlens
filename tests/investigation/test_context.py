@@ -715,3 +715,13 @@ def test_calibration_only_lowers_chars_per_token() -> None:
     # an estimate that already covers actual usage is never raised optimistically
     estimator.calibrate(actual_input_tokens=10, estimated_input_tokens=after)
     assert estimator.count_text(text) == after
+
+
+# -- compaction policy limits --------------------------------------------------
+
+
+def test_context_policy_rejects_invalid_compaction_limits() -> None:
+    with pytest.raises(ValueError, match="compact_max_failures"):
+        ContextBudgetPolicy(compact_max_failures=0)
+    with pytest.raises(ValueError, match="reactive_keep_recent_groups"):
+        ContextBudgetPolicy(reactive_keep_recent_groups=0)

@@ -22,6 +22,7 @@ from incidentlens_control_plane.investigation.compactor import (
 from incidentlens_control_plane.investigation.context import (
     ActiveContext,
     AgentContextManager,
+    ContextBudgetPolicy,
 )
 from incidentlens_control_plane.investigation.state_machine import (
     AgentRunStatus,
@@ -256,6 +257,20 @@ async def test_three_failures_open_circuit(store) -> None:
     assert compactor.calls == 3
 
 
+@pytest.mark.asyncio
+async def test_configured_breaker_threshold_is_enforced(store) -> None:
+    manager_ = AgentContextManager(
+        store,
+        compactor=FailingCompactor(),
+        policy=ContextBudgetPolicy(compact_max_failures=1),
+        now=lambda: NOW,
+    )
+    with pytest.raises(CompactionRejected):
+        await manager_.semantic_compact(run_with("ev-1"))
+    with pytest.raises(CompactionCircuitOpen):
+        await manager_.semantic_compact(run_with("ev-1"))
+
+
 # -- validation ----------------------------------------------------------------
 
 
@@ -398,6 +413,38 @@ def test_commit_compaction_conflict_rolls_back_all_three(store) -> None:
     assert store.get_compaction_state("run-1") is None
 
 
+@pytest.mark.asyncio
+async def test_failed_reactive_compact_preserves_previous_boundary(store) -> None:
+    """A failed reactive compact does not overwrite the previous boundary."""
+    store.create_investigation(investigation())
+    seed_groups(store, count=8)
+    previous = memory_with(
+        evidence_ids=("ev-1",),
+        through_transcript_sequence=2,
+        revision=1,
+        memory_id="mem-run-1-1",
+    )
+    store.append_session_memory(previous)
+    previous_boundary = CompactBoundary(
+        agent_run_id="run-1",
+        through_sequence=2,
+        memory_revision=1,
+        summary="previous valid boundary",
+        created_at=NOW,
+    )
+    store.append_compact_boundary(previous_boundary)
+    manager_ = AgentContextManager(
+        store,
+        compactor=FailingCompactor(),
+        policy=ContextBudgetPolicy(compact_max_failures=1),
+        now=lambda: NOW,
+    )
+    with pytest.raises(CompactionRejected):
+        await manager_.reactive_compact(run_with("ev-1"))
+    assert store.get_latest_compact_boundary("run-1") == previous_boundary
+    assert store.get_latest_session_memory("run-1") == previous
+
+
 # -- reactive compaction -------------------------------------------------------
 
 
@@ -425,6 +472,32 @@ async def test_reactive_compact_keeps_recent_groups_and_records_round(store) -> 
     assert state is not None
     assert state.reactive_round == 1
     assert state.consecutive_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_reactive_compact_default_tail_uses_policy_value(store) -> None:
+    """A reactive compact with no explicit tail size uses the policy setting."""
+    store.create_investigation(investigation())
+    seed_groups(store, count=8)  # 8 pairs: sequences 1-16
+    compactor = RecordingCompactor(memory_with(evidence_ids=("ev-1",)), adapt=True)
+    manager_ = AgentContextManager(
+        store,
+        compactor=compactor,
+        policy=ContextBudgetPolicy(reactive_keep_recent_groups=3),
+        now=lambda: NOW,
+    )
+    run = run_with("ev-1")
+    active = await manager_.reactive_compact(run)
+    assert active.memory is not None
+    # head (first 5 pairs) is compacted; tail (last 3 pairs) is replayed whole.
+    replay_ids = {
+        block.tool_call_id
+        for message in active.messages
+        for block in message.blocks
+        if isinstance(block, ToolUseBlock)
+    }
+    assert replay_ids == {f"call-{index}" for index in range(5, 8)}
+    assert active.memory.through_transcript_sequence == 10
 
 
 @pytest.mark.asyncio

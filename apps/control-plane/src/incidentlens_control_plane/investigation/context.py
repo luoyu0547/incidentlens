@@ -158,6 +158,8 @@ class ContextBudgetPolicy:
     max_message_groups: int = 50
     keep_recent_tool_results: int = 3
     system_prompt: str = ""
+    compact_max_failures: int = 3
+    reactive_keep_recent_groups: int = 5
 
     def __post_init__(self) -> None:
         if self.context_window < 8_000:
@@ -174,6 +176,10 @@ class ContextBudgetPolicy:
             raise ValueError("max_message_groups must be >= 1")
         if self.keep_recent_tool_results < 1:
             raise ValueError("keep_recent_tool_results must be >= 1")
+        if self.compact_max_failures < 1:
+            raise ValueError("compact_max_failures must be >= 1")
+        if self.reactive_keep_recent_groups < 1:
+            raise ValueError("reactive_keep_recent_groups must be >= 1")
 
 
 class TokenEstimator(Protocol):
@@ -532,10 +538,11 @@ class AgentContextManager:
         memory revision (evidence ownership, monotonic boundary, redaction and
         length) and commits it with its boundary and a reset breaker state in
         one transaction.  A provider failure or an invalid revision increments
-        the durable breaker; the fourth consecutive failure raises
-        ``CompactionCircuitOpen`` until a successful *manual* compact resets
-        the breaker -- a manual request is the one path that may attempt a
-        compaction even while the breaker is open.
+        the durable breaker; once ``compact_max_failures`` consecutive failures
+        accrue, automatic compaction raises ``CompactionCircuitOpen`` until a
+        successful *manual* compact resets the breaker -- a manual request is
+        the one path that may attempt a compaction even while the breaker is
+        open.
         """
         boundary = self._store.get_latest_compact_boundary(run.agent_run_id)
         groups = self._tolerant_groups(
@@ -544,19 +551,21 @@ class AgentContextManager:
         return await self._semantic_compact_groups(run, groups, manual=manual)
 
     async def reactive_compact(
-        self, run: AgentRun, *, keep_recent_groups: int = 5
+        self, run: AgentRun, *, keep_recent_groups: int | None = None
     ) -> ActiveContext:
         """Respond to a prompt-too-long turn by compacting the oldest groups.
 
         The newest ``keep_recent_groups`` complete groups stay whole in the
-        replayed tail; everything older is handed to the semantic compactor and
-        summarized into a new memory revision, after which the context is
-        re-materialized from the new boundary with the tail preserved.  Only one
-        reactive compaction is allowed per round: a second attempt in the same
-        round is refused using ``CompactionState.reactive_round``.  Groups are
-        read *after* the latest compact boundary (mirroring the deterministic
-        path), so a reactive compaction never re-compacts or re-summarizes
-        history an earlier compact already covered.
+        replayed tail; when ``keep_recent_groups`` is ``None`` the
+        ``ContextBudgetPolicy.reactive_keep_recent_groups`` value is used.
+        Everything older is handed to the semantic compactor and summarized
+        into a new memory revision, after which the context is re-materialized
+        from the new boundary with the tail preserved.  Only one reactive
+        compaction is allowed per round: a second attempt in the same round is
+        refused using ``CompactionState.reactive_round``.  Groups are read
+        *after* the latest compact boundary (mirroring the deterministic path),
+        so a reactive compaction never re-compacts or re-summarizes history an
+        earlier compact already covered.
         """
         state = self._store.get_compaction_state(run.agent_run_id)
         if state is not None and state.reactive_round == run.usage.rounds:
@@ -564,14 +573,19 @@ class AgentContextManager:
                 f"reactive compaction already performed for run {run.agent_run_id} "
                 f"in round {run.usage.rounds}"
             )
-        if keep_recent_groups < 1:
+        keep_recent = (
+            keep_recent_groups
+            if keep_recent_groups is not None
+            else self._policy.reactive_keep_recent_groups
+        )
+        if keep_recent < 1:
             raise ValueError("keep_recent_groups must be >= 1")
         investigation = self._store.get_investigation(run.investigation_id)
         boundary = self._store.get_latest_compact_boundary(run.agent_run_id)
         groups = self._tolerant_groups(
             run.agent_run_id, boundary.through_sequence if boundary else 0
         )
-        head, tail = groups[:-keep_recent_groups], groups[-keep_recent_groups:]
+        head, tail = groups[:-keep_recent], groups[-keep_recent:]
         if not head:
             # Nothing old enough to summarize (the whole transcript is the
             # preserved tail).  Record the one-shot reactive attempt so a second
@@ -618,7 +632,7 @@ class AgentContextManager:
         the freshly materialized (compacted) messages; the checkpoint round is
         the round the provider is retrying.
         """
-        active = await self.reactive_compact(run, keep_recent_groups=5)
+        active = await self.reactive_compact(run)
         return self._conversation_request(
             run, investigation, round_number, active, tool_schemas
         )
@@ -725,7 +739,11 @@ class AgentContextManager:
     ) -> SessionMemory:
         """Compact ``groups`` through the injected compactor and commit atomically."""
         state = self._store.get_compaction_state(run.agent_run_id)
-        if not manual and state is not None and state.consecutive_failures >= 3:
+        if (
+            not manual
+            and state is not None
+            and state.consecutive_failures >= self._policy.compact_max_failures
+        ):
             raise CompactionCircuitOpen(
                 f"semantic compaction tripped the breaker for run {run.agent_run_id}: "
                 f"{state.consecutive_failures} consecutive failures"
@@ -751,6 +769,8 @@ class AgentContextManager:
         )
         request = CompactionRequest(
             agent_run_id=run.agent_run_id,
+            investigation_id=run.investigation_id,
+            through_round=run.usage.rounds,
             through_sequence=through_sequence,
             prior_memory=prior_memory,
             messages=messages,

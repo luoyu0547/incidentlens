@@ -34,6 +34,9 @@ from incidentlens_control_plane.investigation.source_discovery import (
 )
 from incidentlens_control_plane.investigation.store import InvestigationStore
 from incidentlens_control_plane.investigation.tool_executor import ToolExecutor
+from incidentlens_control_plane.investigation.xfyun_compactor import (
+    XfyunMaaSCompactor,
+)
 from incidentlens_control_plane.investigation.xfyun_provider import (
     XfyunMaaSConfig,
     XfyunMaaSProvider,
@@ -181,18 +184,19 @@ def build_runtime(
     )
     fake_provider = fake_provider_registry or FakeProviderRegistry()
     provider = FakeProvider(fake_provider)
+    compactor = None
     if settings.agent_mode == "llm_agent":
         if not settings.xfyun_maas_api_key or not settings.llm_active_model:
             raise ValueError(
                 "llm_agent 模式需要 XFYUN_MAAS_API_KEY 和 INCIDENTLENS_LLM_ACTIVE_MODEL"
             )
-        provider = XfyunMaaSProvider(
-            XfyunMaaSConfig(
-                api_key=settings.xfyun_maas_api_key,
-                base_url=settings.llm_base_url,
-                model=settings.llm_active_model.removeprefix("xfyun-"),
-            )
+        maas_config = XfyunMaaSConfig(
+            api_key=settings.xfyun_maas_api_key,
+            base_url=settings.llm_base_url,
+            model=settings.llm_active_model.removeprefix("xfyun-"),
         )
+        provider = XfyunMaaSProvider(maas_config)
+        compactor = XfyunMaaSCompactor(maas_config)
     context_manager = AgentContextManager(
         investigation_store,
         policy=ContextBudgetPolicy(
@@ -202,7 +206,10 @@ def build_runtime(
             tool_result_budget_chars=settings.agent_tool_result_budget_chars,
             max_message_groups=settings.agent_context_max_message_groups,
             keep_recent_tool_results=settings.agent_context_keep_recent_tool_results,
+            compact_max_failures=settings.agent_compact_max_failures,
+            reactive_keep_recent_groups=settings.agent_reactive_keep_recent_groups,
         ),
+        compactor=compactor,
     )
     orchestrator = AgentOrchestrator(
         store=investigation_store,

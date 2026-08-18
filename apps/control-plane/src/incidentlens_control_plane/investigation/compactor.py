@@ -51,6 +51,8 @@ class CompactionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     agent_run_id: str = Field(min_length=1, max_length=120)
+    investigation_id: str = Field(min_length=1, max_length=120)
+    through_round: int = Field(ge=0)
     through_sequence: int = Field(ge=0)
     prior_memory: SessionMemory | None = None
     messages: tuple[TranscriptMessage, ...]
