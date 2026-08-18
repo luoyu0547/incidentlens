@@ -768,6 +768,8 @@ class AgentContextManager:
         )
         request = CompactionRequest(
             agent_run_id=run.agent_run_id,
+            investigation_id=run.investigation_id,
+            through_round=run.usage.rounds,
             through_sequence=through_sequence,
             prior_memory=prior_memory,
             messages=messages,
