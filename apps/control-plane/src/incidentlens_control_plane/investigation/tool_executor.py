@@ -40,6 +40,7 @@ from incidentlens_control_plane.evidence.service import (
 from incidentlens_control_plane.evidence.store import EvidenceStore
 from incidentlens_control_plane.evidence.types import EvidenceRef
 from incidentlens_control_plane.investigation.guard import InvestigationGuard
+from incidentlens_control_plane.investigation.hooks import HookEvent, HookEventType, HookRunner
 from incidentlens_control_plane.investigation.provider import (
     ToolRequest,
     ToolSchema,
@@ -247,6 +248,7 @@ class ToolExecutor:
         investigations: InvestigationStore,
         approvals: ApprovalService,
         registry: ToolRegistry | None = None,
+        hooks: HookRunner | None = None,
     ) -> None:
         self._projects = projects
         self._sessions = sessions
@@ -258,6 +260,7 @@ class ToolExecutor:
         self._investigations = investigations
         self._approvals = approvals
         self._guard = InvestigationGuard()
+        self._hooks = hooks or HookRunner()
         self._registry = registry or default_tool_registry(self)
 
     @property
@@ -308,6 +311,7 @@ class ToolExecutor:
 
         investigation = self._investigations.get_investigation(run.investigation_id)
         now = now or datetime.now(UTC)
+        handler = self._registry.handler_for(request.tool_name)
         ctx = ToolContext(
             run=run,
             arguments=request.arguments,
@@ -316,20 +320,40 @@ class ToolExecutor:
             approval_id=approval_id,
             now=now,
         )
-        handler = self._registry.handler_for(request.tool_name)
+
+        await self._emit_hook(
+            HookEvent(
+                event_type=HookEventType.PRE_TOOL_USE,
+                agent_run_id=run.agent_run_id,
+                action_name=request.tool_name,
+                occurred_at=now,
+                metadata={"tool_call_id": request.tool_call_id},
+            )
+        )
+
         try:
             result = await handler(ctx)  # type: ignore[misc]
         except ToolUncertain as exc:
-            return self._uncertain_outcome(request, run, investigation.incident_id, exc)
+            outcome = self._uncertain_outcome(request, run, investigation.incident_id, exc)
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
         except ToolExecutionError as exc:
-            return self._failed_outcome(request, exc)
+            outcome = self._failed_outcome(request, exc)
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
         except CommandForbidden as exc:
-            return self._failed_outcome(request, exc)
+            outcome = self._failed_outcome(request, exc)
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
         except (asyncio.TimeoutError, RemoteTimeoutError, RemoteConnectionError) as exc:
-            return self._uncertain_outcome(request, run, investigation.incident_id, exc)
+            outcome = self._uncertain_outcome(request, run, investigation.incident_id, exc)
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
         except Exception as exc:
-            return self._failed_outcome(request, exc)
-        return ToolOutcome(
+            outcome = self._failed_outcome(request, exc)
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
+        outcome = ToolOutcome(
             tool_call_id=request.tool_call_id,
             tool_name=request.tool_name,
             status=result.status,
@@ -338,6 +362,55 @@ class ToolExecutor:
             output_bytes=result.output_bytes,
             approval_id=result.approval_id,
             error_redacted=result.error_redacted,
+        )
+        await self._emit_post_tool_use(run, request, now, outcome)
+        return outcome
+
+    async def _emit_hook(self, event: HookEvent) -> tuple[str, ...]:
+        return await self._hooks.emit(event)
+
+    async def _emit_post_tool_use(
+        self,
+        run: AgentRun,
+        request: ToolRequest,
+        now: datetime,
+        outcome: ToolOutcome,
+    ) -> None:
+        await self._emit_hook(
+            HookEvent(
+                event_type=HookEventType.POST_TOOL_USE,
+                agent_run_id=run.agent_run_id,
+                action_name=request.tool_name,
+                occurred_at=now,
+                status=outcome.status.value,
+                metadata={
+                    "tool_call_id": request.tool_call_id,
+                    "output_bytes": outcome.output_bytes,
+                    "approval_id": outcome.approval_id,
+                },
+            )
+        )
+
+    async def _emit_tool_error(
+        self,
+        run: AgentRun,
+        request: ToolRequest,
+        now: datetime,
+        outcome: ToolOutcome,
+    ) -> None:
+        await self._emit_hook(
+            HookEvent(
+                event_type=HookEventType.TOOL_ERROR,
+                agent_run_id=run.agent_run_id,
+                action_name=request.tool_name,
+                occurred_at=now,
+                status=outcome.status.value,
+                metadata={
+                    "tool_call_id": request.tool_call_id,
+                    "output_bytes": outcome.output_bytes,
+                    "approval_id": outcome.approval_id,
+                },
+            )
         )
 
     # -- log tools ------------------------------------------------------------

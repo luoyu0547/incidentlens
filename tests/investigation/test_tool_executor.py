@@ -26,6 +26,7 @@ from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.evidence.service import EvidenceService
 from incidentlens_control_plane.evidence.store import EvidenceStore
 from incidentlens_control_plane.evidence.types import EvidenceKind
+from incidentlens_control_plane.investigation.hooks import HookEventType, HookRunner
 from incidentlens_control_plane.investigation.state_machine import (
     AgentRunStatus,
     InvestigationStatus,
@@ -475,6 +476,7 @@ class Harness:
     approvals: ApprovalService
     executor: ToolExecutor
     factory: HarnessTransportFactory | OneTransportFactory | FailingTransportFactory
+    hooks: HookRunner
 
 
 def build_harness(
@@ -538,6 +540,7 @@ def build_harness(
         evidence=evidence_store,
     )
     evidence = EvidenceService(evidence_store, investigations=investigations)
+    hooks = HookRunner()
     executor = ToolExecutor(
         projects=projects,
         sessions=sessions,
@@ -548,6 +551,7 @@ def build_harness(
         evidence_store=evidence_store,
         investigations=investigations,
         approvals=approvals,
+        hooks=hooks,
     )
     return Harness(
         projects=projects,
@@ -561,6 +565,7 @@ def build_harness(
         approvals=approvals,
         executor=executor,
         factory=factory,
+        hooks=hooks,
     )
 
 
@@ -1851,3 +1856,26 @@ def _sha256(content: bytes) -> str:
     import hashlib
 
     return hashlib.sha256(content).hexdigest()
+
+
+def forbidden_request(tool_call_id: str = "call-forbidden") -> Any:
+    return tool_request(
+        TOOL_SHELL_EXEC,
+        tool_call_id=tool_call_id,
+        service_name=SERVICE,
+        command="rm -rf /opt/payments",
+    )
+
+
+def raising_callback(event: Any) -> None:
+    raise RuntimeError("secret: should be redacted")
+
+
+@pytest.mark.asyncio
+async def test_failing_pre_tool_hook_cannot_allow_forbidden_request(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    harness.hooks.register(HookEventType.PRE_TOOL_USE, raising_callback)
+    run = _new_run(harness.investigations)
+    outcome = await harness.executor.execute(forbidden_request(), run, now=NOW)
+    assert outcome.status is ToolCallStatus.FAILED
+    assert harness.factory.transports == []
