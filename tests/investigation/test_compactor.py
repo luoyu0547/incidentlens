@@ -413,6 +413,38 @@ def test_commit_compaction_conflict_rolls_back_all_three(store) -> None:
     assert store.get_compaction_state("run-1") is None
 
 
+@pytest.mark.asyncio
+async def test_failed_reactive_compact_preserves_previous_boundary(store) -> None:
+    """A failed reactive compact does not overwrite the previous boundary."""
+    store.create_investigation(investigation())
+    seed_groups(store, count=8)
+    previous = memory_with(
+        evidence_ids=("ev-1",),
+        through_transcript_sequence=2,
+        revision=1,
+        memory_id="mem-run-1-1",
+    )
+    store.append_session_memory(previous)
+    previous_boundary = CompactBoundary(
+        agent_run_id="run-1",
+        through_sequence=2,
+        memory_revision=1,
+        summary="previous valid boundary",
+        created_at=NOW,
+    )
+    store.append_compact_boundary(previous_boundary)
+    manager_ = AgentContextManager(
+        store,
+        compactor=FailingCompactor(),
+        policy=ContextBudgetPolicy(compact_max_failures=1),
+        now=lambda: NOW,
+    )
+    with pytest.raises(CompactionRejected):
+        await manager_.reactive_compact(run_with("ev-1"))
+    assert store.get_latest_compact_boundary("run-1") == previous_boundary
+    assert store.get_latest_session_memory("run-1") == previous
+
+
 # -- reactive compaction -------------------------------------------------------
 
 

@@ -107,11 +107,15 @@ ToolExecutor 对输出设硬上限，并先将完整的脱敏结果写入 Eviden
 
 `ContextCompactor` 是一个异步 Protocol（`async def compact(request) -> SessionMemory`），
 无工具权限，只能返回结构化摘要。摘要必须保留证据索引、未知项和限制，经过 schema 校验后
-写入新的 memory revision。连续失败（默认 3 次）触发 breaker，第 4 次尝试抛出
-`CompactionCircuitOpen`，阻塞后续语义压缩。手动 compact 绕过 breaker。
+写入新的 memory revision。连续失败（默认 3 次，可由 `agent_compact_max_failures` 配置）触发
+breaker，第 N 次尝试抛出 `CompactionCircuitOpen`，阻塞后续自动语义压缩；手动 compact 可
+探测已打开的 breaker，成功后重置失败计数。
 
-**注意：** 生产级模型调用 compactor 尚未实现（故意推迟）。当前 `compactor=None` 时
-`semantic_compact` 会优雅降级到确定性压缩。
+在生产 `llm_agent` 模式中，runtime 会用共享的 XFYUN MaaS 配置注入
+`XfyunMaaSCompactor`；它发送 tool-free 的结构化摘要请求，绝不执行模型提出的操作。fake
+模式不注入网络 compactor，保持离线、确定性的测试行为。`agent_reactive_keep_recent_groups`
+控制响应式压缩保留的完整 transcript 组数。模型返回 prompt-too-long 时最多执行一次响应式
+压缩并重试；再次失败则安全暂停调查，不会无限重试。
 
 ### L4：Reactive Compaction
 
@@ -142,7 +146,7 @@ ToolExecutor 对输出设硬上限，并先将完整的脱敏结果写入 Eviden
 - Token 预算 Active Context（`ContextBudget` / `ConservativeTokenEstimator` / `AgentContextManager.build`）；
 - 确定性 compaction 管道：`tool_result_budget` → `snip_groups` → `micro_compact` → header + flatten；
 - Session Memory 确定性构建与 `CompactBoundary` / `CompactionState` 原子持久化；
-- Semantic Compaction 无工具 Protocol + schema 校验 + breaker（3 次失败熔断）；
+- Semantic Compaction 无工具 Protocol + schema 校验 + 配置驱动的 breaker（默认 3 次失败熔断）；
 - Reactive Compaction（每轮一次，保留最近 transcript 组）；
 - Todo 工具（`todo_write`）与手动压缩工具（`compact_context`）；
 - 编排器持续消息循环：append-before-act、tool-result 消息、一次性 reactive retry、
@@ -155,8 +159,7 @@ ToolExecutor 对输出设硬上限，并先将完整的脱敏结果写入 Eviden
 
 ### 下一阶段
 
-1. 实现生产级模型调用 Semantic Compactor（当前 `compactor=None`，优雅降级）；
-2. 增加真实 tokenizer 或 Provider usage 校准，替换字符数估算；
+1. 增加真实 tokenizer 或 Provider usage 校准，替换字符数估算；
 3. 引入带 provenance、版本和 TTL 的 Project Memory，默认仅作为调查线索；
 4. 增加长程评测：上下文压力、压缩前后事实保留、重启续跑、旧记忆污染和 Token 降幅。
 
