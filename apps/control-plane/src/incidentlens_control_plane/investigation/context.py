@@ -538,10 +538,11 @@ class AgentContextManager:
         memory revision (evidence ownership, monotonic boundary, redaction and
         length) and commits it with its boundary and a reset breaker state in
         one transaction.  A provider failure or an invalid revision increments
-        the durable breaker; the fourth consecutive failure raises
-        ``CompactionCircuitOpen`` until a successful *manual* compact resets
-        the breaker -- a manual request is the one path that may attempt a
-        compaction even while the breaker is open.
+        the durable breaker; once ``compact_max_failures`` consecutive failures
+        accrue, automatic compaction raises ``CompactionCircuitOpen`` until a
+        successful *manual* compact resets the breaker -- a manual request is
+        the one path that may attempt a compaction even while the breaker is
+        open.
         """
         boundary = self._store.get_latest_compact_boundary(run.agent_run_id)
         groups = self._tolerant_groups(

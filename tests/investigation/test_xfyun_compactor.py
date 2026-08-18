@@ -26,9 +26,9 @@ from incidentlens_control_plane.investigation.types import (
 )
 from incidentlens_control_plane.investigation.xfyun_compactor import (
     XfyunMaaSCompactor,
-    XfyunMaaSConfig,
     _strip_fence,
 )
+from incidentlens_control_plane.investigation.xfyun_provider import XfyunMaaSConfig
 
 NOW = datetime(2026, 8, 18, 10, 0, 0, tzinfo=UTC)
 

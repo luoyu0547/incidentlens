@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -31,20 +30,7 @@ from incidentlens_control_plane.investigation.types import (
     ToolUseBlock,
     TranscriptMessage,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class XfyunMaaSConfig:
-    """MaaS OpenAI-compatible endpoint connection configuration.
-
-    Shares the same shape as ``xfyun_provider.XfyunMaaSConfig`` but is
-    defined here to keep the compactor module self-contained.
-    """
-
-    api_key: str
-    base_url: str
-    model: str
-    timeout_seconds: float = 90.0
+from incidentlens_control_plane.investigation.xfyun_provider import XfyunMaaSConfig
 
 
 class XfyunMaaSCompactor(ContextCompactor):
