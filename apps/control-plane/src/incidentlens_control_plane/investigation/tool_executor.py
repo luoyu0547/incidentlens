@@ -858,7 +858,7 @@ class ToolExecutor:
             budget=AgentBudget(**budget_args) if budget_args else None,
         )
         try:
-            package = self._delegation.prepare(ctx.run, investigation, spec)
+            package = self._delegation.prepare(ctx.run, investigation, spec, now=ctx.now)
         except DelegationRejected as exc:
             raise ToolExecutionError(str(exc)) from exc
         self._investigations.create_delegated_task(package, now=ctx.now)

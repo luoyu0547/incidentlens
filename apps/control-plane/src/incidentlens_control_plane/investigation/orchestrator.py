@@ -1447,7 +1447,7 @@ class AgentOrchestrator:
             budget=None,
         )
         try:
-            package = self._delegation.prepare(run, investigation, spec)
+            package = self._delegation.prepare(run, investigation, spec, now=now)
         except DelegationRejected as exc:
             reason = str(exc)
             if run.kind is AgentRunKind.CHILD:

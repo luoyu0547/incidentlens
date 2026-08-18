@@ -352,3 +352,114 @@ def test_explicit_budget_axis_never_exceeds_parent_envelope(
     budget = AgentBudget(**{axis: over})
     with pytest.raises(DelegationRejected, match=f"child {axis} must not exceed the run budget"):
         validator.prepare(parent, investigation, delegation_spec(source, budget=budget))
+
+
+@pytest.mark.parametrize("source", SOURCES)
+@pytest.mark.parametrize(
+    ("axis", "usage_field"),
+    [
+        ("max_rounds", "rounds"),
+        ("max_tool_calls", "tool_calls"),
+        ("max_total_output_bytes", "total_output_bytes"),
+        ("max_evidence", "evidence_count"),
+        (
+            "max_no_new_evidence_rounds",
+            "consecutive_no_new_evidence_rounds",
+        ),
+    ],
+)
+def test_budget_uses_remaining_cumulative_envelope(
+    source: str,
+    axis: str,
+    usage_field: str,
+    validator: DelegationValidator,
+    parent: AgentRun,
+    investigation: Investigation,
+) -> None:
+    parent_budget = AgentBudget(**{axis: 10})
+    parent = parent.model_copy(
+        update={
+            "budget": parent_budget,
+            "usage": UsageCounters(**{usage_field: 7}),
+        }
+    )
+    requested = AgentBudget(**{axis: 4})
+    with pytest.raises(DelegationRejected, match="remaining run budget"):
+        validator.prepare(
+            parent, investigation, delegation_spec(source, budget=requested)
+        )
+
+
+@pytest.mark.parametrize("source", SOURCES)
+def test_default_budget_is_capped_by_remaining_envelope(
+    source: str,
+    validator: DelegationValidator,
+    parent: AgentRun,
+    investigation: Investigation,
+) -> None:
+    parent = parent.model_copy(
+        update={
+            "budget": AgentBudget(max_rounds=10, max_tool_calls=20),
+            "usage": UsageCounters(rounds=7, tool_calls=18),
+        }
+    )
+    package = validator.prepare(parent, investigation, delegation_spec(source))
+    assert package.budget.max_rounds == 3
+    assert package.budget.max_tool_calls == 2
+
+
+@pytest.mark.parametrize("source", SOURCES)
+def test_exhausted_remaining_axis_rejects_default_budget(
+    source: str,
+    validator: DelegationValidator,
+    parent: AgentRun,
+    investigation: Investigation,
+) -> None:
+    parent = parent.model_copy(update={"usage": UsageCounters(rounds=8)})
+    with pytest.raises(DelegationRejected, match="child budget max_rounds exhausted"):
+        validator.prepare(parent, investigation, delegation_spec(source))
+
+
+@pytest.mark.parametrize("source", SOURCES)
+def test_wall_clock_uses_remaining_elapsed_duration(
+    source: str,
+    validator: DelegationValidator,
+    parent: AgentRun,
+    investigation: Investigation,
+) -> None:
+    parent = parent.model_copy(
+        update={
+            "budget": AgentBudget(max_wall_clock_seconds=100),
+            "started_at": NOW,
+        }
+    )
+    requested = AgentBudget(max_wall_clock_seconds=61)
+    with pytest.raises(DelegationRejected, match="remaining run budget"):
+        validator.prepare(
+            parent,
+            investigation,
+            delegation_spec(source, budget=requested),
+            now=NOW.replace(second=40),
+        )
+
+
+@pytest.mark.parametrize("source", SOURCES)
+def test_exhausted_wall_clock_rejects_delegation(
+    source: str,
+    validator: DelegationValidator,
+    parent: AgentRun,
+    investigation: Investigation,
+) -> None:
+    parent = parent.model_copy(
+        update={
+            "budget": AgentBudget(max_wall_clock_seconds=100),
+            "started_at": NOW,
+        }
+    )
+    with pytest.raises(DelegationRejected, match="child budget max_wall_clock_seconds exhausted"):
+        validator.prepare(
+            parent,
+            investigation,
+            delegation_spec(source),
+            now=NOW.replace(minute=NOW.minute + 1, second=40),
+        )

@@ -14,6 +14,8 @@ here; persistence, usage accounting and child spawn stay in each caller.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from pydantic import BaseModel, ConfigDict
 
 from incidentlens_control_plane.investigation.guard import InvestigationGuard
@@ -73,6 +75,8 @@ class DelegationValidator:
         parent: AgentRun,
         investigation: Investigation,
         spec: DelegationSpec,
+        *,
+        now: datetime | None = None,
     ) -> DelegatedTaskPackage:
         """Validate *spec* against *parent*/*investigation* and build the package.
 
@@ -85,7 +89,7 @@ class DelegationValidator:
             raise DelegationRejected(reason)
         self._validate_registered_scope(parent, spec.scope)
         self._validate_evidence(parent, spec.evidence_ids)
-        budget = self._bounded_budget(parent, spec.budget)
+        budget = self._bounded_budget(parent, spec.budget, now=now)
         return DelegatedTaskPackage(
             child_run_id=spec.child_run_id,
             parent_run_id=parent.agent_run_id,
@@ -153,23 +157,48 @@ class DelegationValidator:
             )
 
     def _bounded_budget(
-        self, parent: AgentRun, budget: AgentBudget | None
+        self,
+        parent: AgentRun,
+        budget: AgentBudget | None,
+        *,
+        now: datetime | None,
     ) -> AgentBudget:
         base = parent.budget
+        usage = parent.usage
+        elapsed = 0.0
+        if parent.started_at is not None:
+            current = (now or datetime.now(UTC)).astimezone(UTC)
+            elapsed = max(
+                0.0,
+                (current - parent.started_at.astimezone(UTC)).total_seconds(),
+            )
+        remaining: dict[str, int] = {
+            "max_rounds": base.max_rounds - usage.rounds,
+            "max_tool_calls": base.max_tool_calls - usage.tool_calls,
+            "max_wall_clock_seconds": int(base.max_wall_clock_seconds - elapsed),
+            "max_output_bytes_per_tool": base.max_output_bytes_per_tool,
+            "max_total_output_bytes": base.max_total_output_bytes
+            - usage.total_output_bytes,
+            "max_evidence": base.max_evidence - usage.evidence_count,
+            "max_no_new_evidence_rounds": base.max_no_new_evidence_rounds
+            - usage.consecutive_no_new_evidence_rounds,
+        }
+        for field_name, capacity in remaining.items():
+            if capacity <= 0:
+                raise DelegationRejected(
+                    f"child budget {field_name} exhausted"
+                )
         if budget is None:
             default = AgentBudget()
             values = {
-                name: getattr(default, name) for name in AgentBudget.model_fields
+                name: min(getattr(default, name), remaining[name])
+                for name in AgentBudget.model_fields
             }
-            for name in AgentBudget.model_fields:
-                if getattr(default, name) > getattr(base, name):
-                    values[name] = getattr(base, name)
             return AgentBudget(**values)
-        # An explicit budget must never exceed the parent's envelope on any axis.
         for field_name in AgentBudget.model_fields:
-            if getattr(budget, field_name) > getattr(base, field_name):
+            if getattr(budget, field_name) > remaining[field_name]:
                 raise DelegationRejected(
-                    f"child {field_name} must not exceed the run budget "
-                    f"({getattr(base, field_name)})"
+                    f"child {field_name} must not exceed the run budget; "
+                    f"remaining run budget ({remaining[field_name]})"
                 )
         return budget
