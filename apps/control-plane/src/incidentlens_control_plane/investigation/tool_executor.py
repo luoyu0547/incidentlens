@@ -39,12 +39,16 @@ from incidentlens_control_plane.evidence.service import (
 )
 from incidentlens_control_plane.evidence.store import EvidenceStore
 from incidentlens_control_plane.evidence.types import EvidenceRef
+from incidentlens_control_plane.investigation.delegation import (
+    DelegationRejected,
+    DelegationSpec,
+    DelegationValidator,
+)
 from incidentlens_control_plane.investigation.guard import InvestigationGuard
 from incidentlens_control_plane.investigation.hooks import HookEvent, HookEventType, HookRunner
 from incidentlens_control_plane.investigation.provider import (
     ToolRequest,
     ToolSchema,
-    _scope_within,
     _validate_schema,
 )
 from incidentlens_control_plane.investigation.state_machine import ToolCallStatus
@@ -80,7 +84,6 @@ from incidentlens_control_plane.investigation.types import (
     AgentBudget,
     AgentRun,
     AgentScope,
-    DelegatedTaskPackage,
     EvidenceReference,
     TodoItem,
     TodoStatus,
@@ -249,6 +252,7 @@ class ToolExecutor:
         approvals: ApprovalService,
         registry: ToolRegistry | None = None,
         hooks: HookRunner | None = None,
+        delegation: DelegationValidator | None = None,
     ) -> None:
         self._projects = projects
         self._sessions = sessions
@@ -260,6 +264,7 @@ class ToolExecutor:
         self._investigations = investigations
         self._approvals = approvals
         self._guard = InvestigationGuard()
+        self._delegation = delegation or DelegationValidator(self._projects, self._guard)
         self._hooks = hooks or HookRunner()
         self._registry = registry or default_tool_registry(self)
 
@@ -842,34 +847,20 @@ class ToolExecutor:
         child_run_id = args["child_run_id"]
         if child_run_id == ctx.run.agent_run_id:
             raise ToolExecutionError("child_run_id must differ from the run id")
-        # A child run must never delegate grandchildren, and the investigation's
-        # global child budget must not be exceeded through the tool path either
-        # (the provider path already enforces this via the same guard).
         investigation = self._investigations.get_investigation(ctx.run.investigation_id)
-        allowed, reason = self._guard.can_spawn_child(ctx.run, investigation)
-        if not allowed:
-            raise ToolExecutionError(reason)
         child_scope = AgentScope(**args["scope"])
-        allowed, reason = _scope_within(child_scope, ctx.run.scope)
-        if not allowed:
-            raise ToolExecutionError(f"child scope rejected: {reason}")
-        seed = tuple(args.get("evidence_ids") or ())
-        owned = {ref.evidence_id for ref in ctx.run.evidence}
-        missing = set(seed) - owned
-        if missing:
-            raise ToolExecutionError(
-                f"child delegation cites evidence not owned by this run: {sorted(missing)}"
-            )
-        budget = self._child_budget(ctx, args.get("budget") or {})
-        package = DelegatedTaskPackage(
+        budget_args = args.get("budget")
+        spec = DelegationSpec(
             child_run_id=child_run_id,
-            parent_run_id=ctx.run.agent_run_id,
-            investigation_id=ctx.run.investigation_id,
             task_prompt=args["task_prompt"],
             scope=child_scope,
-            budget=budget,
-            evidence_ids=seed,
+            evidence_ids=tuple(args.get("evidence_ids") or ()),
+            budget=AgentBudget(**budget_args) if budget_args else None,
         )
+        try:
+            package = self._delegation.prepare(ctx.run, investigation, spec)
+        except DelegationRejected as exc:
+            raise ToolExecutionError(str(exc)) from exc
         self._investigations.create_delegated_task(package, now=ctx.now)
         # Account the delegation against the investigation's child budget so the
         # tool path and the provider path consume the same bounded pool.
@@ -1304,24 +1295,6 @@ class ToolExecutor:
             return HostScope(), None
         container = self._validate_container(ctx, svc, container_arg)
         return ContainerScope(container=container), container
-
-    def _child_budget(self, ctx: ToolContext, budget_args: dict[str, Any]) -> AgentBudget:
-        defaults = AgentBudget()
-        kwargs = {
-            name: budget_args.get(name, getattr(defaults, name))
-            for name in AgentBudget.model_fields
-        }
-        budget = AgentBudget(**kwargs)
-        # The child budget must never exceed the parent run's on ANY axis, so a
-        # child cannot widen its own evidence/output/wall-clock envelope.
-        base = ctx.run.budget
-        for field_name in AgentBudget.model_fields:
-            if getattr(budget, field_name) > getattr(base, field_name):
-                raise ToolExecutionError(
-                    f"child {field_name} must not exceed the run budget "
-                    f"({getattr(base, field_name)})"
-                )
-        return budget
 
     async def _approval_for_changeset(
         self,

@@ -44,6 +44,11 @@ from incidentlens_control_plane.investigation.compactor import (
     CompactionRejected,
 )
 from incidentlens_control_plane.investigation.context import AgentContextManager
+from incidentlens_control_plane.investigation.delegation import (
+    DelegationRejected,
+    DelegationSpec,
+    DelegationValidator,
+)
 from incidentlens_control_plane.investigation.events import InvestigationEventPublisher
 from incidentlens_control_plane.investigation.guard import InvestigationGuard
 from incidentlens_control_plane.investigation.provider import (
@@ -133,6 +138,7 @@ class AgentOrchestrator:
         projects: ProjectRegistryStore,
         sessions: SessionManager,
         guard: InvestigationGuard | None = None,
+        delegation: DelegationValidator | None = None,
         global_child_limit: int = 8,
         default_budget: AgentBudget | None = None,
         max_provider_retries: int = 2,
@@ -151,6 +157,7 @@ class AgentOrchestrator:
         self._projects = projects
         self._sessions = sessions
         self._guard = guard or InvestigationGuard()
+        self._delegation = delegation or DelegationValidator(self._projects, self._guard)
         self._global_child_limit = global_child_limit
         self._default_budget = default_budget or AgentBudget()
         self._max_provider_retries = max_provider_retries
@@ -1432,25 +1439,23 @@ class AgentOrchestrator:
         pending_children: list[tuple[str, asyncio.Task]],
         now: datetime,
     ) -> tuple[AgentRun, bool]:
-        allowed, reason = self._guard.can_spawn_child(run, investigation)
-        if not allowed:
+        spec = DelegationSpec(
+            child_run_id=delegation.child_run_id,
+            task_prompt=delegation.task_prompt,
+            scope=delegation.scope,
+            evidence_ids=delegation.evidence_ids,
+            budget=None,
+        )
+        try:
+            package = self._delegation.prepare(run, investigation, spec)
+        except DelegationRejected as exc:
+            reason = str(exc)
             if run.kind is AgentRunKind.CHILD:
                 # A child must never delegate grandchildren.
                 return self._fail(run, investigation, now, reason=reason), True
             self._pause(run, investigation, AgentRunStatus.PAUSED_BUDGET, now=now,
                         reason=reason, stop_reason=StopReason.BUDGET_CHILDREN)
             return self._store.get_agent_run(run.agent_run_id), True
-
-        budget = self._child_budget(delegation, run)
-        package = DelegatedTaskPackage(
-            child_run_id=delegation.child_run_id,
-            parent_run_id=run.agent_run_id,
-            investigation_id=run.investigation_id,
-            task_prompt=delegation.task_prompt,
-            scope=delegation.scope,
-            budget=budget,
-            evidence_ids=delegation.evidence_ids,
-        )
         try:
             self._store.create_delegated_task(package, now=now)
         except AlreadyExists:
@@ -1537,21 +1542,6 @@ class AgentOrchestrator:
             created_at=now,
             updated_at=now,
         )
-
-    def _child_budget(
-        self, delegation: ChildDelegationRequest, parent: AgentRun
-    ) -> AgentBudget:
-        # The provider's delegation carries no budget: default it, then cap every
-        # axis by the parent's budget so a child can never widen its envelope.
-        default = AgentBudget()
-        values = {
-            name: getattr(default, name)
-            for name in AgentBudget.model_fields
-        }
-        for name in AgentBudget.model_fields:
-            if getattr(default, name) > getattr(parent.budget, name):
-                values[name] = getattr(parent.budget, name)
-        return AgentBudget(**values)
 
     async def _run_child(
         self, package: DelegatedTaskPackage
