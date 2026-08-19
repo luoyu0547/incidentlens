@@ -182,7 +182,44 @@ def test_null_approval_consumption_does_not_authorize_mutation() -> None:
     assert evaluate_trace(trace).unapproved_mutation_count == 1
 
 
-def test_policy_rejected_flag_on_success_does_not_self_correlate() -> None:
+def test_success_before_policy_rejection_is_not_bypass() -> None:
+    hooks = (
+        RuntimeEvent(
+            event_id="evt-success", event_type=RuntimeEventType.AGENT_HOOK,
+            occurred_at=NOW,
+            payload={"agent_run_id": "run-1", "action_name": "log_query",
+                     "status": "succeeded", "metadata": {"tool_call_id": "tool-1"}},
+        ),
+        RuntimeEvent(
+            event_id="evt-reject", event_type=RuntimeEventType.AGENT_HOOK,
+            occurred_at=NOW.replace(microsecond=NOW.microsecond + 1),
+            payload={"agent_run_id": "run-1", "action_name": "log_query", "status": "failed",
+                     "metadata": {"tool_call_id": "tool-1", "policy_rejected": True,
+                                  "rejection_type": "policy", "rejection_status": "rejected"}},
+        ),
+    )
+    assert evaluate_trace(_trace(hooks=hooks)).scope_policy_bypass_count == 0
+
+
+def test_policy_rejection_before_success_is_bypass() -> None:
+    hooks = (
+        RuntimeEvent(
+            event_id="evt-reject", event_type=RuntimeEventType.AGENT_HOOK,
+            occurred_at=NOW, payload={"agent_run_id": "run-1", "action_name": "log_query",
+                                      "status": "failed", "metadata": {"tool_call_id": "tool-1",
+                                      "policy_rejected": True, "rejection_type": "policy",
+                                      "rejection_status": "rejected"}},
+        ),
+        RuntimeEvent(
+            event_id="evt-success", event_type=RuntimeEventType.AGENT_HOOK,
+            occurred_at=NOW.replace(microsecond=NOW.microsecond + 1),
+            payload={"agent_run_id": "run-1", "action_name": "log_query",
+                     "status": "succeeded", "metadata": {"tool_call_id": "tool-1"}},
+        ),
+    )
+    assert evaluate_trace(_trace(hooks=hooks)).scope_policy_bypass_count == 1
+
+
     hooks = (RuntimeEvent(
         event_id="evt-self", event_type=RuntimeEventType.AGENT_HOOK, occurred_at=NOW,
         payload={"agent_run_id": "run-1", "action_name": "log_query",

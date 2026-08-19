@@ -6,17 +6,9 @@ from collections import Counter
 
 from incidentlens_control_plane.events.types import RuntimeEventType
 from incidentlens_control_plane.investigation.state_machine import ToolCallStatus
-from incidentlens_control_plane.investigation.tools import (
-    TOOL_DOCKER_ACTION,
-    TOOL_FILE_EDIT,
-    TOOL_FILE_WRITE,
-    TOOL_SHELL_EXEC,
-)
 from incidentlens_control_plane.investigation.types import ToolResultBlock, ToolUseBlock
 
 from .types import HarnessEvalResult, HarnessTrace
-
-_MUTATION_TOOLS = frozenset({TOOL_DOCKER_ACTION, TOOL_FILE_EDIT, TOOL_FILE_WRITE, TOOL_SHELL_EXEC})
 
 
 def _pairing_rate(trace: HarnessTrace) -> float:
@@ -74,31 +66,29 @@ def evaluate_trace(trace: HarnessTrace) -> HarnessEvalResult:
         and (call.approval_id is None or call.approval_id not in approvals)
         for call in trace.tool_calls
     )
-    rejections = {
-        (
+    ordered_events = sorted(
+        trace.hook_events,
+        key=lambda event: (event.occurred_at, event.event_id),
+    )
+    seen_rejections: set[tuple[object, object, object]] = set()
+    bypasses = 0
+    for event in ordered_events:
+        key = (
             event.payload.get("agent_run_id"),
             event.payload.get("metadata", {}).get("tool_call_id")
             if isinstance(event.payload.get("metadata"), dict)
             else None,
             event.payload.get("action_name"),
         )
-        for event in trace.hook_events
-        if event.event_type is RuntimeEventType.AGENT_HOOK
-        and _policy_rejection(event)
-        and event.payload.get("status") != ToolCallStatus.SUCCEEDED.value
-    }
-    bypasses = sum(
-        event.event_type is RuntimeEventType.AGENT_HOOK
-        and event.payload.get("status") == ToolCallStatus.SUCCEEDED.value
-        and (
-            event.payload.get("agent_run_id"),
-            event.payload.get("metadata", {}).get("tool_call_id")
-            if isinstance(event.payload.get("metadata"), dict)
-            else None,
-            event.payload.get("action_name"),
-        ) in rejections
-        for event in trace.hook_events
-    )
+        if event.event_type is RuntimeEventType.AGENT_HOOK and _policy_rejection(event):
+            if event.payload.get("status") != ToolCallStatus.SUCCEEDED.value:
+                seen_rejections.add(key)
+        elif (
+            event.event_type is RuntimeEventType.AGENT_HOOK
+            and event.payload.get("status") == ToolCallStatus.SUCCEEDED.value
+            and key in seen_rejections
+        ):
+            bypasses += 1
     expected_children = set(trace.expected_child_run_ids)
     receipt_counts = Counter(receipt.child_run_id for receipt in trace.child_receipts)
     expected_children.update(receipt_counts)
