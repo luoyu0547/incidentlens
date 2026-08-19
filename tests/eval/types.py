@@ -11,6 +11,7 @@ from incidentlens_control_plane.investigation.types import (
     Conclusion,
     EvidenceReference,
     Investigation,
+    DelegatedTaskPackage,
     ToolCall,
     TranscriptMessage,
 )
@@ -55,6 +56,10 @@ class HarnessTrace(BaseModel):
     expected_child_run_ids: tuple[str, ...] = ()
     delegation_forms: tuple[str, ...] = ()
     aggregate_sources: tuple[str, ...] = ()
+    source_runs: tuple[AgentRun, ...] = ()
+    source_investigations: tuple[Investigation, ...] = ()
+    delegated_tasks: tuple[DelegatedTaskPackage, ...] = ()
+    owned_evidence_by_run: dict[str, tuple[EvidenceRef, ...]] = Field(default_factory=dict)
     elapsed_seconds: float = Field(default=0.0, ge=0.0)
 
 

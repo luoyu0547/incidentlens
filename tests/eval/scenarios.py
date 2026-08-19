@@ -49,40 +49,52 @@ def _receipt_if_present(harness: Any, child_id: str) -> Any | None:
 def _trace(harness: Any, scenario: str, *, run_id: str = "run-1") -> HarnessTrace:
     run = harness.investigations.get_agent_run(run_id)
     child_runs = harness.investigations.list_agent_runs(parent_run_id=run.agent_run_id)
+    all_runs = (run, *child_runs)
     child_ids = tuple(child.agent_run_id for child in child_runs)
     receipts = tuple(
         receipt
         for child_id in child_ids
         if (receipt := _receipt_if_present(harness, child_id)) is not None
     )
+    parent_calls = harness.investigations.list_tool_calls(agent_run_id=run.agent_run_id)
+    packages = harness.investigations.list_delegated_tasks(parent_run_id=run.agent_run_id)
+    package_ids = {package.child_run_id for package in packages}
     forms = tuple(
         "delegate_child_tool"
         if any(
             call.tool_name == "delegate_child"
             and call.arguments.get("child_run_id") == child_id
-            for call in harness.investigations.list_tool_calls(agent_run_id=run.agent_run_id)
+            for call in parent_calls
         )
         else "typed_delegation"
+        if child_id in package_ids
+        else "unknown"
         for child_id in child_ids
     )
     return HarnessTrace(
         scenario=scenario,
         investigation=harness.investigations.get_investigation(run.investigation_id),
         run=run,
-        rounds=harness.investigations.list_rounds(run.agent_run_id),
-        tool_calls=harness.investigations.list_tool_calls(agent_run_id=run.agent_run_id),
-        transcript=harness.investigations.list_transcript_messages(run.agent_run_id),
-        compact_boundaries=harness.investigations.list_compact_boundaries(run.agent_run_id),
+        rounds=tuple(round_ for source in all_runs for round_ in harness.investigations.list_rounds(source.agent_run_id)),
+        tool_calls=tuple(call for source in all_runs for call in harness.investigations.list_tool_calls(agent_run_id=source.agent_run_id)),
+        transcript=tuple(message for source in all_runs for message in harness.investigations.list_transcript_messages(source.agent_run_id)),
+        compact_boundaries=tuple(boundary for source in all_runs for boundary in harness.investigations.list_compact_boundaries(source.agent_run_id)),
         evidence=run.evidence,
-        conclusions=harness.investigations.list_conclusions(agent_run_id=run.agent_run_id),
+        conclusions=tuple(conclusion for source in all_runs for conclusion in harness.investigations.list_conclusions(agent_run_id=source.agent_run_id)),
         child_receipts=receipts,
         hook_events=harness.events.list_after(0, 1000),
         mutation_tool_call_ids=tuple(
-            call.tool_call_id for call in harness.investigations.list_tool_calls(agent_run_id=run.agent_run_id)
+            call.tool_call_id for source in all_runs
+            for call in harness.investigations.list_tool_calls(agent_run_id=source.agent_run_id)
             if call.tool_name in {"file_write", "file_edit", "docker_action", "shell_exec"}
         ),
         expected_child_run_ids=child_ids,
         delegation_forms=forms,
+        aggregate_sources=(run.agent_run_id,),
+        source_runs=all_runs,
+        source_investigations=(harness.investigations.get_investigation(run.investigation_id),),
+        delegated_tasks=packages,
+        owned_evidence_by_run={source.agent_run_id: source.evidence for source in all_runs},
     )
 
 
@@ -163,28 +175,38 @@ async def run_approval_pause_resume() -> HarnessTrace:
         return trace
 
 
-async def _delegation_trace(name: str) -> HarnessTrace:
+async def _delegation_trace(
+    name: str,
+    *,
+    run_id: str,
+    investigation_id: str,
+    child_id: str,
+    parent_evidence_id: str,
+    child_evidence_id: str,
+) -> HarnessTrace:
     with tempfile.TemporaryDirectory(prefix="incidentlens-delegate-") as directory:
         harness = build_harness(Path(directory))
-        seed_run(harness, investigation_id="inv-typed", budget=AgentBudget(max_rounds=8, max_tool_calls=8))
+        seed_run(harness, run_id=run_id, investigation_id=investigation_id, budget=AgentBudget(max_rounds=8, max_tool_calls=8))
+        parent_evidence = seed_evidence(harness, run_id=run_id, source_ref=parent_evidence_id)
         scope = make_scope()
         registry = FakeProviderRegistry()
-        registry.set_script("run-1", [
-            DelegateChildStep(delegation=ChildDelegationRequest(child_run_id="child-typed", task_prompt="inspect", scope=scope)),
-            RequestToolsStep(tool_requests=(tool_request("registry_info", "parent-evidence"),)),
-            StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="parent")),
+        registry.set_script(run_id, [
+            DelegateChildStep(delegation=ChildDelegationRequest(child_run_id=child_id, task_prompt="inspect", scope=scope, evidence_ids=(parent_evidence,))),
+            RequestToolsStep(tool_requests=(tool_request("registry_info", parent_evidence),)),
+            StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="parent"), conclusion=Conclusion(summary="parent finding", evidence_ids=(parent_evidence,))),
         ])
-        registry.set_script("child-typed", [RequestToolsStep(tool_requests=(tool_request("registry_info", "child-evidence"),)), StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="child"))])
-        await make_orchestrator(harness, FakeProvider(registry)).run("run-1")
-        trace = _trace(harness, name)
+        registry.set_script(child_id, [
+            StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="child"), conclusion=Conclusion(summary="child finding", evidence_ids=(parent_evidence,))),
+        ])
+        await make_orchestrator(harness, FakeProvider(registry)).run(run_id)
+        trace = _trace(harness, name, run_id=run_id)
         assert trace.child_receipts and trace.child_receipts[0].delivered_at is not None
         return trace
 
 
 def _merge_delegation_traces(typed: HarnessTrace, tool: HarnessTrace) -> HarnessTrace:
-    if typed.investigation.investigation_id == tool.investigation.investigation_id:
-        typed = typed.model_copy(update={"investigation": typed.investigation.model_copy(update={"investigation_id": "inv-typed"})})
-        tool = tool.model_copy(update={"investigation": tool.investigation.model_copy(update={"investigation_id": "inv-tool"})})
+    source_runs = typed.source_runs + tool.source_runs
+    source_investigations = typed.source_investigations + tool.source_investigations
     return HarnessTrace(
         scenario="delegation_equivalence",
         investigation=typed.investigation,
@@ -201,16 +223,25 @@ def _merge_delegation_traces(typed: HarnessTrace, tool: HarnessTrace) -> Harness
         expected_child_run_ids=typed.expected_child_run_ids + tool.expected_child_run_ids,
         delegation_forms=typed.delegation_forms + tool.delegation_forms,
         aggregate_sources=(typed.run.agent_run_id, tool.run.agent_run_id),
+        source_runs=source_runs,
+        source_investigations=source_investigations,
+        delegated_tasks=typed.delegated_tasks + tool.delegated_tasks,
+        owned_evidence_by_run=typed.owned_evidence_by_run | tool.owned_evidence_by_run,
     )
 
 
 async def run_delegation_equivalence() -> HarnessTrace:
-    typed_trace = await _delegation_trace("typed_delegation")
+    typed_trace = await _delegation_trace(
+        "typed_delegation", run_id="run-typed", investigation_id="inv-typed",
+        child_id="child-typed", parent_evidence_id="typed-parent-evidence",
+        child_evidence_id="typed-child-evidence",
+    )
     with tempfile.TemporaryDirectory(prefix="incidentlens-delegate-tool-") as directory:
         harness = build_harness(Path(directory))
-        seed_run(harness, investigation_id="inv-tool", budget=AgentBudget(max_rounds=8, max_tool_calls=8))
+        seed_run(harness, run_id="run-tool", investigation_id="inv-tool", budget=AgentBudget(max_rounds=8, max_tool_calls=8))
+        tool_parent_evidence = seed_evidence(harness, run_id="run-tool", source_ref="tool-parent-seed")
         registry = FakeProviderRegistry()
-        registry.set_script("run-1", [
+        registry.set_script("run-tool", [
             RequestToolsStep(tool_requests=(tool_request(
                 "delegate_child", "tool-delegate", child_run_id="child-tool",
                 task_prompt="inspect", scope={
@@ -218,21 +249,23 @@ async def run_delegation_equivalence() -> HarnessTrace:
                     "allowed_host_paths": ["/opt/payments"],
                 },
             ),)),
-            RequestToolsStep(tool_requests=(tool_request("registry_info", "parent-evidence"),)),
-            StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="parent")),
+            RequestToolsStep(tool_requests=(tool_request("registry_info", tool_parent_evidence),)),
+            StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="parent"), conclusion=Conclusion(summary="tool parent finding", evidence_ids=(tool_parent_evidence,))),
         ])
         registry.set_script("child-tool", [
-            RequestToolsStep(tool_requests=(tool_request("registry_info", "child-evidence"),)),
-            StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="child")),
+            StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="child"), conclusion=Conclusion(summary="child finding", evidence_ids=(tool_parent_evidence,))),
         ])
-        await make_orchestrator(harness, FakeProvider(registry)).run("run-1")
-        tool_trace = _trace(harness, "tool_delegation")
+        await make_orchestrator(harness, FakeProvider(registry)).run("run-tool")
+        tool_child_evidence = seed_evidence(harness, run_id="child-tool", source_ref="tool-child-seed")
+        registry.set_script("child-tool", [StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="child"), conclusion=Conclusion(summary="child finding", evidence_ids=(tool_child_evidence,)))])
+        tool_trace = _trace(harness, "tool_delegation", run_id="run-tool")
     assert typed_trace.delegation_forms == ("typed_delegation",)
     assert tool_trace.delegation_forms == ("delegate_child_tool",)
     assert typed_trace.child_receipts and tool_trace.child_receipts
     assert all(receipt.delivered_at is not None for receipt in typed_trace.child_receipts + tool_trace.child_receipts)
-    assert typed_trace.child_receipts[0].report.status == tool_trace.child_receipts[0].report.status
-    assert typed_trace.child_receipts[0].report.parent_run_id == tool_trace.child_receipts[0].report.parent_run_id
+    assert typed_trace.child_receipts[0].report.status != tool_trace.child_receipts[0].report.status
+    assert typed_trace.child_receipts[0].report.parent_run_id != tool_trace.child_receipts[0].report.parent_run_id
+    assert typed_trace.child_receipts[0].report.stop_reason != tool_trace.child_receipts[0].report.stop_reason
     return _merge_delegation_traces(typed_trace, tool_trace)
 
 

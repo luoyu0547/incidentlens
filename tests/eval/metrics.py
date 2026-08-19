@@ -49,7 +49,11 @@ def _policy_rejection(event) -> bool:
 
 
 def evaluate_trace(trace: HarnessTrace) -> HarnessEvalResult:
-    owned = {item.evidence_id for item in trace.run.evidence}
+    owned = {
+        evidence.evidence_id
+        for references in trace.owned_evidence_by_run.values()
+        for evidence in references
+    } or {item.evidence_id for item in trace.run.evidence}
     foreign = sum(
         evidence_id not in owned
         for conclusion in trace.conclusions
