@@ -183,6 +183,22 @@ async def run_live_model_workflow(
             if not pending:
                 raise ValueError("fake_provider_registry requires a pending recording script")
             fake_provider_registry.set_pending_script(pending)
+        async def prefill_context(run: object) -> None:
+            if not prefill_complete_groups:
+                return
+            now = datetime.now(UTC)
+            for sequence in range(1, prefill_complete_groups * 2 + 1):
+                store = runtime.investigation_store
+                store.append_transcript_message(
+                    TranscriptMessage(
+                        agent_run_id=run.agent_run_id,
+                        sequence=sequence,
+                        role=MessageRole.USER if sequence % 2 else MessageRole.ASSISTANT,
+                        blocks=(TextBlock(text=f"prefill transcript group {sequence}"),),
+                        created_at=now,
+                    )
+                )
+
         run = await runtime.investigations.start(
             investigation.investigation_id,
             AgentScope(
@@ -192,32 +208,20 @@ async def run_live_model_workflow(
                 allowed_host_paths=(PurePosixPath("/workspace/service"),),
             ),
             parent_budget=AgentBudget(max_rounds=5, max_tool_calls=5, max_no_new_evidence_rounds=2),
+            before_run=prefill_context,
         )
         if fake_provider_registry is not None and run.status.value != "completed":
             if run.status.value == "paused_missing_evidence":
                 run = await runtime.investigations.resume_run(run.agent_run_id)
             if run.status.value != "completed":
                 raise RuntimeError(f"fake recording workflow did not complete: {run.status.value}")
-        if prefill_complete_groups:
-            now = datetime.now(UTC)
-            start = len(runtime.investigation_store.list_transcript_messages(run.agent_run_id)) + 1
-            for sequence in range(start, start + prefill_complete_groups * 2):
-                runtime.investigation_store.append_transcript_message(
-                    TranscriptMessage(
-                        agent_run_id=run.agent_run_id,
-                        sequence=sequence,
-                        role=MessageRole.USER if sequence % 2 else MessageRole.ASSISTANT,
-                        blocks=(TextBlock(text=f"prefill transcript group {sequence}"),),
-                        created_at=now,
-                    )
-                )
         report = runtime.reports.generate(investigation.investigation_id)
         store = runtime.investigation_store
         investigation_record = runtime.investigations.get_investigation(
             investigation.investigation_id
         ).model_dump(mode="json")
         hooks = tuple(
-            event.payload
+            event.model_dump(mode="json")
             for event in runtime.events.list_after(0, limit=1_000)
             if event.event_type is RuntimeEventType.AGENT_HOOK
         )

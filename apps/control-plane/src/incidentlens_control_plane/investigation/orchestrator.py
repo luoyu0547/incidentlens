@@ -32,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -194,6 +194,7 @@ class AgentOrchestrator:
         parent_scope: AgentScope,
         *,
         parent_budget: AgentBudget | None = None,
+        before_run: Callable[[AgentRun], Awaitable[None]] | None = None,
     ) -> AgentRun:
         """Create the parent run for *investigation* and run its bounded loop."""
         now = self._now()
@@ -202,6 +203,8 @@ class AgentOrchestrator:
             self._store.create_agent_run(parent)
         except AlreadyExists:
             parent = self._store.get_agent_run(parent.agent_run_id)
+        if before_run is not None:
+            await before_run(parent)
         return await self._run_loop(parent.agent_run_id)
 
     async def run(self, agent_run_id: str) -> AgentRun:
