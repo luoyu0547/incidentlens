@@ -21,6 +21,7 @@ from incidentlens_control_plane.investigation.store import (
     AgentRunNotFound,
     AlreadyExists,
     CheckpointConflict,
+    ChildReportReceiptConflict,
     CompactBoundaryConflict,
     ConcurrentModification,
     DelegatedTaskNotFound,
@@ -29,6 +30,7 @@ from incidentlens_control_plane.investigation.store import (
     ProposalNotFound,
     RoundConflict,
     ToolCallNotFound,
+    TranscriptConflict,
 )
 from incidentlens_control_plane.investigation.types import (
     AgentBudget,
@@ -36,6 +38,9 @@ from incidentlens_control_plane.investigation.types import (
     AgentRunKind,
     AgentScope,
     Checkpoint,
+    ChildReport,
+    ChildReportReceipt,
+    ChildReportStatus,
     CompactBoundary,
     CompactionState,
     Conclusion,
@@ -44,15 +49,18 @@ from incidentlens_control_plane.investigation.types import (
     HypothesisStatus,
     Investigation,
     InvestigationBudget,
+    MessageRole,
     ProviderUsage,
     RegistryProposalStatus,
     RegistryUpdateKind,
     RegistryUpdateProposal,
     SessionMemory,
     StopReason,
+    TextBlock,
     TodoItem,
     TodoStatus,
     ToolCall,
+    TranscriptMessage,
     UsageCounters,
 )
 from incidentlens_control_plane.logs.types import LogScope
@@ -213,7 +221,34 @@ def make_boundary(*, through_sequence: int = 10, **kwargs: object) -> CompactBou
     return CompactBoundary(**fields)
 
 
-# -- migration ----------------------------------------------------------------
+def make_receipt(
+    *, child_run_id: str = "child-1", evidence_id: str = "ev-1", created_at: datetime = NOW
+) -> ChildReportReceipt:
+    report = ChildReport(
+        agent_run_id=child_run_id,
+        parent_run_id="run-1",
+        status=ChildReportStatus.COMPLETE,
+        summary="child found the cause",
+        findings=("pool exhausted",),
+        stop_reason=StopReason.COMPLETED,
+        created_at=created_at,
+    )
+    return ChildReportReceipt(
+        child_run_id=child_run_id,
+        parent_run_id="run-1",
+        report=report,
+        evidence_id=evidence_id,
+        created_at=created_at,
+    )
+
+
+def make_notification(sequence: int = 1) -> TranscriptMessage:
+    return TranscriptMessage(
+        agent_run_id="run-1", sequence=sequence, role=MessageRole.ASSISTANT,
+        blocks=(TextBlock(text="child report received"),), created_at=NOW,
+    )
+
+
 
 
 def test_migrate_is_idempotent_and_creates_all_tables(tmp_path) -> None:
@@ -1269,3 +1304,74 @@ def test_create_delegated_task_rejects_cross_investigation_parent(tmp_path) -> N
     )
     with pytest.raises(IllegalTransition):
         store.create_delegated_task(package, now=NOW)
+
+
+def test_child_report_receipt_is_append_once(tmp_path) -> None:
+    store = make_store(tmp_path)
+    receipt = make_receipt()
+    assert store.put_child_report_receipt(receipt) == receipt
+    assert store.put_child_report_receipt(receipt) == receipt
+    assert store.list_undelivered_child_report_receipts("run-1") == (receipt,)
+
+
+def test_conflicting_receipt_for_same_child_is_rejected(tmp_path) -> None:
+    store = make_store(tmp_path)
+    store.put_child_report_receipt(make_receipt())
+    with pytest.raises(ChildReportReceiptConflict):
+        store.put_child_report_receipt(make_receipt(evidence_id="ev-other"))
+
+
+def test_receipt_delivery_is_idempotent(tmp_path) -> None:
+    store = make_store(tmp_path)
+    investigation = make_investigation()
+    parent = make_run()
+    store.create_investigation(investigation)
+    store.create_agent_run(parent)
+    receipt = make_receipt()
+    store.put_child_report_receipt(receipt)
+    delivered = store.deliver_child_report_receipt(
+        receipt.child_run_id,
+        parent=parent,
+        investigation=investigation,
+        notification=make_notification(),
+        delivered_at=NOW,
+    )
+    assert delivered.delivered_at == NOW
+    assert store.deliver_child_report_receipt(
+        receipt.child_run_id,
+        parent=parent,
+        investigation=investigation,
+        notification=make_notification(2),
+        delivered_at=datetime(2026, 8, 13, tzinfo=UTC),
+    ) == delivered
+    assert store.list_transcript_messages("run-1") == (make_notification(),)
+
+
+def test_receipt_delivery_rolls_back_on_transcript_conflict(tmp_path) -> None:
+    store = make_store(tmp_path)
+    investigation = make_investigation()
+    parent = make_run()
+    store.create_investigation(investigation)
+    store.create_agent_run(parent)
+    receipt = make_receipt()
+    store.put_child_report_receipt(receipt)
+    store.append_transcript_message(make_notification())
+    changed_parent = make_run(
+        usage=UsageCounters(rounds=1),
+        updated_at=datetime(2026, 8, 13, tzinfo=UTC),
+    )
+    changed_investigation = make_investigation(
+        usage=UsageCounters(rounds=1),
+        updated_at=datetime(2026, 8, 13, tzinfo=UTC),
+    )
+    with pytest.raises(TranscriptConflict):
+        store.deliver_child_report_receipt(
+            receipt.child_run_id,
+            parent=changed_parent,
+            investigation=changed_investigation,
+            notification=make_notification(),
+            delivered_at=NOW,
+        )
+    assert store.get_child_report_receipt(receipt.child_run_id).delivered_at is None
+    assert store.get_agent_run("run-1") == parent
+    assert store.get_investigation("inv-1") == investigation

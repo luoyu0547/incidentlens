@@ -40,6 +40,7 @@ from incidentlens_control_plane.investigation.types import (
     AgentRun,
     AgentRunKind,
     Checkpoint,
+    ChildReportReceipt,
     CompactBoundary,
     CompactionState,
     Conclusion,
@@ -106,6 +107,10 @@ class MemoryConflict(Exception):
 
 class TranscriptConflict(Exception):
     """Raised when a transcript message already exists for (run, sequence)."""
+
+
+class ChildReportReceiptConflict(Exception):
+    """Raised when a child report receipt key has conflicting content."""
 
 
 class CompactBoundaryConflict(Exception):
@@ -235,6 +240,14 @@ _DELEGATED_TASK_COLUMNS = (
     "child_run_id",
     "parent_run_id",
     "investigation_id",
+    "record_json",
+    "created_at",
+)
+
+_RECEIPT_COLUMNS = (
+    "child_run_id",
+    "parent_run_id",
+    "delivered_at",
     "record_json",
     "created_at",
 )
@@ -458,6 +471,16 @@ class InvestigationStore:
                     ON delegated_tasks(parent_run_id);
                 CREATE INDEX IF NOT EXISTS idx_delegated_tasks_investigation
                     ON delegated_tasks(investigation_id);
+
+                CREATE TABLE IF NOT EXISTS child_report_receipts (
+                    child_run_id TEXT PRIMARY KEY,
+                    parent_run_id TEXT NOT NULL,
+                    delivered_at TEXT,
+                    record_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_child_report_receipts_delivery
+                    ON child_report_receipts(parent_run_id, delivered_at);
 
                 CREATE TABLE IF NOT EXISTS registry_update_proposals (
                     proposal_id TEXT PRIMARY KEY,
@@ -1066,7 +1089,188 @@ class InvestigationStore:
             ).fetchall()
         return tuple(TranscriptMessage.model_validate_json(row[2]) for row in rows)
 
-    # -- compact boundaries (append-only) -------------------------------------
+    # -- child report receipts (append-once / transactional delivery) ---------
+
+    def put_child_report_receipt(
+        self, receipt: ChildReportReceipt
+    ) -> ChildReportReceipt:
+        """Persist a receipt once; identical retries return the stored record."""
+        with self._connection_factory() as conn:
+            row = conn.execute(
+                "SELECT record_json FROM child_report_receipts WHERE child_run_id = ?",
+                (receipt.child_run_id,),
+            ).fetchone()
+            if row is not None:
+                existing = ChildReportReceipt.model_validate_json(row[0])
+                if existing == receipt:
+                    return existing
+                raise ChildReportReceiptConflict(
+                    f"conflicting receipt for child run {receipt.child_run_id}"
+                )
+            try:
+                conn.execute(
+                    f"""
+                    INSERT INTO child_report_receipts ({", ".join(_RECEIPT_COLUMNS)})
+                    VALUES ({_placeholders(len(_RECEIPT_COLUMNS))})
+                    """,
+                    (
+                        receipt.child_run_id,
+                        receipt.parent_run_id,
+                        _iso(receipt.delivered_at),
+                        receipt.model_dump_json(),
+                        _iso(receipt.created_at),
+                    ),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                row = conn.execute(
+                    "SELECT record_json FROM child_report_receipts WHERE child_run_id = ?",
+                    (receipt.child_run_id,),
+                ).fetchone()
+                if row is not None:
+                    existing = ChildReportReceipt.model_validate_json(row[0])
+                    if existing == receipt:
+                        return existing
+                raise ChildReportReceiptConflict(
+                    f"conflicting receipt for child run {receipt.child_run_id}"
+                ) from exc
+        return receipt
+
+    def get_child_report_receipt(self, child_run_id: str) -> ChildReportReceipt:
+        """Return one child report receipt, or raise ``KeyError``."""
+        with self._connection_factory() as conn:
+            row = conn.execute(
+                "SELECT record_json FROM child_report_receipts WHERE child_run_id = ?",
+                (child_run_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(child_run_id)
+        return ChildReportReceipt.model_validate_json(row[0])
+
+    def list_undelivered_child_report_receipts(
+        self, parent_run_id: str
+    ) -> tuple[ChildReportReceipt, ...]:
+        """Return pending receipts for a parent in deterministic append order."""
+        with self._connection_factory() as conn:
+            rows = conn.execute(
+                """
+                SELECT record_json FROM child_report_receipts
+                WHERE parent_run_id = ? AND delivered_at IS NULL
+                ORDER BY created_at ASC, child_run_id ASC
+                """,
+                (parent_run_id,),
+            ).fetchall()
+        return tuple(ChildReportReceipt.model_validate_json(row[0]) for row in rows)
+
+    def deliver_child_report_receipt(
+        self,
+        child_run_id: str,
+        *,
+        parent: AgentRun,
+        investigation: Investigation,
+        notification: TranscriptMessage,
+        delivered_at: datetime,
+    ) -> ChildReportReceipt:
+        """Atomically attach, notify, account, and mark one receipt delivered."""
+        with self._connection_factory() as conn:
+            row = conn.execute(
+                "SELECT record_json FROM child_report_receipts WHERE child_run_id = ?",
+                (child_run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(child_run_id)
+            receipt = ChildReportReceipt.model_validate_json(row[0])
+            if receipt.delivered_at is not None:
+                return receipt
+            if (
+                parent.agent_run_id != receipt.parent_run_id
+                or notification.agent_run_id != receipt.parent_run_id
+                or investigation.investigation_id != parent.investigation_id
+            ):
+                raise ValueError("receipt delivery entities do not match")
+            timestamp = delivered_at.astimezone(UTC)
+            try:
+                conn.execute("BEGIN")
+                try:
+                    conn.execute(
+                        f"""
+                        INSERT INTO agent_transcript_messages
+                            ({", ".join(_TRANSCRIPT_MESSAGE_COLUMNS)})
+                        VALUES ({_placeholders(len(_TRANSCRIPT_MESSAGE_COLUMNS))})
+                        """,
+                        (
+                            notification.agent_run_id,
+                            notification.sequence,
+                            notification.model_dump_json(),
+                            _iso(notification.created_at),
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise TranscriptConflict(
+                        f"transcript message {notification.sequence} already exists for "
+                        f"run {notification.agent_run_id}"
+                    ) from exc
+                run_cursor = conn.execute(
+                    """
+                    UPDATE agent_runs SET record_json = ?, status = ?, updated_at = ?
+                    WHERE agent_run_id = ? AND status = ?
+                    """,
+                    (
+                        parent.model_dump_json(), parent.status.value,
+                        _iso(parent.updated_at), parent.agent_run_id, parent.status.value,
+                    ),
+                )
+                if run_cursor.rowcount == 0:
+                    exists = conn.execute(
+                        "SELECT 1 FROM agent_runs WHERE agent_run_id = ?",
+                        (parent.agent_run_id,),
+                    ).fetchone()
+                    if exists is None:
+                        raise AgentRunNotFound(f"agent run not found: {parent.agent_run_id}")
+                    raise ConcurrentModification(
+                        f"agent run {parent.agent_run_id} status changed"
+                    )
+                inv_cursor = conn.execute(
+                    """
+                    UPDATE investigations SET record_json = ?, status = ?, updated_at = ?
+                    WHERE investigation_id = ? AND status = ?
+                    """,
+                    (
+                        investigation.model_dump_json(), investigation.status.value,
+                        _iso(investigation.updated_at), investigation.investigation_id,
+                        investigation.status.value,
+                    ),
+                )
+                if inv_cursor.rowcount == 0:
+                    exists = conn.execute(
+                        "SELECT 1 FROM investigations WHERE investigation_id = ?",
+                        (investigation.investigation_id,),
+                    ).fetchone()
+                    if exists is None:
+                        raise InvestigationNotFound(
+                            f"investigation not found: {investigation.investigation_id}"
+                        )
+                    raise ConcurrentModification(
+                        f"investigation {investigation.investigation_id} status changed"
+                    )
+                updated_receipt = receipt.model_copy(update={"delivered_at": timestamp})
+                # Re-validate because model_copy intentionally skips validation.
+                updated_receipt = ChildReportReceipt.model_validate(
+                    updated_receipt.model_dump()
+                )
+                cursor = conn.execute(
+                    "UPDATE child_report_receipts SET delivered_at = ?, record_json = ? "
+                    "WHERE child_run_id = ? AND delivered_at IS NULL",
+                    (_iso(timestamp), updated_receipt.model_dump_json(), child_run_id),
+                )
+                if cursor.rowcount == 0:
+                    raise ConcurrentModification(f"receipt {child_run_id} was delivered")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return updated_receipt
+
 
     def append_compact_boundary(self, boundary: CompactBoundary) -> CompactBoundary:
         """Append one compact boundary; raise CompactBoundaryConflict on duplicate."""

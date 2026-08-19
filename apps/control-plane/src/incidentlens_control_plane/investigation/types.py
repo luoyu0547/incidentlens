@@ -270,6 +270,27 @@ class ChildReport(BaseModel):
     _validate_evidence_ids = field_validator("evidence_ids")(_validate_unique_citations)
 
 
+class ChildReportReceipt(BaseModel):
+    """Durable append-once envelope for a validated child report."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    child_run_id: str = Field(min_length=1, max_length=120)
+    parent_run_id: str = Field(min_length=1, max_length=120)
+    report: ChildReport
+    evidence_id: str = Field(min_length=1, max_length=120)
+    created_at: datetime
+    delivered_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def ids_must_match_report(self) -> ChildReportReceipt:
+        if self.report.agent_run_id != self.child_run_id:
+            raise ValueError("receipt child_run_id must match report agent_run_id")
+        if self.report.parent_run_id != self.parent_run_id:
+            raise ValueError("receipt parent_run_id must match report parent_run_id")
+        return self
+
+
 class DelegatedTaskPackage(BaseModel):
     """Scoped, bounded context a parent hands to a child run."""
 
