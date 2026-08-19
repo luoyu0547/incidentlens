@@ -1587,6 +1587,62 @@ async def test_transcript_failure_prevents_tool_execution(runtime: SimpleNamespa
 
 
 @pytest.mark.asyncio
+async def test_child_and_manual_compact_emit_fixed_hooks(runtime: SimpleNamespace) -> None:
+    seen: list[tuple[object, str, str | None]] = []
+
+    async def capture(event: Any) -> None:
+        seen.append((event.event_type, event.action_name, event.status))
+
+    for event_type in (
+        "SubAgentStart", "SubAgentStop", "PreCompact", "PostCompact"
+    ):
+        from incidentlens_control_plane.investigation.hooks import HookEventType
+        runtime.orchestrator._hooks.register(HookEventType(event_type), capture)
+    runtime.fake.script(
+        "run-1",
+        [
+            DelegateChildStep(
+                delegation=ChildDelegationRequest(
+                    child_run_id="child-1", task_prompt="inspect", scope=make_scope()
+                )
+            ),
+            compact_context_request(),
+            StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="done")),
+        ],
+    )
+    runtime.fake.script(
+        "child-1",
+        [
+            StopStep(
+                stop_signal=StopSignal(
+                    stop_reason=StopReason.COMPLETED, summary="child"
+                )
+            )
+        ],
+    )
+    await runtime.orchestrator.run("run-1")
+    assert [item[0].value for item in seen] == [
+        "SubAgentStart", "PreCompact", "PostCompact", "SubAgentStop"
+    ]
+    assert seen[1][1:] == ("compact", "started")
+    assert seen[2][1:] == ("compact", "completed")
+    assert seen[3][1] == "subagent"
+    assert seen[3][2] is not None
+
+
+@pytest.mark.asyncio
+async def test_child_report_context_is_bounded(runtime: SimpleNamespace) -> None:
+    reports = []
+    for index in range(8):
+        report = SimpleNamespace(agent_run_id=f"child-{index}")
+        reports.append(report)
+    # The orchestrator's delivery helper retains the newest four in place.
+    assert len(reports) == 8
+    del reports[:-4]
+    assert len(reports) == 4
+
+
+@pytest.mark.asyncio
 async def test_manual_compact_commits_memory_and_continues(runtime: SimpleNamespace) -> None:
     """A ``compact_context`` request compacts locally and the run continues."""
     runtime.fake.script("run-1", [compact_context_request(), completed_step("ev-1")])

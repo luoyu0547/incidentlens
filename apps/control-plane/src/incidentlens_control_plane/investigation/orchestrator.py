@@ -124,6 +124,9 @@ class _EvidenceBudgetExceeded(Exception):
     """Raised when attaching evidence would exceed the run/investigation cap."""
 
 
+_CHILD_REPORTS_LIMIT = 4
+
+
 def _iso_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
@@ -424,21 +427,26 @@ class AgentOrchestrator:
             try:
                 await self._emit_hook(
                     HookEventType.PRE_COMPACT, run,
+                    action_name="compact",
                     status="started",
                     metadata={"mode": "reactive", "round": run.usage.rounds},
                 )
-                request = await self._context.reactive_request(
-                    run, investigation, round_number,
-                    tool_schemas=self._executor.tool_schemas(scope=run.scope.scope),
-                )
+                compact_status = "failed"
+                try:
+                    request = await self._context.reactive_request(
+                        run, investigation, round_number,
+                        tool_schemas=self._executor.tool_schemas(scope=run.scope.scope),
+                    )
+                    compact_status = "completed"
+                finally:
+                    await self._emit_hook(
+                        HookEventType.POST_COMPACT, run,
+                        action_name="compact",
+                        status=compact_status,
+                        metadata={"mode": "reactive", "round": run.usage.rounds},
+                    )
             except (CompactionRejected, CompactionCircuitOpen) as exc:
                 return self._pause_prompt_too_long(run, investigation, now, reason=str(exc))
-            finally:
-                await self._emit_hook(
-                    HookEventType.POST_COMPACT, run,
-                    status="completed",
-                    metadata={"mode": "reactive", "round": run.usage.rounds},
-                )
             try:
                 result = await self._call_provider(request)
             except PromptTooLongError:
@@ -1382,24 +1390,36 @@ class AgentOrchestrator:
         try:
             await self._emit_hook(
                 HookEventType.PRE_COMPACT, run,
+                action_name="compact",
                 status="started", metadata={"mode": "manual", "round": round_number},
             )
-            await self._context.semantic_compact(run, manual=True)
-            result_block = ToolResultBlock(
-                tool_call_id=block.tool_call_id,
-                status=ToolCallStatus.SUCCEEDED,
-                content="[Context compacted]",
-            )
-        except Exception as exc:  # noqa: BLE001 - a failed compact is safe to continue from
+            compact_status = "failed"
+            try:
+                await self._context.semantic_compact(run, manual=True)
+                compact_status = "completed"
+                result_block = ToolResultBlock(
+                    tool_call_id=block.tool_call_id,
+                    status=ToolCallStatus.SUCCEEDED,
+                    content="[Context compacted]",
+                )
+            except Exception as exc:  # noqa: BLE001 - a failed compact is safe to continue from
+                result_block = ToolResultBlock(
+                    tool_call_id=block.tool_call_id,
+                    status=ToolCallStatus.FAILED,
+                    content=redact_message(str(exc), max_length=2_000).message_redacted,
+                )
+            finally:
+                await self._emit_hook(
+                    HookEventType.POST_COMPACT, run,
+                    action_name="compact",
+                    status=compact_status,
+                    metadata={"mode": "manual", "round": round_number},
+                )
+        except Exception:
             result_block = ToolResultBlock(
                 tool_call_id=block.tool_call_id,
                 status=ToolCallStatus.FAILED,
-                content=redact_message(str(exc), max_length=2_000).message_redacted,
-            )
-        finally:
-            await self._emit_hook(
-                HookEventType.POST_COMPACT, run,
-                status="completed", metadata={"mode": "manual", "round": round_number},
+                content="compact failed",
             )
         try:
             self._append_tool_result_message(run, (result_block,), now)
@@ -1650,6 +1670,10 @@ class AgentOrchestrator:
         error: str | None = None,
     ) -> ChildReportReceipt:
         """Build and append-once persist a terminal child report receipt."""
+        try:
+            return self._store.get_child_report_receipt(child_run.agent_run_id)
+        except KeyError:
+            pass
         report, evidence_ref = self._build_child_report(
             child_run, package, now=self._now(), error=error
         )
@@ -1663,13 +1687,19 @@ class AgentOrchestrator:
         return self._store.put_child_report_receipt(receipt)
 
     async def _emit_hook(
-        self, event_type: HookEventType, run: AgentRun, *, status: str, metadata: dict[str, Any]
+        self,
+        event_type: HookEventType,
+        run: AgentRun,
+        *,
+        action_name: str = "subagent",
+        status: str,
+        metadata: dict[str, Any],
     ) -> None:
         try:
             await self._hooks.emit(HookEvent(
                 event_type=event_type,
                 agent_run_id=run.agent_run_id,
-                action_name="subagent",
+                action_name=action_name,
                 occurred_at=self._now(),
                 status=status,
                 metadata=metadata,
@@ -1818,6 +1848,7 @@ class AgentOrchestrator:
                 delivered_at=_iso_utc(now),
             )
             child_reports.append(delivered.report)
+            del child_reports[:-_CHILD_REPORTS_LIMIT]
             run = self._store.get_agent_run(run.agent_run_id)
             investigation = self._store.get_investigation(run.investigation_id)
         return run, investigation
