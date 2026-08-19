@@ -290,29 +290,45 @@ class ToolExecutor:
         now: datetime | None = None,
     ) -> ToolOutcome:
         """Validate *request* against the registry, run it, and record evidence."""
+        now = now or datetime.now(UTC)
+        await self._emit_hook(
+            HookEvent(
+                event_type=HookEventType.PRE_TOOL_USE,
+                agent_run_id=run.agent_run_id,
+                action_name=request.tool_name,
+                occurred_at=now,
+                metadata={"tool_call_id": request.tool_call_id},
+            )
+        )
         definition = self._registry.get_definition(request.tool_name)
         if definition is None:
-            return self._failed_outcome(
+            outcome = self._failed_outcome(
                 request, ToolExecutionError(f"tool {request.tool_name!r} is not registered")
             )
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
         ok, message = _validate_schema(
             request.arguments, definition.parameters_json_schema, "arguments"
         )
         if not ok:
-            return self._failed_outcome(
+            outcome = self._failed_outcome(
                 request, ToolExecutionError(f"arguments invalid: {message}")
             )
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
         if (
             definition.allowed_scope is not None
             and definition.allowed_scope is not run.scope.scope
         ):
-            return self._failed_outcome(
+            outcome = self._failed_outcome(
                 request,
                 ToolExecutionError(
                     f"tool {request.tool_name!r} requires "
                     f"{definition.allowed_scope.value} scope"
                 ),
             )
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
 
         investigation = self._investigations.get_investigation(run.investigation_id)
         now = now or datetime.now(UTC)
@@ -324,16 +340,6 @@ class ToolExecutor:
             operation_id=request.tool_call_id,
             approval_id=approval_id,
             now=now,
-        )
-
-        await self._emit_hook(
-            HookEvent(
-                event_type=HookEventType.PRE_TOOL_USE,
-                agent_run_id=run.agent_run_id,
-                action_name=request.tool_name,
-                occurred_at=now,
-                metadata={"tool_call_id": request.tool_call_id},
-            )
         )
 
         try:
@@ -849,22 +855,6 @@ class ToolExecutor:
             raise ToolExecutionError("child_run_id must differ from the run id")
         investigation = self._investigations.get_investigation(ctx.run.investigation_id)
         child_scope = AgentScope(**args["scope"])
-        if child_scope.scope is ctx.run.scope.scope:
-            updates: dict[str, Any] = {}
-            if (
-                "allowed_host_paths" not in args["scope"]
-                and not child_scope.allowed_host_paths
-                and ctx.run.scope.allowed_host_paths
-            ):
-                updates["allowed_host_paths"] = ctx.run.scope.allowed_host_paths
-            if (
-                "allowed_container_paths" not in args["scope"]
-                and not child_scope.allowed_container_paths
-                and ctx.run.scope.allowed_container_paths
-            ):
-                updates["allowed_container_paths"] = ctx.run.scope.allowed_container_paths
-            if updates:
-                child_scope = child_scope.model_copy(update=updates)
         budget_args = args.get("budget")
         spec = DelegationSpec(
             child_run_id=child_run_id,

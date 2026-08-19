@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import inspect
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from incidentlens_control_plane.events.types import JsonValue, RuntimeEventType
 from incidentlens_control_plane.investigation.events import InvestigationEventPublisher
@@ -37,7 +38,16 @@ class HookEvent(BaseModel):
     action_name: str
     occurred_at: datetime
     status: str | None = None
-    metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    metadata: Mapping[str, JsonValue] = Field(default_factory=dict)
+
+    @field_validator("metadata", mode="after")
+    @classmethod
+    def freeze_metadata(cls, value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+        return MappingProxyType(dict(value))
+
+    @field_serializer("metadata")
+    def serialize_metadata(self, value: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        return dict(value)
 
 
 HookCallback = Callable[[HookEvent], Any]

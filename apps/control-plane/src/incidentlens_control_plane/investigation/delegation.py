@@ -119,6 +119,7 @@ class DelegationValidator:
                 else DelegationRejectionKind.INVALID
             )
             raise DelegationRejected(reason, kind)
+        spec = spec.model_copy(update={"scope": self._inherit_scope_paths(parent, spec.scope)})
         self._validate_registered_scope(parent, spec.scope)
         self._validate_evidence(parent, spec.evidence_ids)
         budget = self._bounded_budget(parent, spec.budget, now=now)
@@ -131,6 +132,17 @@ class DelegationValidator:
             budget=budget,
             evidence_ids=spec.evidence_ids,
         )
+
+    @staticmethod
+    def _inherit_scope_paths(parent: AgentRun, child: AgentScope) -> AgentScope:
+        """Apply one omission rule to both structured and tool requests."""
+        updates: dict[str, tuple] = {}
+        if child.scope is parent.scope.scope:
+            if not child.allowed_host_paths and parent.scope.allowed_host_paths:
+                updates["allowed_host_paths"] = parent.scope.allowed_host_paths
+            if not child.allowed_container_paths and parent.scope.allowed_container_paths:
+                updates["allowed_container_paths"] = parent.scope.allowed_container_paths
+        return child.model_copy(update=updates) if updates else child
 
     def _validate_registered_scope(self, parent: AgentRun, child: AgentScope) -> None:
         allowed, reason = _scope_within(child, parent.scope)

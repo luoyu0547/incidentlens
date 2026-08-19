@@ -1230,6 +1230,8 @@ class InvestigationStore:
                     raise ValueError(
                         "receipt delivery entities do not match persisted relationships"
                     )
+                if delivered_at.tzinfo is None or delivered_at.utcoffset() is None:
+                    raise ValueError("delivered_at must be timezone-aware")
                 timestamp = delivered_at.astimezone(UTC)
                 try:
                     conn.execute(
@@ -1253,11 +1255,12 @@ class InvestigationStore:
                 run_cursor = conn.execute(
                     """
                     UPDATE agent_runs SET record_json = ?, status = ?, updated_at = ?
-                    WHERE agent_run_id = ? AND status = ?
+                    WHERE agent_run_id = ? AND status = ? AND updated_at = ?
                     """,
                     (
                         parent.model_dump_json(), parent.status.value,
                         _iso(parent.updated_at), parent.agent_run_id, parent.status.value,
+                        _iso(persisted_parent.updated_at),
                     ),
                 )
                 if run_cursor.rowcount == 0:
@@ -1273,12 +1276,13 @@ class InvestigationStore:
                 inv_cursor = conn.execute(
                     """
                     UPDATE investigations SET record_json = ?, status = ?, updated_at = ?
-                    WHERE investigation_id = ? AND status = ?
+                    WHERE investigation_id = ? AND status = ? AND updated_at = ?
                     """,
                     (
                         investigation.model_dump_json(), investigation.status.value,
                         _iso(investigation.updated_at), investigation.investigation_id,
                         investigation.status.value,
+                        _iso(persisted_investigation.updated_at),
                     ),
                 )
                 if inv_cursor.rowcount == 0:
