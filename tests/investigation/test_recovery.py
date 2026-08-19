@@ -38,6 +38,9 @@ from incidentlens_control_plane.investigation.types import (
     AgentRun,
     AgentRunKind,
     AgentScope,
+    ChildReport,
+    ChildReportReceipt,
+    ChildReportStatus,
     Investigation,
     InvestigationBudget,
     StopReason,
@@ -168,8 +171,167 @@ def build_recovery(
 
 
 # ---------------------------------------------------------------------------
-# Startup: reconciliation of decided approvals
+# Startup: durable child receipt reconciliation
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_startup_reconciles_terminal_child_receipt_exactly_once(
+    tmp_path: Any,
+) -> None:
+    """Startup repairs a durable child receipt without invoking the provider."""
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(harness, status=InvestigationStatus.COMPLETED)
+    _make_run(harness, status=AgentRunStatus.COMPLETED)
+    child = AgentRun(
+        agent_run_id="child-1",
+        investigation_id="inv-1",
+        parent_run_id="run-1",
+        kind=AgentRunKind.CHILD,
+        scope=make_scope(),
+        status=AgentRunStatus.COMPLETED,
+        budget=AgentBudget(),
+        usage=UsageCounters(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    harness.investigations.create_agent_run(child)
+    evidence = harness.evidence.record_child_report(
+        agent_run_id="child-1",
+        incident_id="inc-1",
+        project_id=PROJECT_ID,
+        target_id=TARGET_ID,
+        service_name=SERVICE,
+        source_ref="child:child-1",
+        report_summary="child found the failed dependency",
+        child_run_id="child-1",
+        parent_run_id="run-1",
+        status=ChildReportStatus.COMPLETE.value,
+        stop_reason=StopReason.COMPLETED.value,
+        created_by="test",
+        now=NOW,
+    )
+    report = ChildReport(
+        agent_run_id="child-1",
+        parent_run_id="run-1",
+        status=ChildReportStatus.COMPLETE,
+        summary="child found the failed dependency",
+        findings=("dependency unavailable",),
+        stop_reason=StopReason.COMPLETED,
+        evidence_ids=(evidence.evidence_ref_id,),
+        created_at=NOW,
+    )
+    harness.investigations.put_child_report_receipt(
+        ChildReportReceipt(
+            child_run_id="child-1",
+            parent_run_id="run-1",
+            report=report,
+            evidence_id=evidence.evidence_ref_id,
+            created_at=NOW,
+        )
+    )
+    _, _, recovery = build_recovery(harness, registry)
+
+    first = await recovery.startup()
+    second = await recovery.startup()
+
+    parent = harness.investigations.get_agent_run("run-1")
+    notifications = [
+        message
+        for message in harness.investigations.list_transcript_messages("run-1")
+        if any(
+            getattr(block, "text", "").startswith("Child report child-1")
+            for block in message.blocks
+        )
+    ]
+    assert first.reconciled_child_receipts == 1
+    assert second.reconciled_child_receipts == 0
+    assert len(notifications) == 1
+    assert [ref.operation_id for ref in parent.evidence].count("child:child-1") == 1
+    assert harness.investigations.get_child_report_receipt("child-1").delivered_at is not None
+    assert registry.requests("child-1") == ()
+
+
+@pytest.mark.asyncio
+async def test_startup_isolates_failed_child_receipt_parent(tmp_path: Any) -> None:
+    """One invalid parent's receipt does not block another parent's delivery."""
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    for inv_id, parent_id in (("inv-1", "run-1"), ("inv-2", "run-2")):
+        investigation = _make_investigation(
+            harness, investigation_id=inv_id, status=InvestigationStatus.COMPLETED
+        )
+        parent = AgentRun(
+            agent_run_id=parent_id,
+            investigation_id=investigation.investigation_id,
+            parent_run_id=None,
+            kind=AgentRunKind.PARENT,
+            scope=make_scope(),
+            status=AgentRunStatus.COMPLETED,
+            budget=AgentBudget(),
+            usage=UsageCounters(),
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        harness.investigations.create_agent_run(parent)
+    child = AgentRun(
+        agent_run_id="child-bad",
+        investigation_id="inv-1",
+        parent_run_id="run-1",
+        kind=AgentRunKind.CHILD,
+        scope=make_scope(),
+        status=AgentRunStatus.COMPLETED,
+        budget=AgentBudget(),
+        usage=UsageCounters(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    harness.investigations.create_agent_run(child)
+    bad_report = ChildReport(
+        agent_run_id="child-bad", parent_run_id="run-1",
+        status=ChildReportStatus.COMPLETE, summary="bad receipt",
+        findings=(), stop_reason=StopReason.COMPLETED, created_at=NOW,
+    )
+    harness.investigations.put_child_report_receipt(
+        ChildReportReceipt(
+            child_run_id="child-bad", parent_run_id="run-1", report=bad_report,
+            evidence_id="missing-evidence", created_at=NOW,
+        )
+    )
+    good_child = AgentRun(
+        agent_run_id="child-good", investigation_id="inv-2", parent_run_id="run-2",
+        kind=AgentRunKind.CHILD, scope=make_scope(), status=AgentRunStatus.COMPLETED,
+        budget=AgentBudget(), usage=UsageCounters(), created_at=NOW, updated_at=NOW,
+    )
+    harness.investigations.create_agent_run(good_child)
+    good_evidence = harness.evidence.record_child_report(
+        agent_run_id="child-good", incident_id="inc-1", project_id=PROJECT_ID,
+        target_id=TARGET_ID, service_name=SERVICE, source_ref="child:child-good",
+        report_summary="good report", child_run_id="child-good", parent_run_id="run-2",
+        status=ChildReportStatus.COMPLETE.value, stop_reason=StopReason.COMPLETED.value,
+        created_by="test", now=NOW,
+    )
+    good_report = ChildReport(
+        agent_run_id="child-good", parent_run_id="run-2", status=ChildReportStatus.COMPLETE,
+        summary="good report", findings=(), stop_reason=StopReason.COMPLETED,
+        created_at=NOW,
+    )
+    harness.investigations.put_child_report_receipt(
+        ChildReportReceipt(
+            child_run_id="child-good", parent_run_id="run-2", report=good_report,
+            evidence_id=good_evidence.evidence_ref_id, created_at=NOW,
+        )
+    )
+    _, _, recovery = build_recovery(harness, registry)
+
+    summary = await recovery.startup()
+
+    assert summary.reconciled_child_receipts == 1
+    assert harness.investigations.get_child_report_receipt("child-bad").delivered_at is None
+    assert harness.investigations.get_child_report_receipt("child-good").delivered_at is not None
+
+
 
 
 @pytest.mark.asyncio

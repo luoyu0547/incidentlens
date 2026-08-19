@@ -133,7 +133,7 @@ ToolExecutor 对输出设硬上限，并先将完整的脱敏结果写入 Eviden
 - 子 Agent 获得持久化的 task prompt、收窄后的 scope、独立预算和自己的 Session Memory。
 - 子 Agent 结束后只把结构化报告及证据引用返回父 Agent；中间上下文不进入父上下文。
 
-## 4.1 Harness hooks, permissions, and restart delivery
+## 5. Harness hooks, permissions, and restart delivery
 
 Runtime exposes seven fixed lifecycle hooks: `PreToolUse`, `PostToolUse`,
 `ToolError`, `SubAgentStart`, `SubAgentStop`, `PreCompact`, and `PostCompact`.
