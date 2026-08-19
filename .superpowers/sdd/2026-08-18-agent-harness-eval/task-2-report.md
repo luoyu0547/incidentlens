@@ -5,30 +5,27 @@ Implemented the deterministic scenario runner in the test-side evaluation packag
 
 ## TDD evidence
 - RED: `uv run pytest tests/eval/test_harness_eval.py -q` failed during collection because `tests.eval.runner` was undefined.
-- Initial GREEN: `uv run pytest tests/eval/test_metrics.py tests/eval/test_harness_eval.py -q` passed 12 tests, but review rejected the superficial stop-only scenarios.
-- Fix RED: strengthened scenarios initially failed on fabricated compaction boundaries, missing persisted evidence typing, and incomplete tool-result pairing.
-- Fix GREEN: `uv run pytest tests/eval/test_metrics.py tests/eval/test_harness_eval.py -q` passes 12 tests after replacing the scenarios with real orchestrator runs.
-- CLI: `uv run python tests/eval/runner.py --json /tmp/incidentlens-harness-eval.json` prints six rows and writes a six-element JSON array.
+- Initial GREEN passed 12 tests but was rejected because scenarios were superficial stop-only scripts.
+- Round 1 fix RED exposed fabricated compaction state, incomplete persisted extraction, and approval pairing behavior.
+- Round 1 GREEN: focused evaluation suite passed 12 tests.
+- Round 2 GREEN: `uv run pytest tests/eval/test_metrics.py tests/eval/test_harness_eval.py -q` passes 12 tests; CLI prints six rows and writes `/tmp/incidentlens-harness-eval.json`.
 
 ## Dependency commits
-Cherry-picked the four Task 1 dependency commits before Task 2 work. Due to add/add conflicts, the dependency files were resolved to the later integration versions. Dependency commits in this branch are `2ba1629`, `fee40a8`, `733b009`, and `74b5739`.
+Task 1 dependency commits were cherry-picked and resolved before Task 2: `2ba1629`, `fee40a8`, `733b009`, and `74b5739`.
 
-## Task 2 fix evidence
-- `grounded_diagnosis` seeds a real owned validation evidence reference, runs the real provider/orchestrator, and emits a persisted conclusion citing that evidence.
-- `context_overflow_recovery` injects a deterministic `ContextCompactor`, scripts a real provider `PromptTooLongError` after a persisted tool turn, follows the orchestrator reactive retry path, and asserts the compactor request plus stored compact boundary.
-- `scope_violation` uses a container-scoped run to request host-only `host_read`; the persisted tool call is `FAILED` and the transport has no connection/execution.
-- `approval_pause_resume` requests real `docker_action`, observes `WAITING_APPROVAL` and the persisted approval id, approves that exact id, resumes via `InvestigationService.handle_approval_decision`, and observes one succeeded mutation call.
-- `delegation_equivalence` runs both typed `DelegateChildStep` delegation and the `delegate_child` tool boundary against real child runs and receipts. The trace is extracted from the typed run; the alternate boundary is independently asserted.
-- `child_restart_delivery` creates a child and undelivered durable receipt, runs a fresh orchestrator over the same SQLite path, then runs a second fresh runtime and asserts one child notification and no duplicate delivery.
-- Trace extraction now reads run rounds/tool calls/transcript/boundaries/conclusions/evidence, child receipts, and durable Hook events. Mutation IDs and expected child IDs are populated from resulting records.
-- Pairing metrics exclude intermediate `WAITING_APPROVAL` notifications while requiring the final result pairing.
-- Tests now assert concrete per-scenario persisted behavior instead of allowing all-empty traces to pass.
+## Round 2 fix evidence
+- Restart now leaves the child receipt genuinely pending (`delivered_at is None`) before creating a second runtime over the same SQLite path. It invokes `RecoveryService.startup()` on that second runtime, asserts `reconciled_child_receipts == 1`, verifies persisted `delivered_at`, and runs a second startup asserting zero additional reconciliation. No parent provider loop runs before recovery.
+- `_trace` derives child run IDs from `list_agent_runs(parent_run_id=...)` and receipts by querying the durable receipt store. It no longer accepts caller-supplied expected child IDs. Child metrics therefore cannot be injected by scenario constants.
+- All six calls use explicit `AgentBudget` values at run creation. The overflow case additionally uses a smaller explicit budget while retaining the real reactive compactor path.
+- Delegation equivalence now extends `HarnessTrace.delegation_forms`; extraction derives typed delegation from persisted delegated-task records and tool delegation from persisted `delegate_child` calls. The scenario asserts both forms and equivalent delivered child receipts, rather than discarding the alternate trace.
+- The prior real compactor, scope rejection, approval, and evidence grounding behavior is preserved.
 
 ## Files
 - `/Users/chenxueqiang/Documents/code/incidentlens/.claude/worktrees/agent-harness-eval/tests/eval/support.py`
 - `/Users/chenxueqiang/Documents/code/incidentlens/.claude/worktrees/agent-harness-eval/tests/eval/scenarios.py`
 - `/Users/chenxueqiang/Documents/code/incidentlens/.claude/worktrees/agent-harness-eval/tests/eval/runner.py`
+- `/Users/chenxueqiang/Documents/code/incidentlens/.claude/worktrees/agent-harness-eval/tests/eval/types.py`
 - `/Users/chenxueqiang/Documents/code/incidentlens/.claude/worktrees/agent-harness-eval/tests/eval/test_harness_eval.py`
 
-## Remaining concern
-The runtime's tool delegation path currently does not expose a receipt for the tool-form child in this fixture after the parent continues; the fix therefore independently exercises and asserts that boundary while retaining the typed delegation trace as the canonical result. The implementation does not fabricate records or boundaries.
+## Verification
+Focused tests pass. The runner CLI produces six scenario rows and JSON. `git diff --check` is clean. Full-suite and final lint execution are required before the round-2 commit; the environment rejected the worktree-isolated Bash lint wrapper, so the final coordinator should rerun the exact project commands if needed.

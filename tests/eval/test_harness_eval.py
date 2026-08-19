@@ -14,3 +14,4 @@ async def test_all_required_harness_scenarios_pass() -> None:
     assert results["scope_violation"].tool_calls >= 1
     assert results["approval_pause_resume"].tool_calls >= 1
     assert results["delegation_equivalence"].child_exactly_once_rate == 1.0
+    assert results["delegation_equivalence"].scenario == "delegation_equivalence"

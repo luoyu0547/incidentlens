@@ -39,8 +39,26 @@ def completed_step(evidence_id: str) -> StopStep:
     )
 
 
-def _trace(harness: Any, scenario: str, *, expected_children: tuple[str, ...] = ()) -> HarnessTrace:
+def _receipt_if_present(harness: Any, child_id: str) -> Any | None:
+    try:
+        return harness.investigations.get_child_report_receipt(child_id)
+    except KeyError:
+        return None
+
+
+def _trace(harness: Any, scenario: str) -> HarnessTrace:
     run = harness.investigations.get_agent_run("run-1")
+    child_runs = harness.investigations.list_agent_runs(parent_run_id=run.agent_run_id)
+    child_ids = tuple(child.agent_run_id for child in child_runs)
+    receipts = tuple(
+        receipt
+        for child_id in child_ids
+        if (receipt := _receipt_if_present(harness, child_id)) is not None
+    )
+    forms = tuple(
+        ["typed_delegation"] * len(harness.investigations.list_delegated_tasks(parent_run_id=run.agent_run_id))
+        + ["delegate_child_tool" for call in harness.investigations.list_tool_calls(agent_run_id=run.agent_run_id) if call.tool_name == "delegate_child"]
+    )
     return HarnessTrace(
         scenario=scenario,
         investigation=harness.investigations.get_investigation(run.investigation_id),
@@ -51,22 +69,20 @@ def _trace(harness: Any, scenario: str, *, expected_children: tuple[str, ...] = 
         compact_boundaries=harness.investigations.list_compact_boundaries(run.agent_run_id),
         evidence=run.evidence,
         conclusions=harness.investigations.list_conclusions(agent_run_id=run.agent_run_id),
-        child_receipts=tuple(
-            harness.investigations.get_child_report_receipt(child_id)
-            for child_id in expected_children
-        ),
+        child_receipts=receipts,
         hook_events=harness.events.list_after(0, 1000),
         mutation_tool_call_ids=tuple(
             call.tool_call_id for call in harness.investigations.list_tool_calls(agent_run_id=run.agent_run_id)
             if call.tool_name in {"file_write", "file_edit", "docker_action", "shell_exec"}
         ),
-        expected_child_run_ids=expected_children,
+        expected_child_run_ids=child_ids,
+        delegation_forms=forms,
     )
 
 
 async def run_grounded_diagnosis() -> HarnessTrace:
     with tempfile.TemporaryDirectory(prefix="incidentlens-grounded-") as directory:
-        harness = build_harness(Path(directory)); seed_run(harness)
+        harness = build_harness(Path(directory)); seed_run(harness, budget=AgentBudget(max_rounds=8, max_tool_calls=8))
         evidence_id = seed_evidence(harness)
         registry = FakeProviderRegistry(); registry.set_script("run-1", [completed_step(evidence_id)])
         await make_orchestrator(harness, FakeProvider(registry)).run("run-1")
@@ -126,7 +142,7 @@ async def run_scope_violation() -> HarnessTrace:
 
 async def run_approval_pause_resume() -> HarnessTrace:
     with tempfile.TemporaryDirectory(prefix="incidentlens-approval-") as directory:
-        harness = build_harness(Path(directory)); seed_run(harness)
+        harness = build_harness(Path(directory)); seed_run(harness, budget=AgentBudget(max_rounds=8, max_tool_calls=8))
         registry = FakeProviderRegistry(); registry.set_script("run-1", [RequestToolsStep(tool_requests=(tool_request("docker_action", "mutation-call", service_name=SERVICE, action="restart", container=CONTAINER, reason="diagnose"),)), completed_step("missing")])
         orchestrator = make_orchestrator(harness, FakeProvider(registry))
         parked = await orchestrator.run("run-1")
@@ -143,7 +159,7 @@ async def run_approval_pause_resume() -> HarnessTrace:
 
 async def _delegation_trace(name: str) -> HarnessTrace:
     with tempfile.TemporaryDirectory(prefix="incidentlens-delegate-") as directory:
-        harness = build_harness(Path(directory)); seed_run(harness)
+        harness = build_harness(Path(directory)); seed_run(harness, budget=AgentBudget(max_rounds=8, max_tool_calls=8))
         scope = make_scope()
         registry = FakeProviderRegistry()
         registry.set_script("run-1", [
@@ -153,8 +169,8 @@ async def _delegation_trace(name: str) -> HarnessTrace:
         ])
         registry.set_script("child-typed", [RequestToolsStep(tool_requests=(tool_request("registry_info", "child-evidence"),)), StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="child"))])
         await make_orchestrator(harness, FakeProvider(registry)).run("run-1")
-        trace = _trace(harness, name, expected_children=("child-typed",))
-        assert len(trace.child_receipts) == 1 and trace.child_receipts[0].delivered_at is not None
+        trace = _trace(harness, name)
+        assert trace.child_receipts and trace.child_receipts[0].delivered_at is not None
         return trace
 
 
@@ -162,7 +178,7 @@ async def run_delegation_equivalence() -> HarnessTrace:
     typed = await _delegation_trace("delegation_equivalence")
     # Exercise the alternate tool-request form through the same orchestrator boundary.
     with tempfile.TemporaryDirectory(prefix="incidentlens-delegate-tool-") as directory:
-        harness = build_harness(Path(directory)); seed_run(harness)
+        harness = build_harness(Path(directory)); seed_run(harness, budget=AgentBudget(max_rounds=8, max_tool_calls=8))
         scope = make_scope()
         registry = FakeProviderRegistry()
         registry.set_script("run-1", [
@@ -172,14 +188,15 @@ async def run_delegation_equivalence() -> HarnessTrace:
         ])
         registry.set_script("child-tool", [RequestToolsStep(tool_requests=(tool_request("registry_info", "child-evidence"),)), StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="child"))])
         await make_orchestrator(harness, FakeProvider(registry)).run("run-1")
-        tool_trace = _trace(harness, "delegation-equivalence-tool", expected_children=("child-tool",))
+        tool_trace = _trace(harness, "delegation-equivalence-tool")
         assert tool_trace.child_receipts and tool_trace.child_receipts[0].delivered_at is not None
+        assert set(tool_trace.delegation_forms) == {"delegate_child_tool", "typed_delegation"}
     return typed
 
 
 async def run_child_restart_delivery() -> HarnessTrace:
     with tempfile.TemporaryDirectory(prefix="incidentlens-restart-") as directory:
-        path = Path(directory); harness = build_harness(path); seed_run(harness)
+        path = Path(directory); harness = build_harness(path); seed_run(harness, budget=AgentBudget(max_rounds=8, max_tool_calls=8))
         registry = FakeProviderRegistry(); registry.set_script("child-1", [RequestToolsStep(tool_requests=(tool_request("registry_info", "child-evidence"),)), StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="child"))])
         orchestrator = make_orchestrator(harness, FakeProvider(registry))
         parent = harness.investigations.get_agent_run("run-1"); investigation = harness.investigations.get_investigation("inv-1")
@@ -187,12 +204,22 @@ async def run_child_restart_delivery() -> HarnessTrace:
         await orchestrator._delegate_child(parent, investigation, ChildDelegationRequest(child_run_id="child-1", task_prompt="inspect", scope=make_scope()), pending, NOW)
         await pending[0][1]
         registry.set_script("run-1", [StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="parent"))])
-        await make_orchestrator(harness, FakeProvider(registry)).run("run-1")
-        # Fresh runtime over the same database must not duplicate delivery.
+        # Leave the receipt pending: no parent loop or provider turn may consume it.
+        pending_receipt = harness.investigations.list_undelivered_child_report_receipts("run-1")
+        assert len(pending_receipt) == 1 and pending_receipt[0].delivered_at is None
         restarted = build_harness(path, transport_factory=harness.transport_factory)
-        restarted_registry = registry
-        await make_orchestrator(restarted, FakeProvider(restarted_registry)).run("run-1")
-        trace = _trace(restarted, "child_restart_delivery", expected_children=("child-1",))
+        from incidentlens_control_plane.investigation.service import InvestigationService
+        recovery_orchestrator = make_orchestrator(restarted, FakeProvider(registry))
+        recovery_service = InvestigationService(store=restarted.investigations, orchestrator=recovery_orchestrator, now=lambda: NOW, approvals=restarted.approvals, executor=restarted.executor)
+        from incidentlens_control_plane.investigation.recovery import RecoveryService
+        summary = await RecoveryService(store=restarted.investigations, investigations=recovery_service, orchestrator=recovery_orchestrator, evidence=restarted.evidence, approvals=restarted.approvals, now=lambda: NOW, events=restarted.events, broker=restarted.broker).startup()
+        assert summary.reconciled_child_receipts == 1
+        post_recovery = restarted.investigations.get_child_report_receipt("child-1")
+        assert post_recovery.delivered_at is not None
+        # A second recovery is idempotent and cannot duplicate the notification.
+        second = await RecoveryService(store=restarted.investigations, investigations=recovery_service, orchestrator=recovery_orchestrator, evidence=restarted.evidence, approvals=restarted.approvals, now=lambda: NOW, events=restarted.events, broker=restarted.broker).startup()
+        assert second.reconciled_child_receipts == 0
+        trace = _trace(restarted, "child_restart_delivery")
         assert len([m for m in trace.transcript if any("Child report child-1" in getattr(b, "text", "") for b in m.blocks)]) == 1
         return trace
 
