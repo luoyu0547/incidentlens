@@ -137,7 +137,26 @@ breaker，第 N 次尝试抛出 `CompactionCircuitOpen`，阻塞后续自动语�
 - 子 Agent 获得持久化的 task prompt、收窄后的 scope、独立预算和自己的 Session Memory。
 - 子 Agent 结束后只把结构化报告及证据引用返回父 Agent；中间上下文不进入父上下文。
 
-## 5. 实施状态
+## 5. Harness hooks, permissions, and restart delivery
+
+Runtime exposes seven fixed lifecycle hooks: `PreToolUse`, `PostToolUse`,
+`ToolError`, `SubAgentStart`, `SubAgentStop`, `PreCompact`, and `PostCompact`.
+They are observability-only callbacks: hook failures are isolated and hooks are
+never authoritative for authorization, execution, or state transitions. One
+`DelegationValidator` instance is shared by the `ToolExecutor` and
+`AgentOrchestrator`, so child scope and budget checks cannot diverge.
+
+Child reports use a durable receipt-first protocol. A terminal child persists
+one append-once receipt; startup re-reads parent/investigation state and delivers
+undelivered receipts transactionally, attaching evidence and exactly one parent
+notification. Delivery is idempotent across repeated restarts, including when
+the parent run is already terminal; recovery never reruns a child or provider
+turn.
+
+Permissions remain in the existing `ToolRegistry -> ProviderOutputValidator ->
+ToolExecutor -> Gateway -> policy / approval` path. There are no dynamic
+plugins or scripts and no separate action pipeline.
+
 
 ### 已实现
 

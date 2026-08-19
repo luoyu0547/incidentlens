@@ -51,6 +51,7 @@ class RuntimeEventType(StrEnum):
     AGENT_RUN_COMPLETED = "agent_run.completed"
     AGENT_RUN_FAILED = "agent_run.failed"
     AGENT_RUN_CANCELLED = "agent_run.cancelled"
+    AGENT_HOOK = "agent_hook"
 
     TOOL_CALL_STARTED = "tool_call.started"
     TOOL_CALL_STATUS_CHANGED = "tool_call.status_changed"

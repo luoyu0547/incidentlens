@@ -215,10 +215,17 @@ def _validate_schema(
 def _paths_subset(
     child: tuple[PurePosixPath, ...], parent: tuple[PurePosixPath, ...]
 ) -> bool:
-    """Return True when every child path is allowed by the parent's paths."""
+    """Return True when every child path is contained by a parent root.
+
+    An empty parent path set is unbounded.  A bounded parent requires at least
+    one child root, and every child root must be contained by a parent root.
+    """
     if not parent:
-        return True  # an unbounded parent allows any absolute, `..`-free path
-    return set(child) <= set(parent)
+        return True
+    return bool(child) and all(
+        any(child_path.is_relative_to(parent_root) for parent_root in parent)
+        for child_path in child
+    )
 
 
 def _scope_within(child: AgentScope, parent: AgentScope) -> tuple[bool, str]:

@@ -39,11 +39,16 @@ from incidentlens_control_plane.evidence.service import (
 )
 from incidentlens_control_plane.evidence.store import EvidenceStore
 from incidentlens_control_plane.evidence.types import EvidenceRef
+from incidentlens_control_plane.investigation.delegation import (
+    DelegationRejected,
+    DelegationSpec,
+    DelegationValidator,
+)
 from incidentlens_control_plane.investigation.guard import InvestigationGuard
+from incidentlens_control_plane.investigation.hooks import HookEvent, HookEventType, HookRunner
 from incidentlens_control_plane.investigation.provider import (
     ToolRequest,
     ToolSchema,
-    _scope_within,
     _validate_schema,
 )
 from incidentlens_control_plane.investigation.state_machine import ToolCallStatus
@@ -79,7 +84,6 @@ from incidentlens_control_plane.investigation.types import (
     AgentBudget,
     AgentRun,
     AgentScope,
-    DelegatedTaskPackage,
     EvidenceReference,
     TodoItem,
     TodoStatus,
@@ -247,6 +251,8 @@ class ToolExecutor:
         investigations: InvestigationStore,
         approvals: ApprovalService,
         registry: ToolRegistry | None = None,
+        hooks: HookRunner | None = None,
+        delegation: DelegationValidator | None = None,
     ) -> None:
         self._projects = projects
         self._sessions = sessions
@@ -258,6 +264,8 @@ class ToolExecutor:
         self._investigations = investigations
         self._approvals = approvals
         self._guard = InvestigationGuard()
+        self._delegation = delegation or DelegationValidator(self._projects, self._guard)
+        self._hooks = hooks or HookRunner()
         self._registry = registry or default_tool_registry(self)
 
     @property
@@ -282,32 +290,49 @@ class ToolExecutor:
         now: datetime | None = None,
     ) -> ToolOutcome:
         """Validate *request* against the registry, run it, and record evidence."""
+        now = now or datetime.now(UTC)
+        await self._emit_hook(
+            HookEvent(
+                event_type=HookEventType.PRE_TOOL_USE,
+                agent_run_id=run.agent_run_id,
+                action_name=request.tool_name,
+                occurred_at=now,
+                metadata={"tool_call_id": request.tool_call_id},
+            )
+        )
         definition = self._registry.get_definition(request.tool_name)
         if definition is None:
-            return self._failed_outcome(
+            outcome = self._failed_outcome(
                 request, ToolExecutionError(f"tool {request.tool_name!r} is not registered")
             )
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
         ok, message = _validate_schema(
             request.arguments, definition.parameters_json_schema, "arguments"
         )
         if not ok:
-            return self._failed_outcome(
+            outcome = self._failed_outcome(
                 request, ToolExecutionError(f"arguments invalid: {message}")
             )
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
         if (
             definition.allowed_scope is not None
             and definition.allowed_scope is not run.scope.scope
         ):
-            return self._failed_outcome(
+            outcome = self._failed_outcome(
                 request,
                 ToolExecutionError(
                     f"tool {request.tool_name!r} requires "
                     f"{definition.allowed_scope.value} scope"
                 ),
             )
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
 
         investigation = self._investigations.get_investigation(run.investigation_id)
         now = now or datetime.now(UTC)
+        handler = self._registry.handler_for(request.tool_name)
         ctx = ToolContext(
             run=run,
             arguments=request.arguments,
@@ -316,20 +341,30 @@ class ToolExecutor:
             approval_id=approval_id,
             now=now,
         )
-        handler = self._registry.handler_for(request.tool_name)
+
         try:
             result = await handler(ctx)  # type: ignore[misc]
         except ToolUncertain as exc:
-            return self._uncertain_outcome(request, run, investigation.incident_id, exc)
+            outcome = self._uncertain_outcome(request, run, investigation.incident_id, exc)
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
         except ToolExecutionError as exc:
-            return self._failed_outcome(request, exc)
+            outcome = self._failed_outcome(request, exc)
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
         except CommandForbidden as exc:
-            return self._failed_outcome(request, exc)
+            outcome = self._failed_outcome(request, exc)
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
         except (asyncio.TimeoutError, RemoteTimeoutError, RemoteConnectionError) as exc:
-            return self._uncertain_outcome(request, run, investigation.incident_id, exc)
+            outcome = self._uncertain_outcome(request, run, investigation.incident_id, exc)
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
         except Exception as exc:
-            return self._failed_outcome(request, exc)
-        return ToolOutcome(
+            outcome = self._failed_outcome(request, exc)
+            await self._emit_tool_error(run, request, now, outcome)
+            return outcome
+        outcome = ToolOutcome(
             tool_call_id=request.tool_call_id,
             tool_name=request.tool_name,
             status=result.status,
@@ -338,6 +373,55 @@ class ToolExecutor:
             output_bytes=result.output_bytes,
             approval_id=result.approval_id,
             error_redacted=result.error_redacted,
+        )
+        await self._emit_post_tool_use(run, request, now, outcome)
+        return outcome
+
+    async def _emit_hook(self, event: HookEvent) -> tuple[str, ...]:
+        return await self._hooks.emit(event)
+
+    async def _emit_post_tool_use(
+        self,
+        run: AgentRun,
+        request: ToolRequest,
+        now: datetime,
+        outcome: ToolOutcome,
+    ) -> None:
+        await self._emit_hook(
+            HookEvent(
+                event_type=HookEventType.POST_TOOL_USE,
+                agent_run_id=run.agent_run_id,
+                action_name=request.tool_name,
+                occurred_at=now,
+                status=outcome.status.value,
+                metadata={
+                    "tool_call_id": request.tool_call_id,
+                    "output_bytes": outcome.output_bytes,
+                    "approval_id": outcome.approval_id,
+                },
+            )
+        )
+
+    async def _emit_tool_error(
+        self,
+        run: AgentRun,
+        request: ToolRequest,
+        now: datetime,
+        outcome: ToolOutcome,
+    ) -> None:
+        await self._emit_hook(
+            HookEvent(
+                event_type=HookEventType.TOOL_ERROR,
+                agent_run_id=run.agent_run_id,
+                action_name=request.tool_name,
+                occurred_at=now,
+                status=outcome.status.value,
+                metadata={
+                    "tool_call_id": request.tool_call_id,
+                    "output_bytes": outcome.output_bytes,
+                    "approval_id": outcome.approval_id,
+                },
+            )
         )
 
     # -- log tools ------------------------------------------------------------
@@ -769,34 +853,23 @@ class ToolExecutor:
         child_run_id = args["child_run_id"]
         if child_run_id == ctx.run.agent_run_id:
             raise ToolExecutionError("child_run_id must differ from the run id")
-        # A child run must never delegate grandchildren, and the investigation's
-        # global child budget must not be exceeded through the tool path either
-        # (the provider path already enforces this via the same guard).
         investigation = self._investigations.get_investigation(ctx.run.investigation_id)
-        allowed, reason = self._guard.can_spawn_child(ctx.run, investigation)
-        if not allowed:
-            raise ToolExecutionError(reason)
-        child_scope = AgentScope(**args["scope"])
-        allowed, reason = _scope_within(child_scope, ctx.run.scope)
-        if not allowed:
-            raise ToolExecutionError(f"child scope rejected: {reason}")
-        seed = tuple(args.get("evidence_ids") or ())
-        owned = {ref.evidence_id for ref in ctx.run.evidence}
-        missing = set(seed) - owned
-        if missing:
-            raise ToolExecutionError(
-                f"child delegation cites evidence not owned by this run: {sorted(missing)}"
-            )
-        budget = self._child_budget(ctx, args.get("budget") or {})
-        package = DelegatedTaskPackage(
+        child_scope_args = args["scope"]
+        child_scope = AgentScope(**child_scope_args)
+        budget_args = args.get("budget")
+        spec = DelegationSpec(
             child_run_id=child_run_id,
-            parent_run_id=ctx.run.agent_run_id,
-            investigation_id=ctx.run.investigation_id,
             task_prompt=args["task_prompt"],
             scope=child_scope,
-            budget=budget,
-            evidence_ids=seed,
+            evidence_ids=tuple(args.get("evidence_ids") or ()),
+            budget=AgentBudget(**budget_args) if budget_args else None,
+            host_paths_specified="allowed_host_paths" in child_scope_args,
+            container_paths_specified="allowed_container_paths" in child_scope_args,
         )
+        try:
+            package = self._delegation.prepare(ctx.run, investigation, spec, now=ctx.now)
+        except DelegationRejected as exc:
+            raise ToolExecutionError(str(exc)) from exc
         self._investigations.create_delegated_task(package, now=ctx.now)
         # Account the delegation against the investigation's child budget so the
         # tool path and the provider path consume the same bounded pool.
@@ -1231,24 +1304,6 @@ class ToolExecutor:
             return HostScope(), None
         container = self._validate_container(ctx, svc, container_arg)
         return ContainerScope(container=container), container
-
-    def _child_budget(self, ctx: ToolContext, budget_args: dict[str, Any]) -> AgentBudget:
-        defaults = AgentBudget()
-        kwargs = {
-            name: budget_args.get(name, getattr(defaults, name))
-            for name in AgentBudget.model_fields
-        }
-        budget = AgentBudget(**kwargs)
-        # The child budget must never exceed the parent run's on ANY axis, so a
-        # child cannot widen its own evidence/output/wall-clock envelope.
-        base = ctx.run.budget
-        for field_name in AgentBudget.model_fields:
-            if getattr(budget, field_name) > getattr(base, field_name):
-                raise ToolExecutionError(
-                    f"child {field_name} must not exceed the run budget "
-                    f"({getattr(base, field_name)})"
-                )
-        return budget
 
     async def _approval_for_changeset(
         self,

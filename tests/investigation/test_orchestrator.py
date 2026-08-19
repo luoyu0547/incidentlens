@@ -838,9 +838,76 @@ async def test_parent_delegates_two_children_concurrently(tmp_path: Any) -> None
     assert {ref.operation_id for ref in child_refs} == {"child:child-1", "child:child-2"}
 
 
-# ---------------------------------------------------------------------------
-# Cancellation / resume
-# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_parent_delivers_terminal_child_receipt_after_restart(tmp_path: Any) -> None:
+    """A persisted terminal child is delivered once by two fresh processes.
+
+    The child is run separately first so its durable receipt is intentionally
+    still undelivered.  The first fresh parent process reconciles it before its
+    safe scripted provider turn; the second process sees the terminal parent
+    and must not rerun either child work or the notification.
+    """
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(harness, status=InvestigationStatus.RUNNING)
+    _make_parent_run(harness, status=AgentRunStatus.RUNNING)
+    registry.set_script(
+        "child-1",
+        [
+            RequestToolsStep(tool_requests=(tool_request("registry_info", "child-call"),)),
+            StopStep(
+                stop_signal=StopSignal(
+                    stop_reason=StopReason.COMPLETED, summary="child done"
+                )
+            ),
+        ],
+    )
+    pending: list[tuple[str, asyncio.Task]] = []
+    seeder, _, child_provider = build_orchestrator(harness, registry)
+    parent = harness.investigations.get_agent_run("run-1")
+    investigation = harness.investigations.get_investigation("inv-1")
+    await seeder._delegate_child(
+        parent,
+        investigation,
+        ChildDelegationRequest(
+            child_run_id="child-1", task_prompt="inspect", scope=make_scope()
+        ),
+        pending,
+        NOW,
+    )
+    assert len(pending) == 1
+    await pending[0][1]
+    receipt = harness.investigations.get_child_report_receipt("child-1")
+    assert receipt.delivered_at is None
+    assert child_provider.call_count("child-1") == 2
+
+    registry.set_script(
+        "run-1",
+        [StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="done"))],
+    )
+    first, _, first_provider = build_orchestrator(harness, registry)
+    first_result = await first.run("run-1")
+    assert first_result.status is AgentRunStatus.COMPLETED
+    child_calls_before_second = child_provider.call_count("child-1")
+    second, _, second_provider = build_orchestrator(harness, registry)
+    second_result = await second.run("run-1")
+
+    parent = harness.investigations.get_agent_run("run-1")
+    assert second_result.status is AgentRunStatus.COMPLETED
+    assert [ref.operation_id for ref in parent.evidence].count("child:child-1") == 1
+    notifications = [
+        message
+        for message in harness.investigations.list_transcript_messages("run-1")
+        if any(
+            isinstance(block, TextBlock) and "Child report child-1" in block.text
+            for block in message.blocks
+        )
+    ]
+    assert len(notifications) == 1
+    assert harness.investigations.get_child_report_receipt("child-1").delivered_at is not None
+    assert second_provider.call_count("child-1") == child_calls_before_second
+
+
 
 
 async def test_cancel_with_inflight_child_writes_partial_report(tmp_path: Any) -> None:
@@ -1570,11 +1637,36 @@ async def test_prompt_too_long_compacts_once_then_retries(runtime: SimpleNamespa
 
 
 @pytest.mark.asyncio
-async def test_second_prompt_too_long_pauses(runtime: SimpleNamespace) -> None:
-    runtime.fake.script("run-1", [PromptTooLongError(), PromptTooLongError()])
+async def test_unexpected_reactive_compaction_error_pauses_and_emits_failed_hook(
+    runtime: SimpleNamespace,
+) -> None:
+    """A non-circuit compactor exception is converted into a safe pause."""
+    from incidentlens_control_plane.investigation.hooks import HookEventType
+
+    seen: list[tuple[object, str, str | None]] = []
+
+    async def capture(event: Any) -> None:
+        seen.append((event.event_type, event.action_name, event.status))
+
+    runtime.orchestrator._hooks.register(HookEventType.PRE_COMPACT, capture)
+    runtime.orchestrator._hooks.register(HookEventType.POST_COMPACT, capture)
+
+    async def explode(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("context store unavailable")
+
+    runtime.orchestrator._context.reactive_request = explode
+    runtime.fake.script("run-1", [PromptTooLongError()])
+
     run = await runtime.orchestrator.run("run-1")
+
     assert run.status is AgentRunStatus.PAUSED_BUDGET
-    assert runtime.fake.call_count("run-1") == 2
+    assert run.stop_reason is StopReason.BUDGET_OUTPUT
+    assert [item[0] for item in seen] == [
+        HookEventType.PRE_COMPACT,
+        HookEventType.POST_COMPACT,
+    ]
+    assert seen[0][1:] == ("compact", "started")
+    assert seen[1][1:] == ("compact", "failed")
 
 
 @pytest.mark.asyncio
@@ -1584,6 +1676,82 @@ async def test_transcript_failure_prevents_tool_execution(runtime: SimpleNamespa
     run = await runtime.orchestrator.run("run-1")
     assert run.status is AgentRunStatus.PAUSED_UNCERTAIN_STATE
     assert runtime.remote.write_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_child_and_manual_compact_emit_fixed_hooks(runtime: SimpleNamespace) -> None:
+    """Child terminalization drains before the later manual compact."""
+    from incidentlens_control_plane.investigation.hooks import HookEventType
+
+    seen: list[tuple[object, str, str | None]] = []
+
+    async def capture(event: Any) -> None:
+        seen.append((event.event_type, event.action_name, event.status))
+
+    for event_type in (
+        HookEventType.SUBAGENT_START,
+        HookEventType.SUBAGENT_STOP,
+        HookEventType.PRE_COMPACT,
+        HookEventType.POST_COMPACT,
+    ):
+        runtime.orchestrator._hooks.register(event_type, capture)
+
+    runtime.fake.script(
+        "child-1",
+        [
+            RequestToolsStep(tool_requests=(tool_request("registry_info", "child-call"),)),
+            StopStep(
+                stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="child")
+            ),
+        ],
+    )
+    pending: list[tuple[str, asyncio.Task]] = []
+    parent = runtime.store.get_agent_run("run-1")
+    investigation = runtime.store.get_investigation("inv-1")
+    await runtime.orchestrator._delegate_child(
+        parent,
+        investigation,
+        ChildDelegationRequest(child_run_id="child-1", task_prompt="inspect", scope=make_scope()),
+        pending,
+        NOW,
+    )
+    assert len(pending) == 1
+    await pending[0][1]
+
+    # Only after the child task has terminalized do we execute the manual
+    # compact through the normal parent provider loop.
+    runtime.fake.script(
+        "run-1", [request_registry_info(), compact_context_request(), completed_step("ev-1")]
+    )
+    await runtime.orchestrator.run("run-1")
+
+    assert [item[0] for item in seen] == [
+        HookEventType.SUBAGENT_START,
+        HookEventType.SUBAGENT_STOP,
+        HookEventType.PRE_COMPACT,
+        HookEventType.POST_COMPACT,
+    ]
+    assert [(item[1], item[2]) for item in seen[2:]] == [
+        ("compact", "started"),
+        ("compact", "completed"),
+    ]
+    assert seen[1][1] == "subagent"
+    assert seen[1][2] in {
+        AgentRunStatus.COMPLETED.value,
+        AgentRunStatus.PAUSED_MISSING_EVIDENCE.value,
+    }
+
+
+@pytest.mark.asyncio
+async def test_child_report_context_is_bounded(runtime: SimpleNamespace) -> None:
+    reports = []
+    for index in range(8):
+        report = SimpleNamespace(agent_run_id=f"child-{index}")
+        reports.append(report)
+    # The orchestrator's delivery helper retains the newest four in place.
+    assert len(reports) == 8
+    del reports[:-4]
+    assert len(reports) == 4
 
 
 @pytest.mark.asyncio

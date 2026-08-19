@@ -101,6 +101,7 @@ class RecoverySummary:
     """The result of one startup recovery pass."""
 
     reconciled_approvals: int = 0
+    reconciled_child_receipts: int = 0
     scanned_investigations: int = 0
     dangerous_parked: int = 0
     safe_repaired: int = 0
@@ -155,24 +156,56 @@ class RecoveryService:
         # tool calls) so a decided approval can never re-execute a dangerous
         # operation against a run the operator cancelled.
         cancel_finalised = self._finalise_cancel_requested()
+        # Repair durable child receipts before approval reconciliation: approval
+        # handling may execute a tool and resume provider-loop activity, while
+        # receipt delivery is a store-only recovery action with no provider turn.
+        reconciled_receipts = await self._reconcile_child_report_receipts()
         reconciled = await self._reconcile_decided_approvals()
         scanned = self._classify_in_flight_runs()
         scanned = replace(
             scanned,
             reconciled_approvals=reconciled,
+            reconciled_child_receipts=reconciled_receipts,
             cancel_finalised=cancel_finalised,
         )
         self._validate_transcript_tails()
         # Only audit a recovery that actually did something; an empty startup
         # is a no-op and must not inject recovery.* events into the stream.
         if self._events_pub is not None and (
-            pending or reconciled or cancel_finalised
+            pending or reconciled or reconciled_receipts or cancel_finalised
         ):
             self._events_pub.recovery_started(count=pending, occurred_at=self._now())
             self._events_pub.recovery_completed(
                 count=scanned.scanned_investigations, occurred_at=self._now()
             )
         return scanned
+
+    async def _reconcile_child_report_receipts(self) -> int:
+        """Deliver each parent's pending receipts independently.
+
+        A malformed receipt or stale parent must not prevent unrelated parents
+        from recovering.  The orchestrator remains responsible for the
+        transactional, exactly-once delivery boundary; this method supplies
+        the startup isolation boundary and leaves failed receipts pending.
+        """
+        delivered = 0
+        for run in self._store.list_agent_runs():
+            if run.kind is not AgentRunKind.PARENT:
+                continue
+            if not self._store.list_undelivered_child_report_receipts(
+                run.agent_run_id
+            ):
+                continue
+            try:
+                delivered += await self._orchestrator.reconcile_child_report_receipts(
+                    run.agent_run_id
+                )
+            except Exception:  # noqa: BLE001 - isolate one parent's receipt set
+                logger.exception(
+                    "startup child receipt reconciliation failed for parent %s",
+                    run.agent_run_id,
+                )
+        return delivered
 
     def _finalise_cancel_requested(self) -> int:
         """Finalise every cancelled investigation and its runs; sweep their calls.

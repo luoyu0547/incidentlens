@@ -44,8 +44,15 @@ from incidentlens_control_plane.investigation.compactor import (
     CompactionRejected,
 )
 from incidentlens_control_plane.investigation.context import AgentContextManager
+from incidentlens_control_plane.investigation.delegation import (
+    DelegationRejected,
+    DelegationRejectionKind,
+    DelegationSpec,
+    DelegationValidator,
+)
 from incidentlens_control_plane.investigation.events import InvestigationEventPublisher
 from incidentlens_control_plane.investigation.guard import InvestigationGuard
+from incidentlens_control_plane.investigation.hooks import HookEvent, HookEventType, HookRunner
 from incidentlens_control_plane.investigation.provider import (
     AgentTurnResult,
     ChildDelegationRequest,
@@ -86,6 +93,7 @@ from incidentlens_control_plane.investigation.types import (
     AgentScope,
     Checkpoint,
     ChildReport,
+    ChildReportReceipt,
     ChildReportStatus,
     DelegatedTaskPackage,
     EvidenceReference,
@@ -116,6 +124,9 @@ class _EvidenceBudgetExceeded(Exception):
     """Raised when attaching evidence would exceed the run/investigation cap."""
 
 
+_CHILD_REPORTS_LIMIT = 4
+
+
 def _iso_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
@@ -133,6 +144,7 @@ class AgentOrchestrator:
         projects: ProjectRegistryStore,
         sessions: SessionManager,
         guard: InvestigationGuard | None = None,
+        delegation: DelegationValidator | None = None,
         global_child_limit: int = 8,
         default_budget: AgentBudget | None = None,
         max_provider_retries: int = 2,
@@ -141,6 +153,7 @@ class AgentOrchestrator:
         broker: RuntimeEventBroker | None = None,
         context_manager: AgentContextManager | None = None,
         transcript: TranscriptService | None = None,
+        hooks: HookRunner | None = None,
     ) -> None:
         if global_child_limit < 1:
             raise ValueError("global_child_limit must be >= 1")
@@ -151,12 +164,14 @@ class AgentOrchestrator:
         self._projects = projects
         self._sessions = sessions
         self._guard = guard or InvestigationGuard()
+        self._delegation = delegation or DelegationValidator(self._projects, self._guard)
         self._global_child_limit = global_child_limit
         self._default_budget = default_budget or AgentBudget()
         self._max_provider_retries = max_provider_retries
         self._now = now or (lambda: datetime.now(UTC))
         self._context = context_manager or AgentContextManager(store, now=self._now)
         self._transcript = transcript or TranscriptService(store)
+        self._hooks = hooks or HookRunner()
         self._events_pub = (
             InvestigationEventPublisher(events, broker)
             if events is not None and broker is not None
@@ -276,6 +291,11 @@ class AgentOrchestrator:
         run = self._store.get_agent_run(agent_run_id)
         investigation = self._store.get_investigation(run.investigation_id)
         now = self._now()
+
+        # Reconcile durable child receipts before any request or state decision.
+        run, investigation = await self._deliver_pending_child_reports(
+            run, investigation, child_reports, now
+        )
 
         # Drain child tasks that already finished (background concurrency).
         if pending_children:
@@ -405,12 +425,38 @@ class AgentOrchestrator:
             if self._context.reactive_attempted(run.agent_run_id, run.usage.rounds):
                 return self._pause_prompt_too_long(run, investigation, now)
             try:
-                request = await self._context.reactive_request(
-                    run, investigation, round_number,
-                    tool_schemas=self._executor.tool_schemas(scope=run.scope.scope),
+                await self._emit_hook(
+                    HookEventType.PRE_COMPACT, run,
+                    action_name="compact",
+                    status="started",
+                    metadata={"mode": "reactive", "round": run.usage.rounds},
                 )
+                compact_status = "failed"
+                try:
+                    request = await self._context.reactive_request(
+                        run, investigation, round_number,
+                        tool_schemas=self._executor.tool_schemas(scope=run.scope.scope),
+                    )
+                    compact_status = "completed"
+                finally:
+                    await self._emit_hook(
+                        HookEventType.POST_COMPACT, run,
+                        action_name="compact",
+                        status=compact_status,
+                        metadata={"mode": "reactive", "round": run.usage.rounds},
+                    )
             except (CompactionRejected, CompactionCircuitOpen) as exc:
                 return self._pause_prompt_too_long(run, investigation, now, reason=str(exc))
+            except Exception as exc:  # noqa: BLE001 - compaction must not crash the loop
+                # The reactive request can fail for reasons other than the
+                # circuit/rejection guards (for example a corrupt context or a
+                # provider-backed compactor error).  POST_COMPACT was emitted
+                # as failed by the inner ``finally``; park the run using the
+                # same safe prompt-too-long semantics rather than escaping the
+                # loop with an unpersisted exception.
+                return self._pause_prompt_too_long(
+                    run, investigation, now, reason=str(exc)
+                )
             try:
                 result = await self._call_provider(request)
             except PromptTooLongError:
@@ -937,6 +983,22 @@ class AgentOrchestrator:
             )
 
     @staticmethod
+    def _budget_stop_reason(reason: str) -> StopReason:
+        mapping = {
+            "max_rounds": StopReason.BUDGET_ROUNDS,
+            "max_tool_calls": StopReason.BUDGET_TOOL_CALLS,
+            "max_wall_clock_seconds": StopReason.BUDGET_TIME,
+            "max_output_bytes_per_tool": StopReason.BUDGET_OUTPUT,
+            "max_total_output_bytes": StopReason.BUDGET_OUTPUT,
+            "max_evidence": StopReason.BUDGET_EVIDENCE,
+            "max_no_new_evidence_rounds": StopReason.BUDGET_NO_NEW_EVIDENCE,
+        }
+        for axis, stop_reason in mapping.items():
+            if axis in reason:
+                return stop_reason
+        return StopReason.BUDGET_OUTPUT
+
+    @staticmethod
     def _investigation_pause(run_status: AgentRunStatus) -> InvestigationStatus:
         if run_status is AgentRunStatus.WAITING_APPROVAL:
             return InvestigationStatus.WAITING_APPROVAL
@@ -1336,17 +1398,38 @@ class AgentOrchestrator:
         erased.
         """
         try:
-            await self._context.semantic_compact(run, manual=True)
-            result_block = ToolResultBlock(
-                tool_call_id=block.tool_call_id,
-                status=ToolCallStatus.SUCCEEDED,
-                content="[Context compacted]",
+            await self._emit_hook(
+                HookEventType.PRE_COMPACT, run,
+                action_name="compact",
+                status="started", metadata={"mode": "manual", "round": round_number},
             )
-        except Exception as exc:  # noqa: BLE001 - a failed compact is safe to continue from
+            compact_status = "failed"
+            try:
+                await self._context.semantic_compact(run, manual=True)
+                compact_status = "completed"
+                result_block = ToolResultBlock(
+                    tool_call_id=block.tool_call_id,
+                    status=ToolCallStatus.SUCCEEDED,
+                    content="[Context compacted]",
+                )
+            except Exception as exc:  # noqa: BLE001 - a failed compact is safe to continue from
+                result_block = ToolResultBlock(
+                    tool_call_id=block.tool_call_id,
+                    status=ToolCallStatus.FAILED,
+                    content=redact_message(str(exc), max_length=2_000).message_redacted,
+                )
+            finally:
+                await self._emit_hook(
+                    HookEventType.POST_COMPACT, run,
+                    action_name="compact",
+                    status=compact_status,
+                    metadata={"mode": "manual", "round": round_number},
+                )
+        except Exception:
             result_block = ToolResultBlock(
                 tool_call_id=block.tool_call_id,
                 status=ToolCallStatus.FAILED,
-                content=redact_message(str(exc), max_length=2_000).message_redacted,
+                content="compact failed",
             )
         try:
             self._append_tool_result_message(run, (result_block,), now)
@@ -1432,25 +1515,38 @@ class AgentOrchestrator:
         pending_children: list[tuple[str, asyncio.Task]],
         now: datetime,
     ) -> tuple[AgentRun, bool]:
-        allowed, reason = self._guard.can_spawn_child(run, investigation)
-        if not allowed:
+        scope_fields = delegation.scope.model_fields_set
+        spec = DelegationSpec(
+            child_run_id=delegation.child_run_id,
+            task_prompt=delegation.task_prompt,
+            scope=delegation.scope,
+            evidence_ids=delegation.evidence_ids,
+            budget=None,
+            host_paths_specified="allowed_host_paths" in scope_fields,
+            container_paths_specified="allowed_container_paths" in scope_fields,
+        )
+        try:
+            package = self._delegation.prepare(run, investigation, spec, now=now)
+        except DelegationRejected as exc:
+            reason = str(exc)
             if run.kind is AgentRunKind.CHILD:
                 # A child must never delegate grandchildren.
                 return self._fail(run, investigation, now, reason=reason), True
-            self._pause(run, investigation, AgentRunStatus.PAUSED_BUDGET, now=now,
-                        reason=reason, stop_reason=StopReason.BUDGET_CHILDREN)
-            return self._store.get_agent_run(run.agent_run_id), True
-
-        budget = self._child_budget(delegation, run)
-        package = DelegatedTaskPackage(
-            child_run_id=delegation.child_run_id,
-            parent_run_id=run.agent_run_id,
-            investigation_id=run.investigation_id,
-            task_prompt=delegation.task_prompt,
-            scope=delegation.scope,
-            budget=budget,
-            evidence_ids=delegation.evidence_ids,
-        )
+            if exc.kind in (
+                DelegationRejectionKind.BUDGET_CHILDREN,
+                DelegationRejectionKind.BUDGET_ENVELOPE,
+            ):
+                stop_reason = (
+                    StopReason.BUDGET_CHILDREN
+                    if exc.kind is DelegationRejectionKind.BUDGET_CHILDREN
+                    else self._budget_stop_reason(reason)
+                )
+                self._pause(
+                    run, investigation, AgentRunStatus.PAUSED_BUDGET, now=now,
+                    reason=reason, stop_reason=stop_reason,
+                )
+                return self._store.get_agent_run(run.agent_run_id), True
+            return self._fail(run, investigation, now, reason=reason), True
         try:
             self._store.create_delegated_task(package, now=now)
         except AlreadyExists:
@@ -1538,63 +1634,91 @@ class AgentOrchestrator:
             updated_at=now,
         )
 
-    def _child_budget(
-        self, delegation: ChildDelegationRequest, parent: AgentRun
-    ) -> AgentBudget:
-        # The provider's delegation carries no budget: default it, then cap every
-        # axis by the parent's budget so a child can never widen its envelope.
-        default = AgentBudget()
-        values = {
-            name: getattr(default, name)
-            for name in AgentBudget.model_fields
-        }
-        for name in AgentBudget.model_fields:
-            if getattr(default, name) > getattr(parent.budget, name):
-                values[name] = getattr(parent.budget, name)
-        return AgentBudget(**values)
-
     async def _run_child(
         self, package: DelegatedTaskPackage
-    ) -> tuple[ChildReport, EvidenceReference]:
+    ) -> ChildReportReceipt:
         child_id = package.child_run_id
         container_session_id: str | None = None
         try:
+            run = self._store.get_agent_run(child_id)
+            await self._emit_hook(
+                HookEventType.SUBAGENT_START, run,
+                status=run.status.value,
+                metadata={"parent_run_id": package.parent_run_id},
+            )
             async with self._child_semaphore:
-                run = self._store.get_agent_run(child_id)
-                if self._events_pub is not None:
-                    self._events_pub.child_run_started(run, occurred_at=self._now())
                 if run.scope.scope is LogScope.CONTAINER:
                     container_session_id = await self._spawn_container_session(run)
                 final = await self._run_loop(child_id)
             if self._events_pub is not None:
                 self._events_pub.child_run_completed(final, occurred_at=self._now())
-            return self._build_child_report(final, package, now=self._now())
+            return await self._ensure_child_report_receipt(final, package)
         except asyncio.CancelledError:
             run = self._store.get_agent_run(child_id)
             self._finalize_child_terminal(run, AgentRunStatus.CANCELLED, StopReason.CANCELLED)
             final = self._store.get_agent_run(child_id)
-            if self._events_pub is not None:
-                self._events_pub.child_run_completed(final, occurred_at=self._now())
-            return self._build_child_report(
-                final, package, now=self._now()
-            )
+            return await self._ensure_child_report_receipt(final, package, error="child cancelled")
         except Exception as exc:
             run = self._store.get_agent_run(child_id)
-            self._finalize_child_terminal(
-                run, AgentRunStatus.FAILED, StopReason.FAILED
-            )
+            self._finalize_child_terminal(run, AgentRunStatus.FAILED, StopReason.FAILED)
             final = self._store.get_agent_run(child_id)
-            if self._events_pub is not None:
-                self._events_pub.child_run_completed(final, occurred_at=self._now())
-            return self._build_child_report(
-                final,
-                package,
-                now=self._now(),
-                error=str(exc),
-            )
+            return await self._ensure_child_report_receipt(final, package, error=str(exc))
         finally:
             if container_session_id is not None:
                 await self._sessions.close_container_session(container_session_id)
+            try:
+                final = self._store.get_agent_run(child_id)
+                await self._emit_hook(
+                    HookEventType.SUBAGENT_STOP, final,
+                    status=final.status.value,
+                    metadata={"parent_run_id": package.parent_run_id},
+                )
+            except Exception:
+                pass
+
+    async def _ensure_child_report_receipt(
+        self,
+        child_run: AgentRun,
+        package: DelegatedTaskPackage,
+        error: str | None = None,
+    ) -> ChildReportReceipt:
+        """Build and append-once persist a terminal child report receipt."""
+        try:
+            return self._store.get_child_report_receipt(child_run.agent_run_id)
+        except KeyError:
+            pass
+        report, evidence_ref = self._build_child_report(
+            child_run, package, now=self._now(), error=error
+        )
+        receipt = ChildReportReceipt(
+            child_run_id=child_run.agent_run_id,
+            parent_run_id=package.parent_run_id,
+            report=report,
+            evidence_id=evidence_ref.evidence_id,
+            created_at=report.created_at,
+        )
+        return self._store.put_child_report_receipt(receipt)
+
+    async def _emit_hook(
+        self,
+        event_type: HookEventType,
+        run: AgentRun,
+        *,
+        action_name: str = "subagent",
+        status: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        try:
+            await self._hooks.emit(HookEvent(
+                event_type=event_type,
+                agent_run_id=run.agent_run_id,
+                action_name=action_name,
+                occurred_at=self._now(),
+                status=status,
+                metadata=metadata,
+            ))
+        except Exception:
+            pass
 
     def _finalize_child_terminal(
         self, run: AgentRun, target: AgentRunStatus, stop_reason: StopReason
@@ -1694,6 +1818,96 @@ class AgentOrchestrator:
         )
         return report, evidence_ref
 
+    async def reconcile_child_report_receipts(
+        self, parent_run_id: str | None = None
+    ) -> int:
+        """Deliver persisted child receipts without running a provider turn.
+
+        Recovery uses this entry point after reloading durable parent state.  A
+        bounded temporary report list is intentionally discarded after each
+        pass; the receipt and transactional store are the source of truth.
+        Terminal parents are valid because notification/evidence repair must not
+        depend on resuming the parent loop.
+        """
+        parent_ids = (
+            (parent_run_id,)
+            if parent_run_id is not None
+            else tuple(
+                run.agent_run_id
+                for run in self._store.list_agent_runs()
+                if run.kind is AgentRunKind.PARENT
+                and self._store.list_undelivered_child_report_receipts(
+                    run.agent_run_id
+                )
+            )
+        )
+        delivered = 0
+        for agent_run_id in parent_ids:
+            run = self._store.get_agent_run(agent_run_id)
+            if run.kind is not AgentRunKind.PARENT:
+                continue
+            investigation = self._store.get_investigation(run.investigation_id)
+            before = len(
+                self._store.list_undelivered_child_report_receipts(agent_run_id)
+            )
+            if not before:
+                continue
+            await self._deliver_pending_child_reports(
+                run, investigation, [], self._now()
+            )
+            delivered += before - len(
+                self._store.list_undelivered_child_report_receipts(agent_run_id)
+            )
+        return delivered
+
+    async def _deliver_pending_child_reports(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        child_reports: list[ChildReport],
+        now: datetime,
+    ) -> tuple[AgentRun, Investigation]:
+        """Deliver durable child receipts exactly once from fresh durable state."""
+        for receipt in self._store.list_undelivered_child_report_receipts(run.agent_run_id):
+            run = self._store.get_agent_run(run.agent_run_id)
+            investigation = self._store.get_investigation(run.investigation_id)
+            evidence = self._store.get_evidence(receipt.evidence_id)
+            ref = EvidenceReference(
+                evidence_id=receipt.evidence_id,
+                operation_id=f"child:{receipt.child_run_id}",
+                summary=evidence.content_redacted[:2_000],
+            )
+            run, added = self._append_evidence(run, investigation, (ref,), now)
+            if added:
+                investigation = self._bump_investigation_usage(
+                    investigation,
+                    evidence_count=investigation.usage.evidence_count + added,
+                )
+            notification = TranscriptMessage(
+                agent_run_id=run.agent_run_id,
+                sequence=self._next_sequence(run.agent_run_id),
+                role=MessageRole.USER,
+                blocks=(TextBlock(
+                    text=(
+                        f"Child report {receipt.report.agent_run_id} "
+                        f"({receipt.report.status.value}): {receipt.report.summary[:600]}"
+                    )
+                ),),
+                created_at=now,
+            )
+            delivered = self._store.deliver_child_report_receipt(
+                receipt.child_run_id,
+                parent=run,
+                investigation=investigation,
+                notification=notification,
+                delivered_at=_iso_utc(now),
+            )
+            child_reports.append(delivered.report)
+            del child_reports[:-_CHILD_REPORTS_LIMIT]
+            run = self._store.get_agent_run(run.agent_run_id)
+            investigation = self._store.get_investigation(run.investigation_id)
+        return run, investigation
+
     def _drain_completed_children(
         self,
         run: AgentRun,
@@ -1711,22 +1925,11 @@ class AgentOrchestrator:
                     continue
                 changed = True
                 try:
-                    report, ref = task.result()
+                    task.result()
                 except BaseException:
                     continue
-                try:
-                    self._append_child_report_notification(run.agent_run_id, report, now)
-                except Exception:  # noqa: BLE001 - the report still rides in child_reports
-                    pass
-                run, new_evidence = self._append_evidence(
-                    run, investigation, (ref,), now
-                )
-                if new_evidence:
-                    investigation = self._bump_investigation_usage(
-                        investigation,
-                        evidence_count=investigation.usage.evidence_count + new_evidence,
-                    )
-                child_reports.append(report)
+                # The child persisted its receipt before completing. Delivery is
+                # reconciled transactionally at the next loop boundary.
         except _EvidenceBudgetExceeded:
             # Persist the already-drained child reports and restore RUNNING so
             # the loop's evidence-budget pause can transition legally (a
@@ -1764,20 +1967,8 @@ class AgentOrchestrator:
             for outcome in results:
                 if isinstance(outcome, BaseException):
                     continue
-                report, ref = outcome
-                try:
-                    self._append_child_report_notification(run.agent_run_id, report, now)
-                except Exception:  # noqa: BLE001 - the report still rides in child_reports
-                    pass
-                run, new_evidence = self._append_evidence(
-                    run, investigation, (ref,), now
-                )
-                if new_evidence:
-                    investigation = self._bump_investigation_usage(
-                        investigation,
-                        evidence_count=investigation.usage.evidence_count + new_evidence,
-                    )
-                child_reports.append(report)
+                # Receipt delivery is performed by the reconciliation pass using
+                # fresh persisted parent state.
         except _EvidenceBudgetExceeded:
             # Persist the already-drained child reports and restore RUNNING so
             # the loop's evidence-budget pause can transition legally (a
@@ -1793,6 +1984,9 @@ class AgentOrchestrator:
         self._store.update_investigation(investigation)
         if was_running:
             run = self._transition_run(run, AgentRunStatus.RUNNING, now=now)
+        run, investigation = await self._deliver_pending_child_reports(
+            run, investigation, child_reports, now
+        )
         return self._store.get_agent_run(run.agent_run_id), investigation
 
     async def _resume_waiting_children(
