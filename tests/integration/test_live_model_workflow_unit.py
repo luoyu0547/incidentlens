@@ -230,3 +230,20 @@ def test_main_serializes_callable_result_and_copies_artifacts(tmp_path, monkeypa
     assert json.loads(output.read_text()) == expected.to_record()
     assert (report_dir / "live-model-report.md").read_text() == "markdown"
     assert (report_dir / "live-model-report.html").read_text() == "html"
+
+
+def test_effective_settings_validates_context_override_values(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    effective, prefill = record_live_model_demo._effective_settings(
+        settings, {"agent_context_max_message_groups": 12}
+    )
+    assert effective.agent_context_max_message_groups == 12
+    assert prefill == 0
+    with pytest.raises(ValueError):
+        record_live_model_demo._effective_settings(
+            settings, {"agent_context_max_message_groups": 1}
+        )
+    with pytest.raises(ValueError):
+        record_live_model_demo._effective_settings(
+            settings, {"agent_context_max_message_groups": "12"}
+        )

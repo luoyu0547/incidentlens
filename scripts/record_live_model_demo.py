@@ -101,7 +101,9 @@ def _effective_settings(
     if not isinstance(prefill, int) or isinstance(prefill, bool) or prefill < 0:
         raise ValueError("prefill_complete_groups must be a non-negative integer")
     updates = {key: values[key] for key in _CONTEXT_OVERRIDE_FIELDS if key in values}
-    return settings.model_copy(update=updates), prefill
+    merged = settings.model_dump(mode="python")
+    merged.update(updates)
+    return RuntimeSettings.model_validate(merged, strict=True), prefill
 
 
 @dataclass(frozen=True, slots=True)
