@@ -1172,25 +1172,65 @@ class InvestigationStore:
         delivered_at: datetime,
     ) -> ChildReportReceipt:
         """Atomically attach, notify, account, and mark one receipt delivered."""
+        transaction_started = False
         with self._connection_factory() as conn:
-            row = conn.execute(
-                "SELECT record_json FROM child_report_receipts WHERE child_run_id = ?",
-                (child_run_id,),
-            ).fetchone()
-            if row is None:
-                raise KeyError(child_run_id)
-            receipt = ChildReportReceipt.model_validate_json(row[0])
-            if receipt.delivered_at is not None:
-                return receipt
-            if (
-                parent.agent_run_id != receipt.parent_run_id
-                or notification.agent_run_id != receipt.parent_run_id
-                or investigation.investigation_id != parent.investigation_id
-            ):
-                raise ValueError("receipt delivery entities do not match")
-            timestamp = delivered_at.astimezone(UTC)
             try:
-                conn.execute("BEGIN")
+                # Acquire the write lock before any read so retries observe the
+                # committed receipt state after a concurrent delivery finishes.
+                conn.execute("BEGIN IMMEDIATE")
+                transaction_started = True
+                row = conn.execute(
+                    "SELECT record_json FROM child_report_receipts WHERE child_run_id = ?",
+                    (child_run_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(child_run_id)
+                receipt = ChildReportReceipt.model_validate_json(row[0])
+                if receipt.delivered_at is not None:
+                    conn.commit()
+                    transaction_started = False
+                    return receipt
+
+                parent_row = conn.execute(
+                    """
+                    SELECT investigation_id, parent_run_id, kind, status, record_json
+                    FROM agent_runs WHERE agent_run_id = ?
+                    """,
+                    (receipt.parent_run_id,),
+                ).fetchone()
+                if parent_row is None:
+                    raise AgentRunNotFound(f"agent run not found: {receipt.parent_run_id}")
+                persisted_parent = AgentRun.model_validate_json(parent_row[4])
+                investigation_row = conn.execute(
+                    "SELECT investigation_id, status, record_json FROM investigations "
+                    "WHERE investigation_id = ?",
+                    (parent_row[0],),
+                ).fetchone()
+                if investigation_row is None:
+                    raise InvestigationNotFound(
+                        f"investigation not found: {parent_row[0]}"
+                    )
+                persisted_investigation = Investigation.model_validate_json(
+                    investigation_row[2]
+                )
+                if (
+                    persisted_parent.agent_run_id != receipt.parent_run_id
+                    or persisted_parent.kind is not AgentRunKind.PARENT
+                    or persisted_parent.parent_run_id is not None
+                    or persisted_parent.investigation_id != persisted_investigation.investigation_id
+                    or parent_row[1] is not None
+                    or parent_row[2] != AgentRunKind.PARENT.value
+                    or parent.agent_run_id != persisted_parent.agent_run_id
+                    or parent.kind is not AgentRunKind.PARENT
+                    or parent.parent_run_id is not None
+                    or parent.investigation_id != persisted_parent.investigation_id
+                    or investigation.investigation_id != persisted_investigation.investigation_id
+                    or notification.agent_run_id != persisted_parent.agent_run_id
+                ):
+                    raise ValueError(
+                        "receipt delivery entities do not match persisted relationships"
+                    )
+                timestamp = delivered_at.astimezone(UTC)
                 try:
                     conn.execute(
                         f"""
@@ -1253,10 +1293,8 @@ class InvestigationStore:
                     raise ConcurrentModification(
                         f"investigation {investigation.investigation_id} status changed"
                     )
-                updated_receipt = receipt.model_copy(update={"delivered_at": timestamp})
-                # Re-validate because model_copy intentionally skips validation.
                 updated_receipt = ChildReportReceipt.model_validate(
-                    updated_receipt.model_dump()
+                    {**receipt.model_dump(), "delivered_at": timestamp}
                 )
                 cursor = conn.execute(
                     "UPDATE child_report_receipts SET delivered_at = ?, record_json = ? "
@@ -1266,8 +1304,10 @@ class InvestigationStore:
                 if cursor.rowcount == 0:
                     raise ConcurrentModification(f"receipt {child_run_id} was delivered")
                 conn.commit()
+                transaction_started = False
             except Exception:
-                conn.rollback()
+                if transaction_started:
+                    conn.rollback()
                 raise
         return updated_receipt
 

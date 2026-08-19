@@ -1347,6 +1347,34 @@ def test_receipt_delivery_is_idempotent(tmp_path) -> None:
     assert store.list_transcript_messages("run-1") == (make_notification(),)
 
 
+def test_receipt_delivery_rejects_fabricated_cross_investigation_parent(tmp_path) -> None:
+    store = make_store(tmp_path)
+    investigation = make_investigation()
+    parent = make_run()
+    store.create_investigation(investigation)
+    store.create_agent_run(parent)
+    receipt = make_receipt()
+    store.put_child_report_receipt(receipt)
+    fabricated_parent = make_run(investigation_id="inv-OTHER")
+    with pytest.raises(ValueError):
+        store.deliver_child_report_receipt(
+            receipt.child_run_id,
+            parent=fabricated_parent,
+            investigation=investigation,
+            notification=make_notification(),
+            delivered_at=NOW,
+        )
+    assert store.get_child_report_receipt(receipt.child_run_id).delivered_at is None
+    assert store.list_transcript_messages("run-1") == ()
+    assert store.get_agent_run("run-1") == parent
+    assert store.get_investigation("inv-1") == investigation
+
+
+def test_receipt_rejects_naive_timestamps() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        make_receipt(created_at=datetime(2026, 8, 13))
+
+
 def test_receipt_delivery_rolls_back_on_transcript_conflict(tmp_path) -> None:
     store = make_store(tmp_path)
     investigation = make_investigation()
