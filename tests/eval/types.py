@@ -54,6 +54,7 @@ class HarnessTrace(BaseModel):
     mutation_tool_call_ids: tuple[str, ...] = ()
     expected_child_run_ids: tuple[str, ...] = ()
     delegation_forms: tuple[str, ...] = ()
+    aggregate_sources: tuple[str, ...] = ()
     elapsed_seconds: float = Field(default=0.0, ge=0.0)
 
 

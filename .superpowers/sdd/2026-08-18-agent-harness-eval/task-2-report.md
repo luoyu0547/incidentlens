@@ -1,35 +1,9 @@
 # Task 2 report
 
-## Status
-Implemented the deterministic scenario runner in the test-side evaluation package.
-
-## TDD evidence
-- RED: `uv run pytest tests/eval/test_harness_eval.py -q` failed during collection because `tests.eval.runner` was undefined.
-- Initial GREEN passed 12 tests but was rejected because scenarios were superficial stop-only scripts.
-- Round 1 fix RED exposed fabricated compaction state, incomplete persisted extraction, and approval pairing behavior.
-- Round 1 GREEN: focused evaluation suite passed 12 tests.
-- Round 2 GREEN: `uv run pytest tests/eval/test_metrics.py tests/eval/test_harness_eval.py -q` passes 12 tests; CLI prints six rows and writes `/tmp/incidentlens-harness-eval.json`.
-
-## Dependency commits
-Task 1 dependency commits were cherry-picked and resolved before Task 2: `2ba1629`, `fee40a8`, `733b009`, and `74b5739`.
-
-## Round 2 fix evidence
-- Restart now leaves the child receipt genuinely pending (`delivered_at is None`) before creating a second runtime over the same SQLite path. It invokes `RecoveryService.startup()` on that second runtime, asserts `reconciled_child_receipts == 1`, verifies persisted `delivered_at`, and runs a second startup asserting zero additional reconciliation. No parent provider loop runs before recovery.
-- `_trace` derives child run IDs from `list_agent_runs(parent_run_id=...)` and receipts by querying the durable receipt store. It no longer accepts caller-supplied expected child IDs. Child metrics therefore cannot be injected by scenario constants.
-- All six calls use explicit `AgentBudget` values at run creation. The overflow case additionally uses a smaller explicit budget while retaining the real reactive compactor path.
-- Delegation equivalence now extends `HarnessTrace.delegation_forms`; extraction derives typed delegation from persisted delegated-task records and tool delegation from persisted `delegate_child` calls. The scenario asserts both forms and equivalent delivered child receipts, rather than discarding the alternate trace.
-- The prior real compactor, scope rejection, approval, and evidence grounding behavior is preserved.
-
-## Files
-- `/Users/chenxueqiang/Documents/code/incidentlens/.claude/worktrees/agent-harness-eval/tests/eval/support.py`
-- `/Users/chenxueqiang/Documents/code/incidentlens/.claude/worktrees/agent-harness-eval/tests/eval/scenarios.py`
-- `/Users/chenxueqiang/Documents/code/incidentlens/.claude/worktrees/agent-harness-eval/tests/eval/runner.py`
-- `/Users/chenxueqiang/Documents/code/incidentlens/.claude/worktrees/agent-harness-eval/tests/eval/types.py`
-- `/Users/chenxueqiang/Documents/code/incidentlens/.claude/worktrees/agent-harness-eval/tests/eval/test_harness_eval.py`
-
-## Round 3 fix evidence
-- Delegation form classification is now per persisted child run: a child is labeled `delegate_child_tool` only when its child ID appears in a persisted `delegate_child` ToolCall's arguments; otherwise it is labeled `typed_delegation`. The aggregate `delegation_equivalence` trace combines the typed and tool-form child IDs and receipts into one immutable trace, and asserts both forms' receipt delivery and equivalent child lifecycle.
-- `run_scope_violation` now passes an explicit `AgentBudget`; `seed_run` no longer supplies a default budget, making accidental implicit scenario budgets impossible.
-- Direct lint command was attempted as `uv run ruff check tests/eval`; the worktree-isolated command wrapper rejected it before execution in this environment. `git diff --check` is clean. Coordinator should run the exact direct command in its non-isolated shell if the harness wrapper remains restrictive.
-- Exact CLI command `uv run python tests/eval/runner.py --json /tmp/incidentlens-harness-eval.json` passed and emitted all six rows.
-- Full suite: `963 passed, 12 skipped` with one existing Starlette deprecation warning.
+## Round 4 evidence
+- `delegation_equivalence` now runs two independent fresh SQLite runtimes, one typed `DelegateChildStep` and one `delegate_child` tool request. `_merge_delegation_traces` explicitly constructs one aggregate immutable `HarnessTrace` by concatenating all persisted rounds, tool calls, transcript messages, compact boundaries, evidence, conclusions, child receipts, Hook events, mutation IDs, expected child IDs, and derived delegation-form labels. It records both source run identities in `aggregate_sources`; no selective `model_copy` is used for aggregation.
+- Form labels remain derived by `_trace`: each persisted child ID is classified as tool-form only when a persisted parent `delegate_child` ToolCall contains that child ID; otherwise it is typed-form. Both child receipts are terminal and delivered exactly once, and their parent linkage/status and scoped boundary are asserted equivalent before aggregation.
+- Verified `.venv/bin/ruff` exists and is executable. The direct executable invocation was attempted, but the worktree harness rejected all Bash command strings containing the executable path; `git diff --check` passed. The report records the environmental command-wrapper limitation rather than claiming a Ruff success.
+- Focused: `uv run pytest tests/eval/test_metrics.py tests/eval/test_harness_eval.py -q` -> `12 passed`.
+- CLI: `uv run python tests/eval/runner.py --json /tmp/incidentlens-harness-eval.json` -> six scenario rows, including aggregate delegation with 6 rounds/3 tools.
+- Full suite: `963 passed, 12 skipped, 1 warning`.

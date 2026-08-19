@@ -164,20 +164,21 @@ def seed_run(
     harness: Harness,
     *,
     run_id: str = "run-1",
+    investigation_id: str = "inv-1",
     scope: AgentScope | None = None,
     budget: AgentBudget,
     status: Any = None,
 ) -> AgentRun:
     from incidentlens_control_plane.investigation.state_machine import InvestigationStatus, AgentRunStatus
     investigation = Investigation(
-        investigation_id="inv-1", incident_id="inc-1", project_id=PROJECT_ID,
+        investigation_id=investigation_id, incident_id="inc-1", project_id=PROJECT_ID,
         target_id=TARGET_ID, service=SERVICE, symptom="checkout failures",
         status=InvestigationStatus.RUNNING, budget=InvestigationBudget(), usage=UsageCounters(),
         created_at=NOW, updated_at=NOW,
     )
     harness.investigations.create_investigation(investigation)
     run = AgentRun(
-        agent_run_id=run_id, investigation_id="inv-1", parent_run_id=None,
+        agent_run_id=run_id, investigation_id=investigation_id, parent_run_id=None,
         kind=AgentRunKind.PARENT, scope=scope or make_scope(),
         status=status or AgentRunStatus.CREATED, budget=budget,
         usage=UsageCounters(), evidence=(), created_at=NOW, updated_at=NOW,
