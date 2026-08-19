@@ -16,10 +16,13 @@ import shutil
 import subprocess
 import tempfile
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from incidentlens_control_plane.config import RuntimeSettings
+from incidentlens_control_plane.events.types import RuntimeEventType
+from incidentlens_control_plane.investigation.fake_provider import FakeProviderRegistry
 from incidentlens_control_plane.investigation.types import (
     AgentBudget,
     AgentScope,
@@ -66,6 +69,138 @@ async def _seed_log(factory: AsyncSshTransportFactory, target: TargetRegistratio
         )
     finally:
         await sessions.close_all()
+
+
+@dataclass(frozen=True, slots=True)
+class LiveModelRunResult:
+    investigation: dict[str, object]
+    run: dict[str, object]
+    rounds: tuple[dict[str, object], ...]
+    tool_calls: tuple[dict[str, object], ...]
+    transcript: tuple[dict[str, object], ...]
+    compact_boundaries: tuple[dict[str, object], ...]
+    evidence: tuple[dict[str, object], ...]
+    conclusions: tuple[dict[str, object], ...]
+    hooks: tuple[dict[str, object], ...]
+    report: dict[str, object]
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "investigation": self.investigation,
+            "run": self.run,
+            "rounds": list(self.rounds),
+            "tool_calls": list(self.tool_calls),
+            "transcript": list(self.transcript),
+            "compact_boundaries": list(self.compact_boundaries),
+            "evidence": list(self.evidence),
+            "conclusions": list(self.conclusions),
+            "hooks": list(self.hooks),
+            "report": self.report,
+        }
+
+
+async def run_live_model_workflow(
+    settings: RuntimeSettings,
+    factory: AsyncSshTransportFactory,
+    target: TargetRegistration,
+    service: ServiceRegistration,
+    *,
+    context_overrides: dict[str, object] | None = None,
+    fake_provider_registry: FakeProviderRegistry | None = None,
+) -> LiveModelRunResult:
+    """Run the recording workflow against an already-started SSH target."""
+    del context_overrides  # Reserved for context-specific recording scenarios.
+    runtime = build_runtime(
+        settings,
+        transport_factory=factory,
+        fake_provider_registry=fake_provider_registry,
+    )
+    project_id = "recording-project"
+    runtime.projects.create(
+        ProjectRegistration(
+            project_id=project_id,
+            display_name="Live MaaS recording",
+            targets=(target,),
+            services=(service,),
+        ),
+        now=datetime.now(UTC),
+    )
+    investigation = runtime.investigations.create_investigation(
+        project_id=project_id,
+        target_id=target.target_id,
+        service=service.compose_service,
+        symptom=(
+            "checkout requests return 502; inspect the authorized live log "
+            "and identify the observable failure chain"
+        ),
+        incident_id="recording-incident",
+        budget=InvestigationBudget(
+            max_rounds=5,
+            max_tool_calls=5,
+            max_no_new_evidence_rounds=2,
+        ),
+    )
+    # Keep a deterministic id for injected fake scripts while preserving real MaaS behavior.
+    if fake_provider_registry is not None:
+        fake_provider_registry.set_script(
+            "run-recording", fake_provider_registry.script("run-recording")
+        )
+    run = await runtime.investigations.start(
+        investigation.investigation_id,
+        AgentScope(
+            project_id=project_id,
+            target_id=target.target_id,
+            scope=LogScope.HOST,
+            allowed_host_paths=(PurePosixPath("/workspace/service"),),
+        ),
+        parent_budget=AgentBudget(
+            max_rounds=5,
+            max_tool_calls=5,
+            max_no_new_evidence_rounds=2,
+        ),
+    )
+    report = runtime.reports.generate(investigation.investigation_id)
+    store = runtime.investigation_store
+    investigation_record = runtime.investigations.get_investigation(
+        investigation.investigation_id
+    ).model_dump(mode="json")
+    events = runtime.events.list_after(0, limit=1_000)
+    hooks = tuple(
+        event.payload
+        for event in events
+        if event.event_type is RuntimeEventType.AGENT_HOOK
+    )
+    return LiveModelRunResult(
+        investigation=investigation_record,
+        run=run.model_dump(mode="json"),
+        rounds=tuple(
+            item.model_dump(mode="json") for item in store.list_rounds(run.agent_run_id)
+        ),
+        tool_calls=tuple(
+            item.model_dump(mode="json")
+            for item in store.list_tool_calls(agent_run_id=run.agent_run_id)
+        ),
+        transcript=tuple(
+            item.model_dump(mode="json")
+            for item in store.list_transcript_messages(run.agent_run_id)
+        ),
+        compact_boundaries=tuple(
+            item.model_dump(mode="json")
+            for item in store.list_compact_boundaries(run.agent_run_id)
+        ),
+        evidence=tuple(
+            item.model_dump(mode="json")
+            for item in runtime.evidence.list_for_incident(investigation.incident_id)
+        ),
+        conclusions=tuple(
+            item.model_dump(mode="json")
+            for item in runtime.investigations.list_conclusions(
+                investigation_id=investigation.investigation_id
+            )
+        ),
+        hooks=hooks,
+        report=report.metadata.model_dump(mode="json"),
+    )
 
 
 def main() -> None:
@@ -141,79 +276,30 @@ def main() -> None:
                 "agent_mode": "llm_agent",
             }
         )
-        runtime = build_runtime(settings, transport_factory=factory)
-        runtime.projects.create(
-            ProjectRegistration(
-                project_id="recording-project",
-                display_name="Live MaaS recording",
-                targets=(target,),
-                services=(service,),
-            ),
-            now=datetime.now(UTC),
+        result = asyncio.run(
+            run_live_model_workflow(settings, factory, target, service)
         )
-        investigation = runtime.investigations.create_investigation(
-            project_id="recording-project",
-            target_id=target.target_id,
-            service="test-ssh",
-            symptom=(
-                "checkout requests return 502; inspect the authorized live log "
-                "and identify the observable failure chain"
-            ),
-            incident_id="recording-incident",
-            budget=InvestigationBudget(
-                max_rounds=5, max_tool_calls=5, max_no_new_evidence_rounds=2
-            ),
-        )
-        run = asyncio.run(
-            runtime.investigations.start(
-                investigation.investigation_id,
-                AgentScope(
-                    project_id="recording-project",
-                    target_id=target.target_id,
-                    scope=LogScope.HOST,
-                    allowed_host_paths=(PurePosixPath("/workspace/service"),),
-                ),
-                parent_budget=AgentBudget(
-                    max_rounds=5, max_tool_calls=5, max_no_new_evidence_rounds=2
-                ),
-            )
-        )
-        report = runtime.reports.generate(investigation.investigation_id)
-        record = {
-            "investigation": runtime.investigations.get_investigation(
-                investigation.investigation_id
-            ).model_dump(mode="json"),
-            "run": run.model_dump(mode="json"),
-            "rounds": [
-                item.model_dump(mode="json")
-                for item in runtime.investigation_store.list_rounds(agent_run_id=run.agent_run_id)
-            ],
-            "tool_calls": [
-                item.model_dump(mode="json")
-                for item in runtime.investigation_store.list_tool_calls(
-                    agent_run_id=run.agent_run_id
-                )
-            ],
-            "evidence": [
-                item.model_dump(mode="json")
-                for item in runtime.evidence.list_for_incident(investigation.incident_id)
-            ],
-            "conclusions": [
-                item.model_dump(mode="json")
-                for item in runtime.investigations.list_conclusions(
-                    investigation_id=investigation.investigation_id
-                )
-            ],
-            "report": report.metadata.model_dump(mode="json"),
-        }
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+        args.output.write_text(json.dumps(result.to_record(), ensure_ascii=False, indent=2) + "\n")
         if args.report_dir is not None:
             args.report_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(report.markdown_path, args.report_dir / "live-model-report.md")
-            shutil.copy2(report.html_path, args.report_dir / "live-model-report.html")
+            # Report files remain owned by the runtime's configured report directory.
+            report_dir = settings.report_output_dir
+            if report_dir is not None:
+                investigation_id = result.investigation["investigation_id"]
+                shutil.copy2(
+                    report_dir / f"{investigation_id}.md",
+                    args.report_dir / "live-model-report.md",
+                )
+                shutil.copy2(
+                    report_dir / f"{investigation_id}.html",
+                    args.report_dir / "live-model-report.html",
+                )
         print(f"wrote {args.output}")
-        print(f"status={run.status.value}, rounds={run.usage.rounds}, tools={run.usage.tool_calls}")
+        print(
+            f"status={result.run['status']}, rounds={result.run['usage']['rounds']}, "
+            f"tools={result.run['usage']['tool_calls']}"
+        )
     finally:
         subprocess.run(
             ["docker", "compose", "-f", str(compose), "-p", project_name, "down", "--volumes"],
