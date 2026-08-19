@@ -14,12 +14,11 @@ from incidentlens_control_plane.investigation.fake_provider import (
 )
 from incidentlens_control_plane.investigation.provider import (
     Conclusion,
+    ConversationRequest,
     StopSignal,
     ToolRequest,
 )
-from incidentlens_control_plane.investigation.types import (
-    StopReason,
-)
+from incidentlens_control_plane.investigation.types import StopReason, ToolResultBlock
 from incidentlens_control_plane.project_registry.types import (
     ServiceRegistration,
     TargetRegistration,
@@ -55,8 +54,33 @@ def _settings(tmp_path: Path) -> RuntimeSettings:
     )
 
 
+class _RecordingRegistry(FakeProviderRegistry):
+    """Test-only adapter that grounds this recording script's final stop."""
+
+    def pop_step(self, run_id: str, request: ConversationRequest) -> object:
+        step = super().pop_step(run_id, request)
+        if not isinstance(step, StopStep) or step.conclusion is None:
+            return step
+        evidence_ids = tuple(
+            evidence_id
+            for message in request.messages
+            for block in message.blocks
+            if isinstance(block, ToolResultBlock)
+            for evidence_id in block.evidence_ids
+        )
+        if not evidence_ids:
+            return step
+        return step.model_copy(
+            update={
+                "conclusion": step.conclusion.model_copy(
+                    update={"evidence_ids": evidence_ids}
+                )
+            }
+        )
+
+
 def _registry() -> FakeProviderRegistry:
-    registry = FakeProviderRegistry()
+    registry = _RecordingRegistry()
     registry.set_script(
         "pending",
         [
@@ -120,6 +144,10 @@ async def test_live_workflow_returns_recording_shape_and_scripted_completion(tmp
     run_id = result.run["agent_run_id"]
     assert registry.requests(run_id)
     assert registry.remaining(run_id) == 0
+    assert result.conclusions
+    assert all("__latest__" not in item["evidence_ids"] for item in result.conclusions)
+    owned_evidence_ids = {item["evidence_ref_id"] for item in result.evidence}
+    assert set(result.conclusions[0]["evidence_ids"]) <= owned_evidence_ids
 
 
 @pytest.mark.asyncio

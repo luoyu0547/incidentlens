@@ -194,6 +194,14 @@ class FakeProviderRegistry:
             raise ScriptExhausted(f"no script steps left for run {run_id!r}")
         return steps.pop(0)
 
+    def pop_step(self, run_id: str, request: ConversationRequest) -> object:
+        """Consume the next step for a provider request.
+
+        Subclasses may override this public dispatch hook for test-only scripted
+        adapters; the default behavior is deliberately request-independent.
+        """
+        return self.pop(run_id)
+
     def record_request(self, run_id: str, request: ConversationRequest) -> None:
         """Append one provider request and bind a pending script to this run."""
         pending = self._scripts.pop("__next__", None)
@@ -227,7 +235,7 @@ class FakeProvider(ModelProvider):
 
     async def generate_turn(self, request: ConversationRequest) -> AgentTurnResult:
         self._registry.record_request(request.checkpoint.agent_run_id, request)
-        step = self._registry.pop(request.checkpoint.agent_run_id)
+        step = self._registry.pop_step(request.checkpoint.agent_run_id, request)
         if isinstance(step, BaseException):
             # A script item may be a concrete exception (e.g.
             # ``PromptTooLongError()``) that the provider raises on pop.
@@ -243,26 +251,6 @@ class FakeProvider(ModelProvider):
             return AgentTurnResult(child_delegation=step.delegation, usage=step.usage)
         if isinstance(step, StopStep):
             conclusion = step.conclusion
-            if conclusion is not None and "__latest__" in conclusion.evidence_ids:
-
-                def collect_ids(value: object) -> tuple[str, ...]:
-                    if isinstance(value, dict):
-                        ids = value.get("evidence_ids", ())
-                        return tuple(ids) + tuple(
-                            item_id for item in value.values() for item_id in collect_ids(item)
-                        )
-                    if isinstance(value, (tuple, list)):
-                        return tuple(item_id for item in value for item_id in collect_ids(item))
-                    return ()
-
-                evidence_ids = tuple(
-                    dict.fromkeys(
-                        item_id
-                        for message in request.messages
-                        for item_id in collect_ids(message.model_dump(mode="json"))
-                    )
-                )
-                conclusion = conclusion.model_copy(update={"evidence_ids": evidence_ids})
             return AgentTurnResult(
                 stop_signal=step.stop_signal,
                 hypotheses=step.hypotheses,
