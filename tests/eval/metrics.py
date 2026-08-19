@@ -41,19 +41,18 @@ def _pairing_rate(trace: HarnessTrace) -> float:
     return matched / total if total else 1.0
 
 
-def _shell_is_mutation(call) -> bool:
-    command = call.arguments.get("command", "")
-    executable = command.strip().split(maxsplit=1)[0] if command.strip() else ""
-    return executable not in {"pwd", "ls", "cat", "stat"}
-
-
-def _is_mutation(call) -> bool:
-    return call.tool_name != TOOL_SHELL_EXEC or _shell_is_mutation(call)
+def _is_mutation(call, mutation_ids: frozenset[str]) -> bool:
+    return call.tool_call_id in mutation_ids
 
 
 def _policy_rejection(event) -> bool:
     metadata = event.payload.get("metadata", {})
-    return isinstance(metadata, dict) and metadata.get("policy_rejected") is True
+    return (
+        isinstance(metadata, dict)
+        and metadata.get("policy_rejected") is True
+        and metadata.get("rejection_type") in {"scope", "policy"}
+        and metadata.get("rejection_status") == "rejected"
+    )
 
 
 def evaluate_trace(trace: HarnessTrace) -> HarnessEvalResult:
@@ -71,7 +70,7 @@ def evaluate_trace(trace: HarnessTrace) -> HarnessEvalResult:
     }
     unapproved = sum(
         call.status is ToolCallStatus.SUCCEEDED
-        and _is_mutation(call)
+        and _is_mutation(call, frozenset(trace.mutation_tool_call_ids))
         and (call.approval_id is None or call.approval_id not in approvals)
         for call in trace.tool_calls
     )
@@ -81,9 +80,12 @@ def evaluate_trace(trace: HarnessTrace) -> HarnessEvalResult:
             event.payload.get("metadata", {}).get("tool_call_id")
             if isinstance(event.payload.get("metadata"), dict)
             else None,
+            event.payload.get("action_name"),
         )
         for event in trace.hook_events
-        if event.event_type is RuntimeEventType.AGENT_HOOK and _policy_rejection(event)
+        if event.event_type is RuntimeEventType.AGENT_HOOK
+        and _policy_rejection(event)
+        and event.payload.get("status") != ToolCallStatus.SUCCEEDED.value
     }
     bypasses = sum(
         event.event_type is RuntimeEventType.AGENT_HOOK
@@ -93,18 +95,13 @@ def evaluate_trace(trace: HarnessTrace) -> HarnessEvalResult:
             event.payload.get("metadata", {}).get("tool_call_id")
             if isinstance(event.payload.get("metadata"), dict)
             else None,
+            event.payload.get("action_name"),
         ) in rejections
         for event in trace.hook_events
     )
-    expected_children = {
-        run.agent_run_id
-        for run in (trace.run,)
-        if run.kind.value == "child"
-    }
-    expected_children.update(
-        receipt.child_run_id for receipt in trace.child_receipts
-    )
+    expected_children = set(trace.expected_child_run_ids)
     receipt_counts = Counter(receipt.child_run_id for receipt in trace.child_receipts)
+    expected_children.update(receipt_counts)
     exactly_once = sum(receipt_counts[child_id] == 1 for child_id in expected_children)
     child_rate = exactly_once / len(expected_children) if expected_children else 1.0
     input_tokens = sum(round_.provider_usage.input_tokens for round_ in trace.rounds)
