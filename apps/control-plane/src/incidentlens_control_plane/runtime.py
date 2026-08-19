@@ -19,9 +19,16 @@ from incidentlens_control_plane.investigation.context import (
     AgentContextManager,
     ContextBudgetPolicy,
 )
+from incidentlens_control_plane.investigation.delegation import DelegationValidator
+from incidentlens_control_plane.investigation.events import InvestigationEventPublisher
 from incidentlens_control_plane.investigation.fake_provider import (
     FakeProvider,
     FakeProviderRegistry,
+)
+from incidentlens_control_plane.investigation.hooks import (
+    HookEventType,
+    HookRunner,
+    RuntimeHookRecorder,
 )
 from incidentlens_control_plane.investigation.orchestrator import AgentOrchestrator
 from incidentlens_control_plane.investigation.recovery import RecoveryService
@@ -168,6 +175,15 @@ def build_runtime(
     # every service shares the same evidence, approval and event services so
     # there is exactly one execution channel and one event stream.
     evidence_service = EvidenceService(evidence, investigations=investigation_store)
+    # One fixed, observational hook runner and one validator are shared by the
+    # executor and orchestrator; hooks never participate in authorization.
+    hooks = HookRunner()
+    hook_recorder = RuntimeHookRecorder(
+        InvestigationEventPublisher(events, broker)
+    )
+    for event_type in HookEventType:
+        hooks.register(event_type, hook_recorder)
+    delegation = DelegationValidator(projects)
     executor = ToolExecutor(
         projects=projects,
         sessions=sessions,
@@ -178,6 +194,8 @@ def build_runtime(
         evidence_store=evidence,
         investigations=investigation_store,
         approvals=approvals,
+        hooks=hooks,
+        delegation=delegation,
     )
     fake_provider = fake_provider_registry or FakeProviderRegistry()
     provider = FakeProvider(fake_provider)
@@ -216,6 +234,8 @@ def build_runtime(
         events=events,
         broker=broker,
         context_manager=context_manager,
+        hooks=hooks,
+        delegation=delegation,
     )
     source_discovery = SourceDiscoveryService(
         projects=projects,

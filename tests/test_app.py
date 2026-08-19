@@ -11,7 +11,18 @@ def test_healthz_does_not_claim_a_remote_connection() -> None:
     assert response.json() == {"status": "ok", "remote_execution": "not_configured"}
 
 
-def test_app_lifespan_creates_local_database(tmp_path: Path) -> None:
+def test_runtime_shares_hook_runner_and_delegation_validator(tmp_path: Path) -> None:
+    from incidentlens_control_plane.config import RuntimeSettings
+    from incidentlens_control_plane.runtime import build_runtime
+
+    runtime = build_runtime(RuntimeSettings(data_dir=tmp_path / "incidentlens"))
+    orchestrator = runtime.investigations._orchestrator
+    executor = runtime.investigations._executor
+    assert orchestrator._context is runtime.context_manager
+    assert orchestrator._hooks is executor._hooks
+    assert orchestrator._delegation is executor._delegation
+
+
     from incidentlens_control_plane.config import RuntimeSettings
     from incidentlens_control_plane.main import create_app
 

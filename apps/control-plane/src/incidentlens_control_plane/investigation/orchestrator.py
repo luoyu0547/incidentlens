@@ -1815,6 +1815,48 @@ class AgentOrchestrator:
         )
         return report, evidence_ref
 
+    async def reconcile_child_report_receipts(
+        self, parent_run_id: str | None = None
+    ) -> int:
+        """Deliver persisted child receipts without running a provider turn.
+
+        Recovery uses this entry point after reloading durable parent state.  A
+        bounded temporary report list is intentionally discarded after each
+        pass; the receipt and transactional store are the source of truth.
+        Terminal parents are valid because notification/evidence repair must not
+        depend on resuming the parent loop.
+        """
+        parent_ids = (
+            (parent_run_id,)
+            if parent_run_id is not None
+            else tuple(
+                run.agent_run_id
+                for run in self._store.list_agent_runs()
+                if run.kind is AgentRunKind.PARENT
+                and self._store.list_undelivered_child_report_receipts(
+                    run.agent_run_id
+                )
+            )
+        )
+        delivered = 0
+        for agent_run_id in parent_ids:
+            run = self._store.get_agent_run(agent_run_id)
+            if run.kind is not AgentRunKind.PARENT:
+                continue
+            investigation = self._store.get_investigation(run.investigation_id)
+            before = len(
+                self._store.list_undelivered_child_report_receipts(agent_run_id)
+            )
+            if not before:
+                continue
+            await self._deliver_pending_child_reports(
+                run, investigation, [], self._now()
+            )
+            delivered += before - len(
+                self._store.list_undelivered_child_report_receipts(agent_run_id)
+            )
+        return delivered
+
     async def _deliver_pending_child_reports(
         self,
         run: AgentRun,

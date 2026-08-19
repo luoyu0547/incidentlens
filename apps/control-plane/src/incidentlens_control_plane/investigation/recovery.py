@@ -163,6 +163,7 @@ class RecoveryService:
             cancel_finalised=cancel_finalised,
         )
         self._validate_transcript_tails()
+        await self._orchestrator.reconcile_child_report_receipts()
         # Only audit a recovery that actually did something; an empty startup
         # is a no-op and must not inject recovery.* events into the stream.
         if self._events_pub is not None and (
