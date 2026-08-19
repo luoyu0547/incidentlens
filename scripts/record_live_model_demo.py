@@ -144,126 +144,117 @@ async def run_live_model_workflow(
     fake_provider_registry: FakeProviderRegistry | None = None,
 ) -> LiveModelRunResult:
     """Run the recording workflow against an already-started SSH target."""
-    effective_settings, prefill_complete_groups = _effective_settings(
-        settings, context_overrides
-    )
+    effective_settings, prefill_complete_groups = _effective_settings(settings, context_overrides)
     runtime = build_runtime(
         effective_settings,
         transport_factory=factory,
         fake_provider_registry=fake_provider_registry,
     )
-    project_id = "recording-project"
-    runtime.projects.create(
-        ProjectRegistration(
-            project_id=project_id,
-            display_name="Live MaaS recording",
-            targets=(target,),
-            services=(service,),
-        ),
-        now=datetime.now(UTC),
-    )
-    investigation = runtime.investigations.create_investigation(
-        project_id=project_id,
-        target_id=target.target_id,
-        service=service.compose_service,
-        symptom=(
-            "checkout requests return 502; inspect the authorized live log "
-            "and identify the observable failure chain"
-        ),
-        incident_id="recording-incident",
-        budget=InvestigationBudget(
-            max_rounds=5,
-            max_tool_calls=5,
-            max_no_new_evidence_rounds=2,
-        ),
-    )
-    if fake_provider_registry is not None:
-        fake_provider_registry.set_pending_script(
-            fake_provider_registry.script("pending")
-            or fake_provider_registry.script("run-recording")
+    try:
+        project_id = "recording-project"
+        runtime.projects.create(
+            ProjectRegistration(
+                project_id=project_id,
+                display_name="Live MaaS recording",
+                targets=(target,),
+                services=(service,),
+            ),
+            now=datetime.now(UTC),
         )
-    run = await runtime.investigations.start(
-        investigation.investigation_id,
-        AgentScope(
+        investigation = runtime.investigations.create_investigation(
             project_id=project_id,
             target_id=target.target_id,
-            scope=LogScope.HOST,
-            allowed_host_paths=(PurePosixPath("/workspace/service"),),
-        ),
-        parent_budget=AgentBudget(
-            max_rounds=5,
-            max_tool_calls=5,
-            max_no_new_evidence_rounds=2,
-        ),
-    )
-    if fake_provider_registry is not None and run.status.value not in {
-        "completed", "paused_missing_evidence", "failed"
-    }:
-        raise RuntimeError(
-            f"fake recording workflow did not complete: {run.status.value}; "
-            f"stop_reason={run.stop_reason}"
+            service=service.compose_service,
+            symptom=(
+                "checkout requests return 502; inspect the authorized live log "
+                "and identify the observable failure chain"
+            ),
+            incident_id="recording-incident",
+            budget=InvestigationBudget(
+                max_rounds=5, max_tool_calls=5, max_no_new_evidence_rounds=2
+            ),
         )
-    if prefill_complete_groups:
-        now = datetime.now(UTC)
-        next_sequence = len(
-            runtime.investigation_store.list_transcript_messages(run.agent_run_id)
-        ) + 1
-        for sequence in range(
-            next_sequence, next_sequence + prefill_complete_groups * 2
-        ):
-            runtime.investigation_store.append_transcript_message(
-                TranscriptMessage(
-                    agent_run_id=run.agent_run_id,
-                    sequence=sequence,
-                    role=MessageRole.USER if sequence % 2 else MessageRole.ASSISTANT,
-                    blocks=(TextBlock(text=f"prefill transcript group {sequence}"),),
-                    created_at=now,
+        if fake_provider_registry is not None:
+            pending = fake_provider_registry.script("pending")
+            if not pending:
+                pending = fake_provider_registry.script("run-recording")
+            if not pending:
+                raise ValueError("fake_provider_registry requires a pending recording script")
+            fake_provider_registry.set_pending_script(pending)
+        run = await runtime.investigations.start(
+            investigation.investigation_id,
+            AgentScope(
+                project_id=project_id,
+                target_id=target.target_id,
+                scope=LogScope.HOST,
+                allowed_host_paths=(PurePosixPath("/workspace/service"),),
+            ),
+            parent_budget=AgentBudget(max_rounds=5, max_tool_calls=5, max_no_new_evidence_rounds=2),
+        )
+        if fake_provider_registry is not None and run.status.value != "completed":
+            if run.status.value == "paused_missing_evidence":
+                run = await runtime.investigations.resume_run(run.agent_run_id)
+            if run.status.value != "completed":
+                raise RuntimeError(f"fake recording workflow did not complete: {run.status.value}")
+        if prefill_complete_groups:
+            now = datetime.now(UTC)
+            start = len(runtime.investigation_store.list_transcript_messages(run.agent_run_id)) + 1
+            for sequence in range(start, start + prefill_complete_groups * 2):
+                runtime.investigation_store.append_transcript_message(
+                    TranscriptMessage(
+                        agent_run_id=run.agent_run_id,
+                        sequence=sequence,
+                        role=MessageRole.USER if sequence % 2 else MessageRole.ASSISTANT,
+                        blocks=(TextBlock(text=f"prefill transcript group {sequence}"),),
+                        created_at=now,
+                    )
                 )
-            )
-    report = runtime.reports.generate(investigation.investigation_id)
-    store = runtime.investigation_store
-    investigation_record = runtime.investigations.get_investigation(
-        investigation.investigation_id
-    ).model_dump(mode="json")
-    events = runtime.events.list_after(0, limit=1_000)
-    hooks = tuple(
-        event.payload
-        for event in events
-        if event.event_type is RuntimeEventType.AGENT_HOOK
-    )
-    return LiveModelRunResult(
-        investigation=investigation_record,
-        run=run.model_dump(mode="json"),
-        rounds=tuple(
-            item.model_dump(mode="json") for item in store.list_rounds(run.agent_run_id)
-        ),
-        tool_calls=tuple(
-            item.model_dump(mode="json")
-            for item in store.list_tool_calls(agent_run_id=run.agent_run_id)
-        ),
-        transcript=tuple(
-            item.model_dump(mode="json")
-            for item in store.list_transcript_messages(run.agent_run_id)
-        ),
-        compact_boundaries=tuple(
-            item.model_dump(mode="json")
-            for item in store.list_compact_boundaries(run.agent_run_id)
-        ),
-        evidence=tuple(
-            item.model_dump(mode="json")
-            for item in runtime.evidence.list_for_incident(investigation.incident_id)
-        ),
-        conclusions=tuple(
-            item.model_dump(mode="json")
-            for item in runtime.investigations.list_conclusions(
-                investigation_id=investigation.investigation_id
-            )
-        ),
-        hooks=hooks,
-        report=report.metadata.model_dump(mode="json"),
-        markdown_path=report.markdown_path,
-        html_path=report.html_path,
-    )
+        report = runtime.reports.generate(investigation.investigation_id)
+        store = runtime.investigation_store
+        investigation_record = runtime.investigations.get_investigation(
+            investigation.investigation_id
+        ).model_dump(mode="json")
+        hooks = tuple(
+            event.payload
+            for event in runtime.events.list_after(0, limit=1_000)
+            if event.event_type is RuntimeEventType.AGENT_HOOK
+        )
+        return LiveModelRunResult(
+            investigation=investigation_record,
+            run=run.model_dump(mode="json"),
+            rounds=tuple(
+                item.model_dump(mode="json") for item in store.list_rounds(run.agent_run_id)
+            ),
+            tool_calls=tuple(
+                item.model_dump(mode="json")
+                for item in store.list_tool_calls(agent_run_id=run.agent_run_id)
+            ),
+            transcript=tuple(
+                item.model_dump(mode="json")
+                for item in store.list_transcript_messages(run.agent_run_id)
+            ),
+            compact_boundaries=tuple(
+                item.model_dump(mode="json")
+                for item in store.list_compact_boundaries(run.agent_run_id)
+            ),
+            evidence=tuple(
+                item.model_dump(mode="json")
+                for item in runtime.evidence.list_for_incident(investigation.incident_id)
+            ),
+            conclusions=tuple(
+                item.model_dump(mode="json")
+                for item in runtime.investigations.list_conclusions(
+                    investigation_id=investigation.investigation_id
+                )
+            ),
+            hooks=hooks,
+            report=report.metadata.model_dump(mode="json"),
+            markdown_path=report.markdown_path,
+            html_path=report.html_path,
+        )
+    finally:
+        await runtime.recovery.shutdown()
+        await runtime.sessions.close_all()
 
 
 def main() -> None:
@@ -339,9 +330,7 @@ def main() -> None:
                 "agent_mode": "llm_agent",
             }
         )
-        result = asyncio.run(
-            run_live_model_workflow(settings, factory, target, service)
-        )
+        result = asyncio.run(run_live_model_workflow(settings, factory, target, service))
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result.to_record(), ensure_ascii=False, indent=2) + "\n")
         if args.report_dir is not None:

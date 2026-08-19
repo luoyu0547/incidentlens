@@ -80,7 +80,7 @@ def _registry() -> FakeProviderRegistry:
                 ),
                 conclusion=Conclusion(
                     summary="recorded conclusion",
-                    evidence_ids=("log-1",),
+                    evidence_ids=("__latest__",),
                 ),
             ),
         ],
@@ -105,12 +105,18 @@ async def test_live_workflow_returns_recording_shape_and_scripted_completion(tmp
         fake_provider_registry=registry,
     )
     assert set(result.to_record()) == {
-        "investigation", "run", "rounds", "tool_calls", "transcript",
-        "compact_boundaries", "evidence", "conclusions", "hooks", "report",
+        "investigation",
+        "run",
+        "rounds",
+        "tool_calls",
+        "transcript",
+        "compact_boundaries",
+        "evidence",
+        "conclusions",
+        "hooks",
+        "report",
     }
-    assert result.run["status"] in {
-        "completed", "paused_missing_evidence", "failed"
-    }
+    assert result.run["status"] == "completed"
     run_id = result.run["agent_run_id"]
     assert registry.requests(run_id)
     assert registry.remaining(run_id) == 0
@@ -119,9 +125,14 @@ async def test_live_workflow_returns_recording_shape_and_scripted_completion(tmp
 @pytest.mark.asyncio
 async def test_context_overrides_prefill_complete_groups_and_whitelists_keys(tmp_path) -> None:
     registry = _registry()
+    factory = FakeTransportFactory()
+    transport = await factory.connect(_target())
+    await transport.write_bytes(
+        PurePosixPath("/workspace/service/live.log"), b"ERROR checkout timeout\n"
+    )
     result = await run_live_model_workflow(
         _settings(tmp_path),
-        FakeTransportFactory(),
+        factory,
         _target(),
         _service(),
         context_overrides={
@@ -130,9 +141,7 @@ async def test_context_overrides_prefill_complete_groups_and_whitelists_keys(tmp
         },
         fake_provider_registry=registry,
     )
-    assert result.run["status"] in {
-        "completed", "paused_missing_evidence", "failed"
-    }
+    assert result.run["status"] == "completed"
     assert len(result.transcript) >= 4
 
 
@@ -140,7 +149,10 @@ async def test_context_overrides_prefill_complete_groups_and_whitelists_keys(tmp
 async def test_context_overrides_reject_unknown_keys(tmp_path) -> None:
     with pytest.raises(ValueError, match="unsupported context override"):
         await run_live_model_workflow(
-            _settings(tmp_path), FakeTransportFactory(), _target(), _service(),
+            _settings(tmp_path),
+            FakeTransportFactory(),
+            _target(),
+            _service(),
             context_overrides={"not_a_context_setting": 1},
             fake_provider_registry=_registry(),
         )
@@ -150,8 +162,14 @@ def _result(report_root: Path) -> record_live_model_demo.LiveModelRunResult:
     return record_live_model_demo.LiveModelRunResult(
         investigation={"investigation_id": "inv-1"},
         run={"status": "completed", "usage": {"rounds": 1, "tool_calls": 0}},
-        rounds=(), tool_calls=(), transcript=(), compact_boundaries=(), evidence=(),
-        conclusions=(), hooks=(), report={"markdown_path": "report.md"},
+        rounds=(),
+        tool_calls=(),
+        transcript=(),
+        compact_boundaries=(),
+        evidence=(),
+        conclusions=(),
+        hooks=(),
+        report={"markdown_path": "report.md"},
         markdown_path=report_root / "inv-1.md",
         html_path=report_root / "inv-1.html",
     )
@@ -182,9 +200,7 @@ def test_main_serializes_callable_result_and_copies_artifacts(tmp_path, monkeypa
     monkeypatch.setattr(
         record_live_model_demo.subprocess,
         "run",
-        lambda *args, **kwargs: type(
-            "R", (), {"stdout": "container", "returncode": 0}
-        )(),
+        lambda *args, **kwargs: type("R", (), {"stdout": "container", "returncode": 0})(),
     )
     monkeypatch.setattr(record_live_model_demo, "_seed_log", AsyncMock())
     monkeypatch.setattr(record_live_model_demo, "build_runtime", lambda settings, **kwargs: None)

@@ -152,9 +152,7 @@ class FakeProviderRegistry:
         """Replace the run's script with ``steps``, replayed in order."""
         self._scripts[run_id] = list(steps)
 
-    def script(
-        self, run_id: str, steps: Sequence[object] | None = None
-    ) -> tuple[object, ...]:
+    def script(self, run_id: str, steps: Sequence[object] | None = None) -> tuple[object, ...]:
         """Set or read the run's script, oldest first.
 
         With ``steps``, replace the run's script and return the new tuple;
@@ -244,10 +242,31 @@ class FakeProvider(ModelProvider):
         if isinstance(step, DelegateChildStep):
             return AgentTurnResult(child_delegation=step.delegation, usage=step.usage)
         if isinstance(step, StopStep):
+            conclusion = step.conclusion
+            if conclusion is not None and "__latest__" in conclusion.evidence_ids:
+
+                def collect_ids(value: object) -> tuple[str, ...]:
+                    if isinstance(value, dict):
+                        ids = value.get("evidence_ids", ())
+                        return tuple(ids) + tuple(
+                            item_id for item in value.values() for item_id in collect_ids(item)
+                        )
+                    if isinstance(value, (tuple, list)):
+                        return tuple(item_id for item in value for item_id in collect_ids(item))
+                    return ()
+
+                evidence_ids = tuple(
+                    dict.fromkeys(
+                        item_id
+                        for message in request.messages
+                        for item_id in collect_ids(message.model_dump(mode="json"))
+                    )
+                )
+                conclusion = conclusion.model_copy(update={"evidence_ids": evidence_ids})
             return AgentTurnResult(
                 stop_signal=step.stop_signal,
                 hypotheses=step.hypotheses,
-                conclusions=(step.conclusion,) if step.conclusion is not None else (),
+                conclusions=(conclusion,) if conclusion is not None else (),
                 usage=step.usage,
             )
         if isinstance(step, MalformedStep):
