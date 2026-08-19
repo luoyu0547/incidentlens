@@ -148,6 +148,8 @@ async def test_live_workflow_returns_recording_shape_and_scripted_completion(tmp
     assert all("__latest__" not in item["evidence_ids"] for item in result.conclusions)
     owned_evidence_ids = {item["evidence_ref_id"] for item in result.evidence}
     assert set(result.conclusions[0]["evidence_ids"]) <= owned_evidence_ids
+    assert result.transcript[0]["blocks"][0]["text"].startswith("Investigation ")
+    assert "Symptom:" in result.transcript[0]["blocks"][0]["text"]
 
 
 @pytest.mark.asyncio
@@ -171,6 +173,7 @@ async def test_context_overrides_prefill_complete_groups_and_whitelists_keys(tmp
     )
     assert result.run["status"] == "completed"
     assert len(result.transcript) >= 4
+    assert "prefill group 0" in result.transcript[1]["blocks"][0]["text"]
 
 
 @pytest.mark.asyncio

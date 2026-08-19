@@ -67,8 +67,8 @@ async def test_real_maas_run_satisfies_harness_invariants(live_target, tmp_path)
         settings, live_target.factory, live_target.target, live_target.service
     )
     metrics = evaluate_trace(HarnessTrace.from_live_result(result))
-    assert result.provider_type == "XfyunMaaSProvider"
-    assert result.provider_model == settings.llm_active_model
+    assert result.report["provider_type"] == "XfyunMaaSProvider"
+    assert result.report["provider_model"] == settings.llm_active_model
     assert metrics.foreign_evidence_count == 0
     assert metrics.scope_policy_bypass_count == 0
     assert metrics.unapproved_mutation_count == 0
