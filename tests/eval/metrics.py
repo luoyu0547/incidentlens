@@ -23,6 +23,7 @@ def _pairing_rate(trace: HarnessTrace) -> float:
         for message in trace.transcript
         for block in message.blocks
         if isinstance(block, ToolResultBlock)
+        and block.status is not ToolCallStatus.WAITING_APPROVAL
     ]
     if not uses and not results:
         return 1.0
