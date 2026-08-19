@@ -27,6 +27,9 @@ from incidentlens_control_plane.investigation.types import (
     AgentBudget,
     AgentScope,
     InvestigationBudget,
+    MessageRole,
+    TextBlock,
+    TranscriptMessage,
 )
 from incidentlens_control_plane.logs.types import LogScope
 from incidentlens_control_plane.project_registry.types import (
@@ -71,6 +74,36 @@ async def _seed_log(factory: AsyncSshTransportFactory, target: TargetRegistratio
         await sessions.close_all()
 
 
+_CONTEXT_OVERRIDE_FIELDS = frozenset(
+    {
+        "agent_context_window_tokens",
+        "agent_context_max_output_tokens",
+        "agent_context_reserve_tokens",
+        "agent_tool_result_budget_chars",
+        "agent_context_max_message_groups",
+        "agent_context_keep_recent_tool_results",
+        "agent_compact_max_failures",
+        "agent_reactive_keep_recent_groups",
+    }
+)
+_PREFILL_COMPLETE_GROUPS = "prefill_complete_groups"
+
+
+def _effective_settings(
+    settings: RuntimeSettings,
+    overrides: dict[str, object] | None,
+) -> tuple[RuntimeSettings, int]:
+    values = overrides or {}
+    unsupported = set(values) - _CONTEXT_OVERRIDE_FIELDS - {_PREFILL_COMPLETE_GROUPS}
+    if unsupported:
+        raise ValueError(f"unsupported context override: {sorted(unsupported)!r}")
+    prefill = values.get(_PREFILL_COMPLETE_GROUPS, 0)
+    if not isinstance(prefill, int) or isinstance(prefill, bool) or prefill < 0:
+        raise ValueError("prefill_complete_groups must be a non-negative integer")
+    updates = {key: values[key] for key in _CONTEXT_OVERRIDE_FIELDS if key in values}
+    return settings.model_copy(update=updates), prefill
+
+
 @dataclass(frozen=True, slots=True)
 class LiveModelRunResult:
     investigation: dict[str, object]
@@ -83,6 +116,8 @@ class LiveModelRunResult:
     conclusions: tuple[dict[str, object], ...]
     hooks: tuple[dict[str, object], ...]
     report: dict[str, object]
+    markdown_path: Path | None = None
+    html_path: Path | None = None
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -109,9 +144,11 @@ async def run_live_model_workflow(
     fake_provider_registry: FakeProviderRegistry | None = None,
 ) -> LiveModelRunResult:
     """Run the recording workflow against an already-started SSH target."""
-    del context_overrides  # Reserved for context-specific recording scenarios.
+    effective_settings, prefill_complete_groups = _effective_settings(
+        settings, context_overrides
+    )
     runtime = build_runtime(
-        settings,
+        effective_settings,
         transport_factory=factory,
         fake_provider_registry=fake_provider_registry,
     )
@@ -140,10 +177,10 @@ async def run_live_model_workflow(
             max_no_new_evidence_rounds=2,
         ),
     )
-    # Keep a deterministic id for injected fake scripts while preserving real MaaS behavior.
     if fake_provider_registry is not None:
-        fake_provider_registry.set_script(
-            "run-recording", fake_provider_registry.script("run-recording")
+        fake_provider_registry.set_pending_script(
+            fake_provider_registry.script("pending")
+            or fake_provider_registry.script("run-recording")
         )
     run = await runtime.investigations.start(
         investigation.investigation_id,
@@ -159,6 +196,30 @@ async def run_live_model_workflow(
             max_no_new_evidence_rounds=2,
         ),
     )
+    if fake_provider_registry is not None and run.status.value not in {
+        "completed", "paused_missing_evidence", "failed"
+    }:
+        raise RuntimeError(
+            f"fake recording workflow did not complete: {run.status.value}; "
+            f"stop_reason={run.stop_reason}"
+        )
+    if prefill_complete_groups:
+        now = datetime.now(UTC)
+        next_sequence = len(
+            runtime.investigation_store.list_transcript_messages(run.agent_run_id)
+        ) + 1
+        for sequence in range(
+            next_sequence, next_sequence + prefill_complete_groups * 2
+        ):
+            runtime.investigation_store.append_transcript_message(
+                TranscriptMessage(
+                    agent_run_id=run.agent_run_id,
+                    sequence=sequence,
+                    role=MessageRole.USER if sequence % 2 else MessageRole.ASSISTANT,
+                    blocks=(TextBlock(text=f"prefill transcript group {sequence}"),),
+                    created_at=now,
+                )
+            )
     report = runtime.reports.generate(investigation.investigation_id)
     store = runtime.investigation_store
     investigation_record = runtime.investigations.get_investigation(
@@ -200,6 +261,8 @@ async def run_live_model_workflow(
         ),
         hooks=hooks,
         report=report.metadata.model_dump(mode="json"),
+        markdown_path=report.markdown_path,
+        html_path=report.html_path,
     )
 
 
@@ -284,15 +347,13 @@ def main() -> None:
         if args.report_dir is not None:
             args.report_dir.mkdir(parents=True, exist_ok=True)
             # Report files remain owned by the runtime's configured report directory.
-            report_dir = settings.report_output_dir
-            if report_dir is not None:
-                investigation_id = result.investigation["investigation_id"]
+            if result.markdown_path is not None and result.html_path is not None:
                 shutil.copy2(
-                    report_dir / f"{investigation_id}.md",
+                    result.markdown_path,
                     args.report_dir / "live-model-report.md",
                 )
                 shutil.copy2(
-                    report_dir / f"{investigation_id}.html",
+                    result.html_path,
                     args.report_dir / "live-model-report.html",
                 )
         print(f"wrote {args.output}")

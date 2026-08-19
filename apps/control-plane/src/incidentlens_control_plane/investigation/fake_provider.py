@@ -168,6 +168,10 @@ class FakeProviderRegistry:
         """Append one step to the run's script, creating it if needed."""
         self._scripts.setdefault(run_id, []).append(step)
 
+    def set_pending_script(self, steps: Sequence[object]) -> None:
+        """Bind a script to the next run id requested by the provider."""
+        self.set_script("__next__", steps)
+
     def has_script(self, run_id: str) -> bool:
         """Return True when the run has at least one pending step."""
         return bool(self._scripts.get(run_id))
@@ -193,7 +197,10 @@ class FakeProviderRegistry:
         return steps.pop(0)
 
     def record_request(self, run_id: str, request: ConversationRequest) -> None:
-        """Append one provider request to the run's recorded history."""
+        """Append one provider request and bind a pending script to this run."""
+        pending = self._scripts.pop("__next__", None)
+        if pending is not None and run_id not in self._scripts:
+            self._scripts[run_id] = pending
         self._requests.setdefault(run_id, []).append(request)
 
     def requests(self, run_id: str) -> tuple[ConversationRequest, ...]:
