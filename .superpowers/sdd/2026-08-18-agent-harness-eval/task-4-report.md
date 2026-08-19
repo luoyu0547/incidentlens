@@ -26,4 +26,11 @@
 
 - The real test intentionally reuses the existing `test_live_agent_runtime.live_target` fixture and `RuntimeSettings.from_environment()`; it does not define another provider configuration.
 - The existing callable workflow uses bounded investigation budgets. Real MaaS behavior can still pause on a valid bounded status; the tests assert the brief's completion grounding condition only when status is `completed`.
-- No paid live invocation was performed in this environment.
+## Fix round 1
+
+- Preserved the normal initial investigation message before deterministic large
+  prefill groups and made each group materially exceed the 8,000-token window.
+- Added persisted provider metadata, root-run hook filtering, child exactly-once
+  assertion, and meaningful reactive-compaction evidence for paused-budget paths.
+- Re-ran the no-opt-in skip test, live workflow unit tests, Phase C tests, and
+  targeted Ruff; no paid MaaS/Docker test was run.

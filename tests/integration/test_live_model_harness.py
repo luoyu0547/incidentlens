@@ -67,11 +67,13 @@ async def test_real_maas_run_satisfies_harness_invariants(live_target, tmp_path)
         settings, live_target.factory, live_target.target, live_target.service
     )
     metrics = evaluate_trace(HarnessTrace.from_live_result(result))
-    assert result.tool_calls
+    assert result.provider_type == "XfyunMaaSProvider"
+    assert result.provider_model == settings.llm_active_model
     assert metrics.foreign_evidence_count == 0
     assert metrics.scope_policy_bypass_count == 0
     assert metrics.unapproved_mutation_count == 0
     assert metrics.tool_pairing_rate == 1.0
+    assert metrics.child_exactly_once_rate == 1.0
     if result.run["status"] == "completed":
         assert metrics.grounded_completion is True
 
@@ -92,6 +94,9 @@ async def test_real_maas_small_window_compacts_or_pauses_safely(live_target, tmp
         live_target.service,
         context_overrides={"prefill_complete_groups": 12},
     )
-    assert result.compact_boundaries or result.run["status"] == "paused_budget"
+    assert result.compact_boundaries or (
+        result.run["status"] == "paused_budget"
+        and count_overflow_retries(result.hooks) >= 1
+    )
     assert count_overflow_retries(result.hooks) <= 1
     assert evaluate_trace(HarnessTrace.from_live_result(result)).scope_policy_bypass_count == 0

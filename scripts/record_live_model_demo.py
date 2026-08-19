@@ -118,6 +118,8 @@ class LiveModelRunResult:
     conclusions: tuple[dict[str, object], ...]
     hooks: tuple[dict[str, object], ...]
     report: dict[str, object]
+    provider_type: str = ""
+    provider_model: str | None = None
     markdown_path: Path | None = None
     html_path: Path | None = None
 
@@ -186,18 +188,31 @@ async def run_live_model_workflow(
         async def prefill_context(run: object) -> None:
             if not prefill_complete_groups:
                 return
-            now = datetime.now(UTC)
-            for sequence in range(1, prefill_complete_groups * 2 + 1):
-                store = runtime.investigation_store
-                store.append_transcript_message(
-                    TranscriptMessage(
-                        agent_run_id=run.agent_run_id,
-                        sequence=sequence,
-                        role=MessageRole.USER if sequence % 2 else MessageRole.ASSISTANT,
-                        blocks=(TextBlock(text=f"prefill transcript group {sequence}"),),
-                        created_at=now,
-                    )
+            runtime.investigation_store.append_transcript_message(
+                TranscriptMessage(
+                    agent_run_id=run.agent_run_id,
+                    sequence=1,
+                    role=MessageRole.USER,
+                    blocks=(TextBlock(text=(
+                        "Prefill context follows the ordinary investigation prompt. "
+                        "Use only persisted evidence and preserve the task scope."
+                    )),),
+                    created_at=datetime.now(UTC),
                 )
+            )
+            large_text = "bounded context detail " * 800
+            for group in range(prefill_complete_groups):
+                base = group * 2 + 2
+                for sequence, role in ((base, MessageRole.ASSISTANT), (base + 1, MessageRole.USER)):
+                    runtime.investigation_store.append_transcript_message(
+                        TranscriptMessage(
+                            agent_run_id=run.agent_run_id,
+                            sequence=sequence,
+                            role=role,
+                            blocks=(TextBlock(text=f"prefill group {group}: {large_text}"),),
+                            created_at=datetime.now(UTC),
+                        )
+                    )
 
         run = await runtime.investigations.start(
             investigation.investigation_id,
@@ -220,10 +235,13 @@ async def run_live_model_workflow(
         investigation_record = runtime.investigations.get_investigation(
             investigation.investigation_id
         ).model_dump(mode="json")
+        root_run_id = run.agent_run_id
+        owned_run_ids = {root_run_id}
         hooks = tuple(
             event.model_dump(mode="json")
             for event in runtime.events.list_after(0, limit=1_000)
             if event.event_type is RuntimeEventType.AGENT_HOOK
+            and event.payload.get("agent_run_id") in owned_run_ids
         )
         return LiveModelRunResult(
             investigation=investigation_record,
@@ -255,6 +273,8 @@ async def run_live_model_workflow(
             ),
             hooks=hooks,
             report=report.metadata.model_dump(mode="json"),
+            provider_type=type(runtime.investigations._orchestrator._provider).__name__,
+            provider_model=effective_settings.llm_active_model,
             markdown_path=report.markdown_path,
             html_path=report.html_path,
         )

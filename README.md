@@ -185,6 +185,8 @@ uv run pytest tests/eval/test_harness_eval.py -q
 uv run python tests/eval/runner.py --json .incidentlens/harness-eval.json
 
 # Opt-in real MaaS invariants (reuses configured MaaS settings; skipped otherwise)
+# Targets: foreign evidence, scope/policy bypass, and unapproved mutation = 0;
+# tool pairing and child exactly-once = 100%.
 INCIDENTLENS_RUN_LIVE_MODEL_TESTS=1 uv run pytest tests/integration/test_live_model_harness.py -q
 
 # Phase 5：CLI、Web UI、报告与离线端到端流程
