@@ -56,8 +56,14 @@ def _trace(harness: Any, scenario: str) -> HarnessTrace:
         if (receipt := _receipt_if_present(harness, child_id)) is not None
     )
     forms = tuple(
-        ["typed_delegation"] * len(harness.investigations.list_delegated_tasks(parent_run_id=run.agent_run_id))
-        + ["delegate_child_tool" for call in harness.investigations.list_tool_calls(agent_run_id=run.agent_run_id) if call.tool_name == "delegate_child"]
+        "delegate_child_tool"
+        if any(
+            call.tool_name == "delegate_child"
+            and call.arguments.get("child_run_id") == child_id
+            for call in harness.investigations.list_tool_calls(agent_run_id=run.agent_run_id)
+        )
+        else "typed_delegation"
+        for child_id in child_ids
     )
     return HarnessTrace(
         scenario=scenario,
@@ -130,7 +136,7 @@ async def run_context_overflow_recovery() -> HarnessTrace:
 
 async def run_scope_violation() -> HarnessTrace:
     with tempfile.TemporaryDirectory(prefix="incidentlens-scope-") as directory:
-        harness = build_harness(Path(directory)); seed_run(harness, scope=make_scope(container=True))
+        harness = build_harness(Path(directory)); seed_run(harness, scope=make_scope(container=True), budget=AgentBudget(max_rounds=8, max_tool_calls=8))
         registry = FakeProviderRegistry(); registry.set_script("run-1", [RequestToolsStep(tool_requests=(tool_request("host_read", "scope-call", service_name=SERVICE, path="/opt/payments/secret"),))])
         await make_orchestrator(harness, FakeProvider(registry)).run("run-1")
         trace = _trace(harness, "scope_violation")
@@ -190,8 +196,12 @@ async def run_delegation_equivalence() -> HarnessTrace:
         await make_orchestrator(harness, FakeProvider(registry)).run("run-1")
         tool_trace = _trace(harness, "delegation-equivalence-tool")
         assert tool_trace.child_receipts and tool_trace.child_receipts[0].delivered_at is not None
-        assert set(tool_trace.delegation_forms) == {"delegate_child_tool", "typed_delegation"}
-    return typed
+        assert tool_trace.delegation_forms == ("delegate_child_tool",)
+    return typed.model_copy(update={
+        "delegation_forms": ("typed_delegation", "delegate_child_tool"),
+        "expected_child_run_ids": typed.expected_child_run_ids + tool_trace.expected_child_run_ids,
+        "child_receipts": typed.child_receipts + tool_trace.child_receipts,
+    })
 
 
 async def run_child_restart_delivery() -> HarnessTrace:

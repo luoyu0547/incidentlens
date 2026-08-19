@@ -27,5 +27,9 @@ Task 1 dependency commits were cherry-picked and resolved before Task 2: `2ba162
 - `/Users/chenxueqiang/Documents/code/incidentlens/.claude/worktrees/agent-harness-eval/tests/eval/types.py`
 - `/Users/chenxueqiang/Documents/code/incidentlens/.claude/worktrees/agent-harness-eval/tests/eval/test_harness_eval.py`
 
-## Verification
-Focused tests pass. The runner CLI produces six scenario rows and JSON. `git diff --check` is clean. Full-suite and final lint execution are required before the round-2 commit; the environment rejected the worktree-isolated Bash lint wrapper, so the final coordinator should rerun the exact project commands if needed.
+## Round 3 fix evidence
+- Delegation form classification is now per persisted child run: a child is labeled `delegate_child_tool` only when its child ID appears in a persisted `delegate_child` ToolCall's arguments; otherwise it is labeled `typed_delegation`. The aggregate `delegation_equivalence` trace combines the typed and tool-form child IDs and receipts into one immutable trace, and asserts both forms' receipt delivery and equivalent child lifecycle.
+- `run_scope_violation` now passes an explicit `AgentBudget`; `seed_run` no longer supplies a default budget, making accidental implicit scenario budgets impossible.
+- Direct lint command was attempted as `uv run ruff check tests/eval`; the worktree-isolated command wrapper rejected it before execution in this environment. `git diff --check` is clean. Coordinator should run the exact direct command in its non-isolated shell if the harness wrapper remains restrictive.
+- Exact CLI command `uv run python tests/eval/runner.py --json /tmp/incidentlens-harness-eval.json` passed and emitted all six rows.
+- Full suite: `963 passed, 12 skipped` with one existing Starlette deprecation warning.
