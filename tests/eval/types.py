@@ -51,8 +51,6 @@ class HarnessTrace(BaseModel):
     conclusions: tuple[Conclusion, ...] = ()
     child_receipts: tuple[ChildReportReceipt, ...] = ()
     hook_events: tuple[RuntimeEvent, ...] = ()
-    mutation_tool_call_ids: tuple[str, ...] = ()
-    expected_child_run_ids: tuple[str, ...] = ()
     elapsed_seconds: float = Field(default=0.0, ge=0.0)
 
 

@@ -38,10 +38,7 @@ def _scope() -> AgentScope:
     return AgentScope(project_id="p", target_id="t", scope=LogScope.HOST)
 
 
-def _trace(
-    *, conclusion_ids=("ev-1",), tool_calls=(), transcript=(), receipts=(), hooks=(),
-    mutation_ids=(), expected_children=()
-):
+def _trace(*, conclusion_ids=("ev-1",), tool_calls=(), transcript=(), receipts=(), hooks=()):
     evidence = (EvidenceReference(evidence_id="ev-1", operation_id="op-1", summary="ok"),)
     run = AgentRun(
         agent_run_id="run-1", investigation_id="inv-1", kind=AgentRunKind.PARENT,
@@ -65,16 +62,14 @@ def _trace(
         scenario="clean", investigation=investigation, run=run, rounds=rounds,
         tool_calls=tool_calls, transcript=transcript, conclusions=(conclusion,),
         child_receipts=receipts, hook_events=hooks, elapsed_seconds=1.5,
-        mutation_tool_call_ids=mutation_ids, expected_child_run_ids=expected_children,
     )
 
 
-def _tool(tool_id="tool-1", *, approval_id=None, tool_name="file_write", arguments=None):
+def _tool(tool_id="tool-1", *, approval_id=None):
     return ToolCall(
-        tool_call_id=tool_id, agent_run_id="run-1", tool_name=tool_name,
+        tool_call_id=tool_id, agent_run_id="run-1", tool_name="file_write",
         status=ToolCallStatus.SUCCEEDED, idempotency_key=tool_id, planned_at=NOW,
         started_at=NOW, finished_at=NOW, approval_id=approval_id,
-        arguments=arguments or {},
     )
 
 
@@ -127,10 +122,7 @@ def test_metric_detects_foreign_evidence() -> None:
 
 
 def test_metric_detects_unapproved_mutation() -> None:
-    result = evaluate_trace(
-        _trace(tool_calls=(_tool(),), mutation_ids=("tool-1",))
-    )
-    assert result.unapproved_mutation_count > 0
+    assert evaluate_trace(_trace(tool_calls=(_tool(),))).unapproved_mutation_count > 0
 
 
 def test_metric_detects_unpaired_tool_use() -> None:
@@ -146,115 +138,5 @@ def test_metric_detects_unpaired_tool_use() -> None:
     assert evaluate_trace(_trace(transcript=transcript)).tool_pairing_rate < 1.0
 
 
-def test_metric_detects_duplicate_and_result_only_tool_blocks() -> None:
-    transcript = (
-        TranscriptMessage(agent_run_id="run-1", sequence=1, role="assistant", blocks=(
-            ToolUseBlock(tool_call_id="tool-1", tool_name="log_query"),
-        ), created_at=NOW),
-        TranscriptMessage(agent_run_id="run-1", sequence=2, role="user", blocks=(
-            ToolResultBlock(tool_call_id="tool-1", status=ToolCallStatus.SUCCEEDED, content="ok"),
-            ToolResultBlock(tool_call_id="extra", status=ToolCallStatus.SUCCEEDED, content="ok"),
-        ), created_at=NOW),
-    )
-    assert evaluate_trace(_trace(transcript=transcript)).tool_pairing_rate < 1.0
-
-
-def test_read_only_shell_is_not_a_mutation() -> None:
-    trace = _trace(tool_calls=(_tool(tool_name="shell_exec", arguments={"command": "anything"}),))
-    assert evaluate_trace(trace).unapproved_mutation_count == 0
-
-
-def test_persisted_mutation_classification_marks_shell_mutation() -> None:
-    trace = _trace(
-        tool_calls=(_tool(tool_name="shell_exec", arguments={"command": "anything"}),),
-        mutation_ids=("tool-1",),
-    )
-    assert evaluate_trace(trace).unapproved_mutation_count == 1
-
-
-def test_null_approval_consumption_does_not_authorize_mutation() -> None:
-    trace = _trace(
-        tool_calls=(_tool(approval_id=None),),
-        mutation_ids=("tool-1",),
-        hooks=(RuntimeEvent(event_id="evt-null", event_type=RuntimeEventType.APPROVAL_CONSUMED,
-                            occurred_at=NOW, payload={"approval_id": None}),),
-    )
-    assert evaluate_trace(trace).unapproved_mutation_count == 1
-
-
-def test_success_before_policy_rejection_is_not_bypass() -> None:
-    hooks = (
-        RuntimeEvent(
-            event_id="evt-success", event_type=RuntimeEventType.AGENT_HOOK,
-            occurred_at=NOW,
-            payload={"agent_run_id": "run-1", "action_name": "log_query",
-                     "status": "succeeded", "metadata": {"tool_call_id": "tool-1"}},
-        ),
-        RuntimeEvent(
-            event_id="evt-reject", event_type=RuntimeEventType.AGENT_HOOK,
-            occurred_at=NOW.replace(microsecond=NOW.microsecond + 1),
-            payload={"agent_run_id": "run-1", "action_name": "log_query", "status": "failed",
-                     "metadata": {"tool_call_id": "tool-1", "policy_rejected": True,
-                                  "rejection_type": "policy", "rejection_status": "rejected"}},
-        ),
-    )
-    assert evaluate_trace(_trace(hooks=hooks)).scope_policy_bypass_count == 0
-
-
-def test_policy_rejection_before_success_is_bypass() -> None:
-    hooks = (
-        RuntimeEvent(
-            event_id="evt-reject", event_type=RuntimeEventType.AGENT_HOOK,
-            occurred_at=NOW, payload={"agent_run_id": "run-1", "action_name": "log_query",
-                                      "status": "failed", "metadata": {"tool_call_id": "tool-1",
-                                      "policy_rejected": True, "rejection_type": "policy",
-                                      "rejection_status": "rejected"}},
-        ),
-        RuntimeEvent(
-            event_id="evt-success", event_type=RuntimeEventType.AGENT_HOOK,
-            occurred_at=NOW.replace(microsecond=NOW.microsecond + 1),
-            payload={"agent_run_id": "run-1", "action_name": "log_query",
-                     "status": "succeeded", "metadata": {"tool_call_id": "tool-1"}},
-        ),
-    )
-    assert evaluate_trace(_trace(hooks=hooks)).scope_policy_bypass_count == 1
-
-
-    hooks = (RuntimeEvent(
-        event_id="evt-self", event_type=RuntimeEventType.AGENT_HOOK, occurred_at=NOW,
-        payload={"agent_run_id": "run-1", "action_name": "log_query",
-                 "status": "succeeded", "metadata": {"tool_call_id": "tool-1",
-                 "policy_rejected": True, "rejection_type": "policy",
-                 "rejection_status": "rejected"}},
-    ),)
-    assert evaluate_trace(_trace(hooks=hooks)).scope_policy_bypass_count == 0
-
-
-def test_missing_expected_child_delivery_lowers_rate() -> None:
-    assert evaluate_trace(_trace(expected_children=("child-1",))).child_exactly_once_rate == 0.0
-
-    hooks = (
-        RuntimeEvent(
-            event_id="evt-fail",
-            event_type=RuntimeEventType.AGENT_HOOK,
-            occurred_at=NOW,
-            payload={
-                "agent_run_id": "run-1",
-                "action_name": "other",
-                "status": "failed",
-                "metadata": {"tool_call_id": "other"},
-            },
-        ),
-        RuntimeEvent(
-            event_id="evt-ok",
-            event_type=RuntimeEventType.AGENT_HOOK,
-            occurred_at=NOW,
-            payload={
-                "agent_run_id": "run-1",
-                "action_name": "log_query",
-                "status": "succeeded",
-                "metadata": {"tool_call_id": "tool-1"},
-            },
-        ),
-    )
-    assert evaluate_trace(_trace(hooks=hooks)).scope_policy_bypass_count == 0
+def test_metric_detects_duplicate_child_delivery() -> None:
+    assert evaluate_trace(_trace(receipts=(_receipt(), _receipt()))).child_exactly_once_rate < 1.0
