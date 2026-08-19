@@ -26,9 +26,10 @@
 
 - The real test intentionally reuses the existing `test_live_agent_runtime.live_target` fixture and `RuntimeSettings.from_environment()`; it does not define another provider configuration.
 - The existing callable workflow uses bounded investigation budgets. Real MaaS behavior can still pause on a valid bounded status; the tests assert the brief's completion grounding condition only when status is `completed`.
-## Fix round 2
+## Fix round 3
 
-- Prefill now calls the normal orchestrator `_ensure_initial_message` first and appends 12 large groups at contiguous sequences. Unit regressions verify the real symptom prompt and prefill ordering.
-- Hook selection now derives persisted root and child run IDs from the investigation store and includes all owned hook events.
-- Provider identity is stored in the existing persisted `report` metadata dictionary, preserving the exact `to_record()` top-level shape; the live test asserts the runtime MaaS provider and configured model.
-- Verification rerun: no-opt-in skip, workflow units, Phase C tests, and Phase C Ruff. No paid MaaS/Docker tests were run.
+- Provider metadata now reads the actual runtime provider class and its frozen
+  MaaS config model (`provider._config.model`), which is normalized by the
+  provider construction. The test asserts the normalized model rather than the
+  raw environment setting.
+- Re-ran skip, workflow unit, Phase C, and Ruff checks; no paid MaaS/Docker run.

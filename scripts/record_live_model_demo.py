@@ -246,9 +246,13 @@ async def run_live_model_workflow(
             if event.event_type is RuntimeEventType.AGENT_HOOK
             and event.payload.get("agent_run_id") in owned_run_ids
         )
+        provider = runtime.investigations._orchestrator._provider
         report_metadata = report.metadata.model_dump(mode="json")
-        report_metadata["provider_type"] = type(runtime.investigations._orchestrator._provider).__name__
-        report_metadata["provider_model"] = effective_settings.llm_active_model
+        report_metadata["provider_type"] = type(provider).__name__
+        config = getattr(provider, "_config", None)
+        actual_model = getattr(config, "model", None)
+        if actual_model is not None:
+            report_metadata["provider_model"] = actual_model
         return LiveModelRunResult(
             investigation=investigation_record,
             run=run.model_dump(mode="json"),
@@ -279,8 +283,8 @@ async def run_live_model_workflow(
             ),
             hooks=hooks,
             report=report_metadata,
-            provider_type=report_metadata["provider_type"],
-            provider_model=report_metadata["provider_model"],
+            provider_type=report_metadata.get("provider_type", ""),
+            provider_model=report_metadata.get("provider_model"),
             markdown_path=report.markdown_path,
             html_path=report.html_path,
         )
