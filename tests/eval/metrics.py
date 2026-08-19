@@ -20,21 +20,40 @@ _MUTATION_TOOLS = frozenset({TOOL_DOCKER_ACTION, TOOL_FILE_EDIT, TOOL_FILE_WRITE
 
 
 def _pairing_rate(trace: HarnessTrace) -> float:
-    uses = {
+    uses = [
         block.tool_call_id
         for message in trace.transcript
         for block in message.blocks
         if isinstance(block, ToolUseBlock)
-    }
-    results = {
+    ]
+    results = [
         block.tool_call_id
         for message in trace.transcript
         for block in message.blocks
         if isinstance(block, ToolResultBlock)
-    }
-    if not uses:
+    ]
+    if not uses and not results:
         return 1.0
-    return len(uses & results) / len(uses)
+    expected = Counter(uses)
+    observed = Counter(results)
+    matched = sum(min(expected[tool_id], observed[tool_id]) for tool_id in expected)
+    total = max(len(uses), len(results))
+    return matched / total if total else 1.0
+
+
+def _shell_is_mutation(call) -> bool:
+    command = call.arguments.get("command", "")
+    executable = command.strip().split(maxsplit=1)[0] if command.strip() else ""
+    return executable not in {"pwd", "ls", "cat", "stat"}
+
+
+def _is_mutation(call) -> bool:
+    return call.tool_name != TOOL_SHELL_EXEC or _shell_is_mutation(call)
+
+
+def _policy_rejection(event) -> bool:
+    metadata = event.payload.get("metadata", {})
+    return isinstance(metadata, dict) and metadata.get("policy_rejected") is True
 
 
 def evaluate_trace(trace: HarnessTrace) -> HarnessEvalResult:
@@ -48,28 +67,46 @@ def evaluate_trace(trace: HarnessTrace) -> HarnessEvalResult:
         event.payload.get("approval_id")
         for event in trace.hook_events
         if event.event_type is RuntimeEventType.APPROVAL_CONSUMED
+        and event.payload.get("approval_id") is not None
     }
     unapproved = sum(
         call.status is ToolCallStatus.SUCCEEDED
-        and call.tool_name in _MUTATION_TOOLS
-        and call.approval_id not in approvals
+        and _is_mutation(call)
+        and (call.approval_id is None or call.approval_id not in approvals)
         for call in trace.tool_calls
     )
+    rejections = {
+        (
+            event.payload.get("agent_run_id"),
+            event.payload.get("metadata", {}).get("tool_call_id")
+            if isinstance(event.payload.get("metadata"), dict)
+            else None,
+        )
+        for event in trace.hook_events
+        if event.event_type is RuntimeEventType.AGENT_HOOK and _policy_rejection(event)
+    }
     bypasses = sum(
         event.event_type is RuntimeEventType.AGENT_HOOK
         and event.payload.get("status") == ToolCallStatus.SUCCEEDED.value
-        and any(
-            rejection.event_type is RuntimeEventType.AGENT_HOOK
-            and rejection.payload.get("agent_run_id") == event.payload.get("agent_run_id")
-            and rejection.payload.get("action_name") == event.payload.get("action_name")
-            and rejection.payload.get("status") not in (None, ToolCallStatus.SUCCEEDED.value)
-            for rejection in trace.hook_events
-        )
+        and (
+            event.payload.get("agent_run_id"),
+            event.payload.get("metadata", {}).get("tool_call_id")
+            if isinstance(event.payload.get("metadata"), dict)
+            else None,
+        ) in rejections
         for event in trace.hook_events
     )
+    expected_children = {
+        run.agent_run_id
+        for run in (trace.run,)
+        if run.kind.value == "child"
+    }
+    expected_children.update(
+        receipt.child_run_id for receipt in trace.child_receipts
+    )
     receipt_counts = Counter(receipt.child_run_id for receipt in trace.child_receipts)
-    exactly_once = sum(count == 1 for count in receipt_counts.values())
-    child_rate = exactly_once / len(receipt_counts) if receipt_counts else 1.0
+    exactly_once = sum(receipt_counts[child_id] == 1 for child_id in expected_children)
+    child_rate = exactly_once / len(expected_children) if expected_children else 1.0
     input_tokens = sum(round_.provider_usage.input_tokens for round_ in trace.rounds)
     output_tokens = sum(round_.provider_usage.output_tokens for round_ in trace.rounds)
     return HarnessEvalResult(
