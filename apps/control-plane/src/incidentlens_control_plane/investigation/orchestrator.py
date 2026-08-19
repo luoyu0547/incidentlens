@@ -447,6 +447,16 @@ class AgentOrchestrator:
                     )
             except (CompactionRejected, CompactionCircuitOpen) as exc:
                 return self._pause_prompt_too_long(run, investigation, now, reason=str(exc))
+            except Exception as exc:  # noqa: BLE001 - compaction must not crash the loop
+                # The reactive request can fail for reasons other than the
+                # circuit/rejection guards (for example a corrupt context or a
+                # provider-backed compactor error).  POST_COMPACT was emitted
+                # as failed by the inner ``finally``; park the run using the
+                # same safe prompt-too-long semantics rather than escaping the
+                # loop with an unpersisted exception.
+                return self._pause_prompt_too_long(
+                    run, investigation, now, reason=str(exc)
+                )
             try:
                 result = await self._call_provider(request)
             except PromptTooLongError:
