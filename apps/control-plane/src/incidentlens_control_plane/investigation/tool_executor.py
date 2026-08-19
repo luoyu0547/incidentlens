@@ -849,6 +849,22 @@ class ToolExecutor:
             raise ToolExecutionError("child_run_id must differ from the run id")
         investigation = self._investigations.get_investigation(ctx.run.investigation_id)
         child_scope = AgentScope(**args["scope"])
+        if child_scope.scope is ctx.run.scope.scope:
+            updates: dict[str, Any] = {}
+            if (
+                "allowed_host_paths" not in args["scope"]
+                and not child_scope.allowed_host_paths
+                and ctx.run.scope.allowed_host_paths
+            ):
+                updates["allowed_host_paths"] = ctx.run.scope.allowed_host_paths
+            if (
+                "allowed_container_paths" not in args["scope"]
+                and not child_scope.allowed_container_paths
+                and ctx.run.scope.allowed_container_paths
+            ):
+                updates["allowed_container_paths"] = ctx.run.scope.allowed_container_paths
+            if updates:
+                child_scope = child_scope.model_copy(update=updates)
         budget_args = args.get("budget")
         spec = DelegationSpec(
             child_run_id=child_run_id,

@@ -15,6 +15,7 @@ here; persistence, usage accounting and child spawn stay in each caller.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
@@ -52,11 +53,22 @@ class DelegationSpec(BaseModel):
     budget: AgentBudget | None = None
 
 
-class DelegationRejected(Exception):
-    """A child delegation failed validation.
+class DelegationRejectionKind(StrEnum):
+    """Machine-readable reason class used by structured orchestration."""
 
-    ``str(exc)`` is stable consumer-facing prose matching the guard's reasons.
-    """
+    BUDGET_CHILDREN = "budget_children"
+    BUDGET_ENVELOPE = "budget_envelope"
+    INVALID = "invalid"
+
+
+class DelegationRejected(Exception):
+    """A child delegation failed validation with typed classification."""
+
+    def __init__(
+        self, reason: str, kind: DelegationRejectionKind = DelegationRejectionKind.INVALID
+    ) -> None:
+        super().__init__(reason)
+        self.kind = kind
 
 
 class DelegationValidator:
@@ -84,9 +96,29 @@ class DelegationValidator:
         never grants or widens anything: every axis of the child is bounded by
         the parent run's envelope and the project registry.
         """
+        if parent.investigation_id != investigation.investigation_id:
+            raise DelegationRejected(
+                "delegation investigation id must match the parent run",
+                DelegationRejectionKind.INVALID,
+            )
+        if parent.scope.project_id != investigation.project_id:
+            raise DelegationRejected(
+                "delegation project must match the investigation",
+                DelegationRejectionKind.INVALID,
+            )
+        if parent.scope.target_id != investigation.target_id:
+            raise DelegationRejected(
+                "delegation target must match the investigation",
+                DelegationRejectionKind.INVALID,
+            )
         allowed, reason = self._guard.can_spawn_child(parent, investigation)
         if not allowed:
-            raise DelegationRejected(reason)
+            kind = (
+                DelegationRejectionKind.BUDGET_CHILDREN
+                if reason == "child budget exhausted"
+                else DelegationRejectionKind.INVALID
+            )
+            raise DelegationRejected(reason, kind)
         self._validate_registered_scope(parent, spec.scope)
         self._validate_evidence(parent, spec.evidence_ids)
         budget = self._bounded_budget(parent, spec.budget, now=now)
@@ -103,7 +135,7 @@ class DelegationValidator:
     def _validate_registered_scope(self, parent: AgentRun, child: AgentScope) -> None:
         allowed, reason = _scope_within(child, parent.scope)
         if not allowed:
-            raise DelegationRejected(reason)
+            raise DelegationRejected(reason, DelegationRejectionKind.INVALID)
         if child.scope is not LogScope.CONTAINER:
             # Host-scoped children are bounded by the parent run's host paths via
             # _scope_within; only container children must resolve to a registered
@@ -133,7 +165,7 @@ class DelegationValidator:
                 f"child container {child.container_name!r} is not a registered "
                 f"container for service {service.compose_service!r}"
             )
-        if not service.allowed_container_paths or any(
+        if not service.allowed_container_paths or not child.allowed_container_paths or any(
             not any(
                 child_path.is_relative_to(registered_root)
                 for registered_root in service.allowed_container_paths
@@ -186,7 +218,8 @@ class DelegationValidator:
         for field_name, capacity in remaining.items():
             if capacity <= 0:
                 raise DelegationRejected(
-                    f"child budget {field_name} exhausted"
+                    f"child budget {field_name} exhausted",
+                    DelegationRejectionKind.BUDGET_ENVELOPE,
                 )
         if budget is None:
             default = AgentBudget()
@@ -199,6 +232,7 @@ class DelegationValidator:
             if getattr(budget, field_name) > remaining[field_name]:
                 raise DelegationRejected(
                     f"child {field_name} must not exceed the run budget; "
-                    f"remaining run budget ({remaining[field_name]})"
+                    f"remaining run budget ({remaining[field_name]})",
+                    DelegationRejectionKind.BUDGET_ENVELOPE,
                 )
         return budget

@@ -46,6 +46,7 @@ from incidentlens_control_plane.investigation.compactor import (
 from incidentlens_control_plane.investigation.context import AgentContextManager
 from incidentlens_control_plane.investigation.delegation import (
     DelegationRejected,
+    DelegationRejectionKind,
     DelegationSpec,
     DelegationValidator,
 )
@@ -944,6 +945,22 @@ class AgentOrchestrator:
             )
 
     @staticmethod
+    def _budget_stop_reason(reason: str) -> StopReason:
+        mapping = {
+            "max_rounds": StopReason.BUDGET_ROUNDS,
+            "max_tool_calls": StopReason.BUDGET_TOOL_CALLS,
+            "max_wall_clock_seconds": StopReason.BUDGET_TIME,
+            "max_output_bytes_per_tool": StopReason.BUDGET_OUTPUT,
+            "max_total_output_bytes": StopReason.BUDGET_OUTPUT,
+            "max_evidence": StopReason.BUDGET_EVIDENCE,
+            "max_no_new_evidence_rounds": StopReason.BUDGET_NO_NEW_EVIDENCE,
+        }
+        for axis, stop_reason in mapping.items():
+            if axis in reason:
+                return stop_reason
+        return StopReason.BUDGET_OUTPUT
+
+    @staticmethod
     def _investigation_pause(run_status: AgentRunStatus) -> InvestigationStatus:
         if run_status is AgentRunStatus.WAITING_APPROVAL:
             return InvestigationStatus.WAITING_APPROVAL
@@ -1453,9 +1470,21 @@ class AgentOrchestrator:
             if run.kind is AgentRunKind.CHILD:
                 # A child must never delegate grandchildren.
                 return self._fail(run, investigation, now, reason=reason), True
-            self._pause(run, investigation, AgentRunStatus.PAUSED_BUDGET, now=now,
-                        reason=reason, stop_reason=StopReason.BUDGET_CHILDREN)
-            return self._store.get_agent_run(run.agent_run_id), True
+            if exc.kind in (
+                DelegationRejectionKind.BUDGET_CHILDREN,
+                DelegationRejectionKind.BUDGET_ENVELOPE,
+            ):
+                stop_reason = (
+                    StopReason.BUDGET_CHILDREN
+                    if exc.kind is DelegationRejectionKind.BUDGET_CHILDREN
+                    else self._budget_stop_reason(reason)
+                )
+                self._pause(
+                    run, investigation, AgentRunStatus.PAUSED_BUDGET, now=now,
+                    reason=reason, stop_reason=stop_reason,
+                )
+                return self._store.get_agent_run(run.agent_run_id), True
+            return self._fail(run, investigation, now, reason=reason), True
         try:
             self._store.create_delegated_task(package, now=now)
         except AlreadyExists:
