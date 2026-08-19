@@ -854,7 +854,8 @@ class ToolExecutor:
         if child_run_id == ctx.run.agent_run_id:
             raise ToolExecutionError("child_run_id must differ from the run id")
         investigation = self._investigations.get_investigation(ctx.run.investigation_id)
-        child_scope = AgentScope(**args["scope"])
+        child_scope_args = args["scope"]
+        child_scope = AgentScope(**child_scope_args)
         budget_args = args.get("budget")
         spec = DelegationSpec(
             child_run_id=child_run_id,
@@ -862,6 +863,8 @@ class ToolExecutor:
             scope=child_scope,
             evidence_ids=tuple(args.get("evidence_ids") or ()),
             budget=AgentBudget(**budget_args) if budget_args else None,
+            host_paths_specified="allowed_host_paths" in child_scope_args,
+            container_paths_specified="allowed_container_paths" in child_scope_args,
         )
         try:
             package = self._delegation.prepare(ctx.run, investigation, spec, now=ctx.now)

@@ -51,6 +51,10 @@ class DelegationSpec(BaseModel):
     scope: AgentScope
     evidence_ids: tuple[str, ...] = ()
     budget: AgentBudget | None = None
+    # Direct callers that construct a spec have no source syntax to inspect;
+    # treating these as explicit is the safe, non-widening default.
+    host_paths_specified: bool = True
+    container_paths_specified: bool = True
 
 
 class DelegationRejectionKind(StrEnum):
@@ -119,7 +123,9 @@ class DelegationValidator:
                 else DelegationRejectionKind.INVALID
             )
             raise DelegationRejected(reason, kind)
-        spec = spec.model_copy(update={"scope": self._inherit_scope_paths(parent, spec.scope)})
+        spec = spec.model_copy(
+            update={"scope": self._inherit_scope_paths(parent, spec.scope, spec)}
+        )
         self._validate_registered_scope(parent, spec.scope)
         self._validate_evidence(parent, spec.evidence_ids)
         budget = self._bounded_budget(parent, spec.budget, now=now)
@@ -133,14 +139,15 @@ class DelegationValidator:
             evidence_ids=spec.evidence_ids,
         )
 
-    @staticmethod
-    def _inherit_scope_paths(parent: AgentRun, child: AgentScope) -> AgentScope:
-        """Apply one omission rule to both structured and tool requests."""
+    def _inherit_scope_paths(
+        self, parent: AgentRun, child: AgentScope, spec: DelegationSpec
+    ) -> AgentScope:
+        """Inherit only paths omitted by the originating input form."""
         updates: dict[str, tuple] = {}
         if child.scope is parent.scope.scope:
-            if not child.allowed_host_paths and parent.scope.allowed_host_paths:
+            if not spec.host_paths_specified and parent.scope.allowed_host_paths:
                 updates["allowed_host_paths"] = parent.scope.allowed_host_paths
-            if not child.allowed_container_paths and parent.scope.allowed_container_paths:
+            if not spec.container_paths_specified and parent.scope.allowed_container_paths:
                 updates["allowed_container_paths"] = parent.scope.allowed_container_paths
         return child.model_copy(update=updates) if updates else child
 

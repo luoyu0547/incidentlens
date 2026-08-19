@@ -1386,11 +1386,11 @@ def test_receipt_delivery_rolls_back_on_transcript_conflict(tmp_path) -> None:
     store.append_transcript_message(make_notification())
     changed_parent = make_run(
         usage=UsageCounters(rounds=1),
-        updated_at=datetime(2026, 8, 13, tzinfo=UTC),
+        updated_at=NOW,
     )
     changed_investigation = make_investigation(
         usage=UsageCounters(rounds=1),
-        updated_at=datetime(2026, 8, 13, tzinfo=UTC),
+        updated_at=NOW,
     )
     with pytest.raises(TranscriptConflict):
         store.deliver_child_report_receipt(

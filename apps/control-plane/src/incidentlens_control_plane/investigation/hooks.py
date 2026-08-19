@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from collections import defaultdict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
@@ -28,6 +28,22 @@ class HookEventType(StrEnum):
     POST_COMPACT = "PostCompact"
 
 
+def _freeze_json(value: JsonValue) -> JsonValue:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _thaw_json(value: JsonValue) -> JsonValue:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
 class HookEvent(BaseModel):
     """Immutable, bounded hook payload; callbacks cannot alter execution."""
 
@@ -43,11 +59,11 @@ class HookEvent(BaseModel):
     @field_validator("metadata", mode="after")
     @classmethod
     def freeze_metadata(cls, value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
-        return MappingProxyType(dict(value))
+        return _freeze_json(value)
 
     @field_serializer("metadata")
     def serialize_metadata(self, value: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
-        return dict(value)
+        return _thaw_json(value)
 
 
 HookCallback = Callable[[HookEvent], Any]

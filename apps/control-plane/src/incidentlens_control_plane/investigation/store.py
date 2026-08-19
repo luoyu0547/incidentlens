@@ -1213,6 +1213,14 @@ class InvestigationStore:
                 persisted_investigation = Investigation.model_validate_json(
                     investigation_row[2]
                 )
+                if parent.updated_at != persisted_parent.updated_at:
+                    raise ConcurrentModification(
+                        f"agent run {parent.agent_run_id} snapshot is stale"
+                    )
+                if investigation.updated_at != persisted_investigation.updated_at:
+                    raise ConcurrentModification(
+                        f"investigation {investigation.investigation_id} snapshot is stale"
+                    )
                 if (
                     persisted_parent.agent_run_id != receipt.parent_run_id
                     or persisted_parent.kind is not AgentRunKind.PARENT

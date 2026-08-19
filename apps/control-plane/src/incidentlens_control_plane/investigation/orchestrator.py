@@ -1515,12 +1515,15 @@ class AgentOrchestrator:
         pending_children: list[tuple[str, asyncio.Task]],
         now: datetime,
     ) -> tuple[AgentRun, bool]:
+        scope_fields = delegation.scope.model_fields_set
         spec = DelegationSpec(
             child_run_id=delegation.child_run_id,
             task_prompt=delegation.task_prompt,
             scope=delegation.scope,
             evidence_ids=delegation.evidence_ids,
             budget=None,
+            host_paths_specified="allowed_host_paths" in scope_fields,
+            container_paths_specified="allowed_container_paths" in scope_fields,
         )
         try:
             package = self._delegation.prepare(run, investigation, spec, now=now)
