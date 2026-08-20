@@ -180,6 +180,15 @@ INCIDENTLENS_LLM_BASE_URL=https://maas-coding-api.cn-huabei-1.xf-yun.com/v2
 uv run pytest -q
 uv run ruff check .
 
+# Phase 4 harness evaluator and deterministic runner
+uv run pytest tests/eval/test_harness_eval.py -q
+uv run python tests/eval/runner.py --json .incidentlens/harness-eval.json
+
+# Opt-in real MaaS invariants (reuses configured MaaS settings; skipped otherwise)
+# Targets: foreign evidence, scope/policy bypass, and unapproved mutation = 0;
+# tool pairing and child exactly-once = 100%.
+INCIDENTLENS_RUN_LIVE_MODEL_TESTS=1 uv run pytest tests/integration/test_live_model_harness.py -q
+
 # Phase 5：CLI、Web UI、报告与离线端到端流程
 uv run pytest tests/reports/ tests/cli/ tests/web/test_web_dashboard.py tests/acceptance/test_e2e_investigation.py -v
 
@@ -224,6 +233,7 @@ apps/control-plane/src/incidentlens_control_plane/
 | `INCIDENTLENS_RUN_LIVE_SSH` | 启用真实 SSH 集成测试 | 未设置（跳过） |
 | `INCIDENTLENS_RUN_LIVE_LOG_TESTS` | 启用真实日志集成测试 | 未设置（跳过） |
 | `INCIDENTLENS_RUN_LIVE_AGENT_TESTS` | 启用真实 Agent 集成测试 | 未设置（跳过） |
+| `INCIDENTLENS_RUN_LIVE_MODEL_TESTS` | 启用真实 MaaS harness invariant 测试 | 未设置（跳过） |
 
 ## 当前范围
 

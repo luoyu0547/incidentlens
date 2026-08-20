@@ -314,20 +314,16 @@ class ToolExecutor:
             outcome = self._failed_outcome(
                 request, ToolExecutionError(f"arguments invalid: {message}")
             )
-            await self._emit_tool_error(run, request, now, outcome)
+            await self._emit_tool_error(run, request, now, outcome, rejection_type="policy")
             return outcome
-        if (
-            definition.allowed_scope is not None
-            and definition.allowed_scope is not run.scope.scope
-        ):
+        if definition.allowed_scope is not None and definition.allowed_scope is not run.scope.scope:
             outcome = self._failed_outcome(
                 request,
                 ToolExecutionError(
-                    f"tool {request.tool_name!r} requires "
-                    f"{definition.allowed_scope.value} scope"
+                    f"tool {request.tool_name!r} requires {definition.allowed_scope.value} scope"
                 ),
             )
-            await self._emit_tool_error(run, request, now, outcome)
+            await self._emit_tool_error(run, request, now, outcome, rejection_type="scope")
             return outcome
 
         investigation = self._investigations.get_investigation(run.investigation_id)
@@ -350,7 +346,7 @@ class ToolExecutor:
             return outcome
         except ToolExecutionError as exc:
             outcome = self._failed_outcome(request, exc)
-            await self._emit_tool_error(run, request, now, outcome)
+            await self._emit_tool_error(run, request, now, outcome, rejection_type="policy")
             return outcome
         except CommandForbidden as exc:
             outcome = self._failed_outcome(request, exc)
@@ -408,7 +404,22 @@ class ToolExecutor:
         request: ToolRequest,
         now: datetime,
         outcome: ToolOutcome,
+        *,
+        rejection_type: str | None = None,
     ) -> None:
+        metadata = {
+            "tool_call_id": request.tool_call_id,
+            "output_bytes": outcome.output_bytes,
+            "approval_id": outcome.approval_id,
+        }
+        if rejection_type is not None:
+            metadata.update(
+                {
+                    "policy_rejected": True,
+                    "rejection_type": rejection_type,
+                    "rejection_status": "rejected",
+                }
+            )
         await self._emit_hook(
             HookEvent(
                 event_type=HookEventType.TOOL_ERROR,
@@ -416,11 +427,7 @@ class ToolExecutor:
                 action_name=request.tool_name,
                 occurred_at=now,
                 status=outcome.status.value,
-                metadata={
-                    "tool_call_id": request.tool_call_id,
-                    "output_bytes": outcome.output_bytes,
-                    "approval_id": outcome.approval_id,
-                },
+                metadata=metadata,
             )
         )
 
@@ -443,9 +450,7 @@ class ToolExecutor:
             or source_ref != ctx.run.scope.container_name
             or service_name != ctx.run.scope.service_name
         ):
-            raise ToolExecutionError(
-                "container-scope run may only query its own container logs"
-            )
+            raise ToolExecutionError("container-scope run may only query its own container logs")
         records = await self._logs.query(
             LogQueryRequest(
                 project_id=ctx.run.scope.project_id,
@@ -462,9 +467,7 @@ class ToolExecutor:
         )
         if args.get("severity") is not None:
             records = tuple(
-                record
-                for record in records
-                if record.severity is LogSeverity(args["severity"])
+                record for record in records if record.severity is LogSeverity(args["severity"])
             )
         selected = self._fit_records_to_budget(ctx, records)
         return ToolResult(
@@ -480,9 +483,7 @@ class ToolExecutor:
                 project_id=ctx.run.scope.project_id,
                 target_id=ctx.run.scope.target_id,
                 service_name=args.get("service_name"),
-                severity=(
-                    LogSeverity(args["severity"]) if args.get("severity") else None
-                ),
+                severity=(LogSeverity(args["severity"]) if args.get("severity") else None),
                 text=args.get("text"),
                 correlation_key=args.get("correlation_key"),
                 normal_signal=args.get("normal_signal"),
@@ -513,9 +514,8 @@ class ToolExecutor:
             limit=min(args.get("limit", 50), 200),
         )
         selected = self._fit_records_to_budget(ctx, records)
-        summary = (
-            f"context for correlation_key={correlation_key}: "
-            + self._log_records_summary(selected, len(records))
+        summary = f"context for correlation_key={correlation_key}: " + self._log_records_summary(
+            selected, len(records)
         )
         return ToolResult(
             evidence=self._evidence_from_log_records(ctx, selected),
@@ -529,9 +529,7 @@ class ToolExecutor:
         evidence_id = ctx.arguments["evidence_id"]
         owned = {ref.evidence_id for ref in ctx.run.evidence}
         if evidence_id not in owned:
-            raise ToolExecutionError(
-                f"evidence {evidence_id!r} was not collected by this run"
-            )
+            raise ToolExecutionError(f"evidence {evidence_id!r} was not collected by this run")
         try:
             ref = self._evidence_store.get(evidence_id)
         except KeyError:
@@ -562,8 +560,7 @@ class ToolExecutor:
             limit=limit,
         )
         entries = [
-            f"{ref.evidence_ref_id} kind={ref.evidence_kind.value} "
-            f"source={ref.source_ref or ''}"
+            f"{ref.evidence_ref_id} kind={ref.evidence_kind.value} source={ref.source_ref or ''}"
             for ref in refs
         ]
         joined = "; ".join(entries[:10])
@@ -720,8 +717,7 @@ class ToolExecutor:
             **self._gateway_kwargs(ctx, service_name, path, scope, svc)
         )
         rendered = "; ".join(
-            f"{entry.path} size={entry.size} mode={oct(entry.mode & 0o777)}"
-            for entry in entries
+            f"{entry.path} size={entry.size} mode={oct(entry.mode & 0o777)}" for entry in entries
         )
         rendered = self._bound_content(ctx, rendered, CONTENT_MAX_LENGTH)
         ref = self._evidence.record_file_snapshot(
@@ -754,19 +750,14 @@ class ToolExecutor:
                 extra={"query": query},
             )
         )
-        rendered = "; ".join(
-            f"{match.path}:{match.line_number}: {match.text}" for match in matches
-        )
+        rendered = "; ".join(f"{match.path}:{match.line_number}: {match.text}" for match in matches)
         rendered = self._bound_content(ctx, rendered, CONTENT_MAX_LENGTH)
         ref = self._evidence.record_file_snapshot(
             **self._evidence_kwargs(ctx, service_name, str(path)),
             content=rendered,
             size_bytes=len(rendered),
         )
-        summary = (
-            f"{len(matches)} matches for {query!r} under {path}: "
-            f"{ref.content_redacted[:300]}"
-        )
+        summary = f"{len(matches)} matches for {query!r} under {path}: {ref.content_redacted[:300]}"
         return ToolResult(
             evidence=(self._evidence_ref(ctx, ref, summary),),
             summary=summary,
@@ -780,9 +771,7 @@ class ToolExecutor:
         self._assert_run_scope(ctx, scope)
         svc = self._resolve_service(ctx, service_name)
         self._validate_path_in_scope(ctx, path, scope=scope)
-        meta = await self._gateway.stat(
-            **self._gateway_kwargs(ctx, service_name, path, scope, svc)
-        )
+        meta = await self._gateway.stat(**self._gateway_kwargs(ctx, service_name, path, scope, svc))
         rendered = (
             f"path={meta.path} size={meta.size} mode={oct(meta.mode)} "
             f"uid={meta.uid} gid={meta.gid} mtime_ns={meta.modified_ns}"
@@ -966,9 +955,7 @@ class ToolExecutor:
         process = await session.transport.open_shell()
         shell = PersistentShell(process)
         framed = (
-            f"cd {shlex.quote(str(cwd_path))} && {command}"
-            if cwd_path is not None
-            else command
+            f"cd {shlex.quote(str(cwd_path))} && {command}" if cwd_path is not None else command
         )
         try:
             shell_result = await shell.execute(framed, timeout=timeout)
@@ -1076,9 +1063,7 @@ class ToolExecutor:
             f"changeset {result.changeset_id} status={result.status.value} "
             f"applied={result.applied_files} error={result.error or ''}"
         )
-        if not passed and (
-            result.uncertain or _message_indicates_uncertain(result.error)
-        ):
+        if not passed and (result.uncertain or _message_indicates_uncertain(result.error)):
             # ChangeManager folds transport timeouts/connection loss into a
             # FAILED ChangeResult; surface them as UNCERTAIN so the run pauses
             # with UNCERTAIN_STATE evidence instead of a deterministic FAILED.
@@ -1123,9 +1108,7 @@ class ToolExecutor:
         }
         if ctx.run.scope.scope is LogScope.CONTAINER:
             if action not in container_actions or container is None:
-                raise ToolExecutionError(
-                    "container-scope run may only act on its own container"
-                )
+                raise ToolExecutionError("container-scope run may only act on its own container")
             self._validate_container(ctx, svc, container)
         elif container is not None:
             self._validate_container(ctx, svc, container)
@@ -1154,8 +1137,7 @@ class ToolExecutor:
                 status=ToolCallStatus.WAITING_APPROVAL,
                 approval_id=result.approval_id,
                 summary=(
-                    f"docker {action.value} requires approval; "
-                    f"approval_id={result.approval_id}"
+                    f"docker {action.value} requires approval; approval_id={result.approval_id}"
                 ),
             )
         target_ref = container or "compose"
@@ -1226,9 +1208,7 @@ class ToolExecutor:
 
     # -- validation helpers ---------------------------------------------------
 
-    def _resolve_service(
-        self, ctx: ToolContext, service_name: str
-    ) -> ServiceRegistration:
+    def _resolve_service(self, ctx: ToolContext, service_name: str) -> ServiceRegistration:
         try:
             return self._gateway.resolve_service(
                 ctx.run.scope.project_id, ctx.run.scope.target_id, service_name
@@ -1251,16 +1231,13 @@ class ToolExecutor:
     ) -> str:
         if container not in svc.container_names:
             raise ToolExecutionError(
-                f"container {container!r} is not registered for service "
-                f"{svc.compose_service!r}"
+                f"container {container!r} is not registered for service {svc.compose_service!r}"
             )
         if ctx.run.scope.scope is LogScope.CONTAINER and (
             container != ctx.run.scope.container_name
             or svc.compose_service != ctx.run.scope.service_name
         ):
-            raise ToolExecutionError(
-                "container-scope run may only operate on its own container"
-            )
+            raise ToolExecutionError("container-scope run may only operate on its own container")
         return container
 
     def _assert_run_scope(self, ctx: ToolContext, scope: LogScope) -> None:
@@ -1412,9 +1389,7 @@ class ToolExecutor:
     def _log_record_preview(record: LogRecord) -> str:
         return f"[{record.severity.value}] {record.source_ref}: {record.message_redacted[:200]}"
 
-    def _log_records_summary(
-        self, selected: tuple[LogRecord, ...], total: int
-    ) -> str:
+    def _log_records_summary(self, selected: tuple[LogRecord, ...], total: int) -> str:
         if not selected:
             return "no log records matched"
         previews = [self._log_record_preview(record) for record in selected[:5]]

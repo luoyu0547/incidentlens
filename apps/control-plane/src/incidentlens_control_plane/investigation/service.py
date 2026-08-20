@@ -14,7 +14,7 @@ orchestrator, and exposes read queries for the API layer (Task 8).
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -165,6 +165,7 @@ class InvestigationService:
         parent_scope: AgentScope,
         *,
         parent_budget: AgentBudget | None = None,
+        before_run: Callable[[AgentRun], Awaitable[None]] | None = None,
     ) -> AgentRun:
         """Transition the investigation to RUNNING and run its parent loop.
 
@@ -190,7 +191,8 @@ class InvestigationService:
             run = await self._orchestrator.run(existing[0].agent_run_id)
         else:
             run = await self._orchestrator.run_investigation(
-                investigation, parent_scope, parent_budget=parent_budget
+                investigation, parent_scope, parent_budget=parent_budget,
+                before_run=before_run,
             )
         if self._events_pub is not None:
             self._events_pub.investigation_started(investigation, run, occurred_at=now)

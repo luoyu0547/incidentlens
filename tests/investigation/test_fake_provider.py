@@ -472,6 +472,26 @@ async def test_fake_replays_request_tools_step():
     assert registry.remaining("run-1") == 0
 
 
+async def test_fake_preserves_literal_latest_evidence_id():
+    registry = FakeProviderRegistry()
+    provider = FakeProvider(registry)
+    registry.set_script(
+        "run-1",
+        [
+            StopStep(
+                stop_signal=StopSignal(
+                    stop_reason=StopReason.COMPLETED, summary="literal"
+                ),
+                conclusion=Conclusion(summary="literal", evidence_ids=("__latest__",)),
+            )
+        ],
+    )
+
+    result = await provider.generate_turn(make_request(make_run(), make_investigation()))
+
+    assert result.conclusions[0].evidence_ids == ("__latest__",)
+
+
 async def test_fake_replays_stop_step():
     registry = FakeProviderRegistry()
     provider = FakeProvider(registry)

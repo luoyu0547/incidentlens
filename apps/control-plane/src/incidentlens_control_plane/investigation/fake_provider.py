@@ -152,9 +152,7 @@ class FakeProviderRegistry:
         """Replace the run's script with ``steps``, replayed in order."""
         self._scripts[run_id] = list(steps)
 
-    def script(
-        self, run_id: str, steps: Sequence[object] | None = None
-    ) -> tuple[object, ...]:
+    def script(self, run_id: str, steps: Sequence[object] | None = None) -> tuple[object, ...]:
         """Set or read the run's script, oldest first.
 
         With ``steps``, replace the run's script and return the new tuple;
@@ -167,6 +165,10 @@ class FakeProviderRegistry:
     def append_step(self, run_id: str, step: object) -> None:
         """Append one step to the run's script, creating it if needed."""
         self._scripts.setdefault(run_id, []).append(step)
+
+    def set_pending_script(self, steps: Sequence[object]) -> None:
+        """Bind a script to the next run id requested by the provider."""
+        self.set_script("__next__", steps)
 
     def has_script(self, run_id: str) -> bool:
         """Return True when the run has at least one pending step."""
@@ -192,8 +194,19 @@ class FakeProviderRegistry:
             raise ScriptExhausted(f"no script steps left for run {run_id!r}")
         return steps.pop(0)
 
+    def pop_step(self, run_id: str, request: ConversationRequest) -> object:
+        """Consume the next step for a provider request.
+
+        Subclasses may override this public dispatch hook for test-only scripted
+        adapters; the default behavior is deliberately request-independent.
+        """
+        return self.pop(run_id)
+
     def record_request(self, run_id: str, request: ConversationRequest) -> None:
-        """Append one provider request to the run's recorded history."""
+        """Append one provider request and bind a pending script to this run."""
+        pending = self._scripts.pop("__next__", None)
+        if pending is not None and run_id not in self._scripts:
+            self._scripts[run_id] = pending
         self._requests.setdefault(run_id, []).append(request)
 
     def requests(self, run_id: str) -> tuple[ConversationRequest, ...]:
@@ -222,7 +235,7 @@ class FakeProvider(ModelProvider):
 
     async def generate_turn(self, request: ConversationRequest) -> AgentTurnResult:
         self._registry.record_request(request.checkpoint.agent_run_id, request)
-        step = self._registry.pop(request.checkpoint.agent_run_id)
+        step = self._registry.pop_step(request.checkpoint.agent_run_id, request)
         if isinstance(step, BaseException):
             # A script item may be a concrete exception (e.g.
             # ``PromptTooLongError()``) that the provider raises on pop.
@@ -237,10 +250,11 @@ class FakeProvider(ModelProvider):
         if isinstance(step, DelegateChildStep):
             return AgentTurnResult(child_delegation=step.delegation, usage=step.usage)
         if isinstance(step, StopStep):
+            conclusion = step.conclusion
             return AgentTurnResult(
                 stop_signal=step.stop_signal,
                 hypotheses=step.hypotheses,
-                conclusions=(step.conclusion,) if step.conclusion is not None else (),
+                conclusions=(conclusion,) if conclusion is not None else (),
                 usage=step.usage,
             )
         if isinstance(step, MalformedStep):
