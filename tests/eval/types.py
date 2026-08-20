@@ -70,19 +70,24 @@ class HarnessTrace(BaseModel):
         does not infer runtime state from provider responses or test fixtures.
         """
         records = getattr(result, "to_record")()
-        run = AgentRun.model_validate(records["run"])
-        investigation = Investigation.model_validate(records["investigation"])
-        rounds = tuple(AgentRound.model_validate(item) for item in records["rounds"])
-        tool_calls = tuple(ToolCall.model_validate(item) for item in records["tool_calls"])
-        transcript = tuple(
-            TranscriptMessage.model_validate(item) for item in records["transcript"]
+        run = AgentRun.model_validate(getattr(result, "run", records.get("run")))
+        investigation = Investigation.model_validate(
+            getattr(result, "investigation", records.get("investigation"))
         )
-        boundaries = tuple(
-            CompactBoundary.model_validate(item) for item in records["compact_boundaries"]
-        )
-        evidence = tuple(EvidenceReference.model_validate(item) for item in records["evidence"])
-        conclusions = tuple(Conclusion.model_validate(item) for item in records["conclusions"])
-        hooks = tuple(RuntimeEvent.model_validate(item) for item in records["hooks"])
+        raw_rounds = getattr(result, "rounds", records.get("rounds", ()))
+        raw_tool_calls = getattr(result, "tool_calls", records.get("tool_calls", ()))
+        raw_transcript = getattr(result, "transcript", records.get("transcript", ()))
+        raw_boundaries = getattr(result, "compact_boundaries", records.get("compact_boundaries", ()))
+        raw_evidence = getattr(result, "evidence", records.get("evidence", ()))
+        raw_conclusions = getattr(result, "conclusions", records.get("conclusions", ()))
+        raw_hooks = getattr(result, "hooks", records.get("hooks", ()))
+        rounds = tuple(AgentRound.model_validate(item) for item in raw_rounds)
+        tool_calls = tuple(ToolCall.model_validate(item) for item in raw_tool_calls)
+        transcript = tuple(TranscriptMessage.model_validate(item) for item in raw_transcript)
+        boundaries = tuple(CompactBoundary.model_validate(item) for item in raw_boundaries)
+        evidence = tuple(EvidenceReference.model_validate(item) for item in raw_evidence)
+        conclusions = tuple(Conclusion.model_validate(item) for item in raw_conclusions)
+        hooks = tuple(RuntimeEvent.model_validate(item) for item in raw_hooks)
         mutation_ids = tuple(
             call.tool_call_id
             for call in tool_calls

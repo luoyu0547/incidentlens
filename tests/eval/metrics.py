@@ -34,8 +34,14 @@ def _pairing_rate(trace: HarnessTrace) -> float:
     return matched / total if total else 1.0
 
 
-def _is_mutation(call, mutation_ids: frozenset[str]) -> bool:
-    return call.tool_call_id in mutation_ids
+def _is_mutation(call) -> bool:
+    """Classify mutations from persisted tool identity and arguments only."""
+    if call.tool_name in {"file_write", "file_edit", "docker_action"}:
+        return True
+    if call.tool_name != "shell_exec":
+        return False
+    command = str(call.arguments.get("command", "")).strip().lower()
+    return command.startswith(("rm ", "mv ", "cp ", "mkdir ", "touch ", "chmod ", "chown ", "kill ", "systemctl "))
 
 
 def _policy_rejection(event) -> bool:
@@ -49,11 +55,12 @@ def _policy_rejection(event) -> bool:
 
 
 def evaluate_trace(trace: HarnessTrace) -> HarnessEvalResult:
-    owned = {
+    owned = {item.evidence_id for item in trace.run.evidence}
+    owned.update(
         evidence.evidence_id
-        for references in trace.owned_evidence_by_run.values()
-        for evidence in references
-    } or {item.evidence_id for item in trace.run.evidence}
+        for source_run in trace.source_runs
+        for evidence in source_run.evidence
+    )
     foreign = sum(
         evidence_id not in owned
         for conclusion in trace.conclusions

@@ -124,16 +124,18 @@ class LiveModelRunResult:
     html_path: Path | None = None
 
     def to_record(self) -> dict[str, object]:
+        """Return the historical CLI artifact shape.
+
+        Rich live fields remain available on this callable result for evaluators;
+        the recording command intentionally preserves its original JSON contract.
+        """
         return {
             "investigation": self.investigation,
             "run": self.run,
             "rounds": list(self.rounds),
             "tool_calls": list(self.tool_calls),
-            "transcript": list(self.transcript),
-            "compact_boundaries": list(self.compact_boundaries),
             "evidence": list(self.evidence),
             "conclusions": list(self.conclusions),
-            "hooks": list(self.hooks),
             "report": self.report,
         }
 

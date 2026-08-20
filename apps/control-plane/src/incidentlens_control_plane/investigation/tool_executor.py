@@ -314,7 +314,7 @@ class ToolExecutor:
             outcome = self._failed_outcome(
                 request, ToolExecutionError(f"arguments invalid: {message}")
             )
-            await self._emit_tool_error(run, request, now, outcome)
+            await self._emit_tool_error(run, request, now, outcome, rejection_type="policy")
             return outcome
         if (
             definition.allowed_scope is not None
@@ -327,7 +327,7 @@ class ToolExecutor:
                     f"{definition.allowed_scope.value} scope"
                 ),
             )
-            await self._emit_tool_error(run, request, now, outcome)
+            await self._emit_tool_error(run, request, now, outcome, rejection_type="scope")
             return outcome
 
         investigation = self._investigations.get_investigation(run.investigation_id)
@@ -350,7 +350,7 @@ class ToolExecutor:
             return outcome
         except ToolExecutionError as exc:
             outcome = self._failed_outcome(request, exc)
-            await self._emit_tool_error(run, request, now, outcome)
+            await self._emit_tool_error(run, request, now, outcome, rejection_type="policy")
             return outcome
         except CommandForbidden as exc:
             outcome = self._failed_outcome(request, exc)
@@ -408,7 +408,17 @@ class ToolExecutor:
         request: ToolRequest,
         now: datetime,
         outcome: ToolOutcome,
+        *,
+        rejection_type: str | None = None,
     ) -> None:
+        metadata = {
+            "tool_call_id": request.tool_call_id,
+            "output_bytes": outcome.output_bytes,
+            "approval_id": outcome.approval_id,
+        }
+        if rejection_type is not None:
+            metadata.update({"policy_rejected": True, "rejection_type": rejection_type,
+                             "rejection_status": "rejected"})
         await self._emit_hook(
             HookEvent(
                 event_type=HookEventType.TOOL_ERROR,
@@ -416,11 +426,7 @@ class ToolExecutor:
                 action_name=request.tool_name,
                 occurred_at=now,
                 status=outcome.status.value,
-                metadata={
-                    "tool_call_id": request.tool_call_id,
-                    "output_bytes": outcome.output_bytes,
-                    "approval_id": outcome.approval_id,
-                },
+                metadata=metadata,
             )
         )
 
