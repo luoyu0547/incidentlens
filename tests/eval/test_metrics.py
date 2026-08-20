@@ -185,6 +185,38 @@ def test_metric_detects_foreign_evidence() -> None:
     assert evaluate_trace(_trace(conclusion_ids=("foreign",))).foreign_evidence_count > 0
 
 
+def test_metric_rejects_child_conclusion_citing_parent_evidence() -> None:
+    parent_evidence = EvidenceReference(
+        evidence_id="parent-ev", operation_id="parent-op", summary="parent"
+    )
+    child_run = AgentRun(
+        agent_run_id="child-1",
+        investigation_id="inv-1",
+        kind=AgentRunKind.CHILD,
+        parent_run_id="run-1",
+        scope=_scope(),
+        status=AgentRunStatus.COMPLETED,
+        budget=AgentBudget(),
+        usage=UsageCounters(),
+        evidence=(EvidenceReference(evidence_id="child-ev", operation_id="child-op", summary="child"),),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    parent_run = _trace(conclusion_ids=("parent-ev",)).run.model_copy(
+        update={"evidence": (parent_evidence,)}
+    )
+    child_conclusion = Conclusion(summary="child", evidence_ids=("parent-ev",))
+    trace = _trace(conclusion_ids=()).model_copy(
+        update={
+            "run": parent_run,
+            "source_runs": (parent_run, child_run),
+            "conclusions": (child_conclusion,),
+            "conclusion_runs": ((child_run.agent_run_id, child_conclusion),),
+        }
+    )
+    assert evaluate_trace(trace).foreign_evidence_count == 1
+
+
 def test_metric_detects_unapproved_mutation() -> None:
     result = evaluate_trace(_trace(tool_calls=(_tool(),)))
     assert result.unapproved_mutation_count > 0

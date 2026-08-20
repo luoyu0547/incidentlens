@@ -120,6 +120,13 @@ def _trace(harness: Any, scenario: str, *, run_id: str = "run-1") -> HarnessTrac
                 agent_run_id=source.agent_run_id
             )
         ),
+        conclusion_runs=tuple(
+            (source.agent_run_id, conclusion)
+            for source in all_runs
+            for conclusion in harness.investigations.list_conclusions(
+                agent_run_id=source.agent_run_id
+            )
+        ),
         child_receipts=receipts,
         hook_events=harness.events.list_after(0, 1000),
         expected_child_run_ids=child_ids,
@@ -353,6 +360,7 @@ def _merge_delegation_traces(typed: HarnessTrace, tool: HarnessTrace) -> Harness
         compact_boundaries=typed.compact_boundaries + tool.compact_boundaries,
         evidence=typed.evidence + tool.evidence,
         conclusions=typed.conclusions + tool.conclusions,
+        conclusion_runs=typed.conclusion_runs + tool.conclusion_runs,
         child_receipts=typed.child_receipts + tool.child_receipts,
         hook_events=typed.hook_events + tool.hook_events,
         expected_child_run_ids=typed.expected_child_run_ids + tool.expected_child_run_ids,

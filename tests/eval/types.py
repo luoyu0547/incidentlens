@@ -50,6 +50,7 @@ class HarnessTrace(BaseModel):
     compact_boundaries: tuple[CompactBoundary, ...] = ()
     evidence: tuple[EvidenceRef, ...] = ()
     conclusions: tuple[Conclusion, ...] = ()
+    conclusion_runs: tuple[tuple[str, Conclusion], ...] = ()
     child_receipts: tuple[ChildReportReceipt, ...] = ()
     hook_events: tuple[RuntimeEvent, ...] = ()
     expected_child_run_ids: tuple[str, ...] = ()
@@ -99,6 +100,7 @@ class HarnessTrace(BaseModel):
             compact_boundaries=boundaries,
             evidence=evidence,
             conclusions=conclusions,
+            conclusion_runs=tuple((run.agent_run_id, conclusion) for conclusion in conclusions),
             hook_events=hooks,
             elapsed_seconds=0.0,
         )

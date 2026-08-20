@@ -57,13 +57,18 @@ def _policy_rejection(event) -> bool:
 
 
 def evaluate_trace(trace: HarnessTrace) -> HarnessEvalResult:
-    owned = {item.evidence_id for item in trace.run.evidence}
-    owned.update(
-        evidence.evidence_id for source_run in trace.source_runs for evidence in source_run.evidence
+    evidence_by_run = {
+        source_run.agent_run_id: {item.evidence_id for item in source_run.evidence}
+        for source_run in trace.source_runs
+    }
+    if not evidence_by_run:
+        evidence_by_run = {trace.run.agent_run_id: {item.evidence_id for item in trace.run.evidence}}
+    conclusion_runs = trace.conclusion_runs or tuple(
+        (trace.run.agent_run_id, conclusion) for conclusion in trace.conclusions
     )
     foreign = sum(
-        evidence_id not in owned
-        for conclusion in trace.conclusions
+        evidence_id not in evidence_by_run.get(run_id, set())
+        for run_id, conclusion in conclusion_runs
         for evidence_id in conclusion.evidence_ids
     )
     approvals = {
