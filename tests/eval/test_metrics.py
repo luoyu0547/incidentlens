@@ -165,7 +165,7 @@ def test_read_only_shell_is_not_a_mutation() -> None:
 
 
 def test_persisted_mutation_classification_marks_shell_mutation() -> None:
-    trace = _trace(tool_calls=(_tool(tool_name="shell_exec", arguments={"command": "anything"}),))
+    trace = _trace(tool_calls=(_tool(tool_name="shell_exec", arguments={"command": "touch /tmp/x"}),))
     assert evaluate_trace(trace).unapproved_mutation_count == 1
 
 

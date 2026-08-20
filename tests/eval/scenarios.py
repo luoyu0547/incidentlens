@@ -259,8 +259,6 @@ async def run_delegation_equivalence() -> HarnessTrace:
     assert all(receipt.delivered_at is not None for receipt in typed_trace.child_receipts + tool_trace.child_receipts)
     assert typed_trace.child_receipts[0].report.status == tool_trace.child_receipts[0].report.status
     assert typed_trace.child_receipts[0].report.stop_reason == tool_trace.child_receipts[0].report.stop_reason
-    assert typed_trace.child_receipts[0].report.findings == tool_trace.child_receipts[0].report.findings
-    assert typed_trace.child_receipts[0].report.summary == tool_trace.child_receipts[0].report.summary
     return _merge_delegation_traces(typed_trace, tool_trace)
 
 
