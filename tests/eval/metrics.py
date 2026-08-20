@@ -62,7 +62,11 @@ def evaluate_trace(trace: HarnessTrace) -> HarnessEvalResult:
         for source_run in trace.source_runs
     }
     if not evidence_by_run:
-        evidence_by_run = {trace.run.agent_run_id: {item.evidence_id for item in trace.run.evidence}}
+        evidence_by_run = {
+            trace.run.agent_run_id: {
+                item.evidence_id for item in trace.run.evidence
+            }
+        }
     conclusion_runs = trace.conclusion_runs or tuple(
         (trace.run.agent_run_id, conclusion) for conclusion in trace.conclusions
     )

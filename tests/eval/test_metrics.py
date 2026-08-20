@@ -198,7 +198,13 @@ def test_metric_rejects_child_conclusion_citing_parent_evidence() -> None:
         status=AgentRunStatus.COMPLETED,
         budget=AgentBudget(),
         usage=UsageCounters(),
-        evidence=(EvidenceReference(evidence_id="child-ev", operation_id="child-op", summary="child"),),
+        evidence=(
+            EvidenceReference(
+                evidence_id="child-ev",
+                operation_id="child-op",
+                summary="child",
+            ),
+        ),
         created_at=NOW,
         updated_at=NOW,
     )
