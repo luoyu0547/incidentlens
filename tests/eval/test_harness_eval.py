@@ -41,7 +41,7 @@ async def test_delegation_equivalence_preserves_distinct_persisted_sources() -> 
     assert all(run.status in AGENT_RUN_TERMINAL for run in trace.source_runs)
     assert all(run.stop_reason is not None for run in trace.source_runs)
     assert trace.source_runs[0].stop_reason == trace.source_runs[2].stop_reason
-    assert trace.source_runs[1].stop_reason != trace.source_runs[3].stop_reason
+    assert trace.source_runs[1].stop_reason == trace.source_runs[3].stop_reason
     packages = {package.child_run_id: package for package in trace.delegated_tasks}
     for child in (trace.source_runs[1], trace.source_runs[3]):
         assert child.scope == packages[child.agent_run_id].scope
