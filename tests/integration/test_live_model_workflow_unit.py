@@ -71,11 +71,7 @@ class _RecordingRegistry(FakeProviderRegistry):
         if not evidence_ids:
             return step
         return step.model_copy(
-            update={
-                "conclusion": step.conclusion.model_copy(
-                    update={"evidence_ids": evidence_ids}
-                )
-            }
+            update={"conclusion": step.conclusion.model_copy(update={"evidence_ids": evidence_ids})}
         )
 
 

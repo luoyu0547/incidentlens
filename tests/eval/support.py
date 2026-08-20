@@ -1,11 +1,12 @@
 """Test-side assembly for deterministic, real-runtime evaluator scenarios."""
+
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any
 
 from incidentlens_control_plane.approvals.service import ApprovalService
 from incidentlens_control_plane.approvals.store import ApprovalStore
@@ -76,18 +77,25 @@ def _registration() -> ProjectRegistration:
     return ProjectRegistration(
         project_id=PROJECT_ID,
         display_name="Payments",
-        targets=(TargetRegistration(
-            target_id=TARGET_ID, host="dev-a.example.test", ssh_user="deploy", ssh_config_alias="dev-a"
-        ),),
-        services=(ServiceRegistration(
-            compose_service=SERVICE,
-            container_names=(CONTAINER,),
-            allowed_log_paths=("/var/log/payment/app.log",),
-            allowed_host_paths=(HOST_ROOT,),
-            allowed_container_paths=(CONTAINER_ROOT,),
-            container_path_hints=("/app/logs",),
-            protected_remote_paths=(HOST_ROOT / "app.env",),
-        ),),
+        targets=(
+            TargetRegistration(
+                target_id=TARGET_ID,
+                host="dev-a.example.test",
+                ssh_user="deploy",
+                ssh_config_alias="dev-a",
+            ),
+        ),
+        services=(
+            ServiceRegistration(
+                compose_service=SERVICE,
+                container_names=(CONTAINER,),
+                allowed_log_paths=("/var/log/payment/app.log",),
+                allowed_host_paths=(HOST_ROOT,),
+                allowed_container_paths=(CONTAINER_ROOT,),
+                container_path_hints=("/app/logs",),
+                protected_remote_paths=(HOST_ROOT / "app.env",),
+            ),
+        ),
     )
 
 
@@ -110,7 +118,15 @@ def build_harness(
     log_store = LogStore(connect)
     evidence_store = EvidenceStore(connect)
     investigations = InvestigationStore(connect)
-    for store in (projects, events, approval_store, change_store, log_store, evidence_store, investigations):
+    for store in (
+        projects,
+        events,
+        approval_store,
+        change_store,
+        log_store,
+        evidence_store,
+        investigations,
+    ):
         store.migrate()
     if not projects.list():
         projects.create(_registration(), now=NOW)
@@ -129,34 +145,65 @@ def build_harness(
         sessions=sessions,
     )
     gateway = RemoteToolGateway(
-        projects=projects, sessions=sessions, changes=changes, approvals=approvals,
-        events=events, broker=broker,
+        projects=projects,
+        sessions=sessions,
+        changes=changes,
+        approvals=approvals,
+        events=events,
+        broker=broker,
     )
-    logs = LogService(projects=projects, store=log_store, sessions=sessions, evidence=evidence_store)
+    logs = LogService(
+        projects=projects, store=log_store, sessions=sessions, evidence=evidence_store
+    )
     evidence = EvidenceService(evidence_store, investigations=investigations)
     hooks = HookRunner()
     recorder = RuntimeHookRecorder(InvestigationEventPublisher(events=events, broker=broker))
     for event_type in HookEventType:
         hooks.register(event_type, recorder)
     executor = ToolExecutor(
-        projects=projects, sessions=sessions, gateway=gateway, logs=logs,
-        log_store=log_store, evidence=evidence, evidence_store=evidence_store,
-        investigations=investigations, approvals=approvals, hooks=hooks,
+        projects=projects,
+        sessions=sessions,
+        gateway=gateway,
+        logs=logs,
+        log_store=log_store,
+        evidence=evidence,
+        evidence_store=evidence_store,
+        investigations=investigations,
+        approvals=approvals,
+        hooks=hooks,
     )
-    return Harness(projects, sessions, investigations, evidence, evidence_store, approvals,
-                   executor, events, hooks, broker, db_path, factory)
+    return Harness(
+        projects,
+        sessions,
+        investigations,
+        evidence,
+        evidence_store,
+        approvals,
+        executor,
+        events,
+        hooks,
+        broker,
+        db_path,
+        factory,
+    )
 
 
 def make_scope(*, container: bool = False) -> AgentScope:
     if container:
         return AgentScope(
-            project_id=PROJECT_ID, target_id=TARGET_ID, scope=LogScope.CONTAINER,
-            service_name=SERVICE, container_name=CONTAINER,
+            project_id=PROJECT_ID,
+            target_id=TARGET_ID,
+            scope=LogScope.CONTAINER,
+            service_name=SERVICE,
+            container_name=CONTAINER,
             allowed_container_paths=(CONTAINER_ROOT,),
         )
     return AgentScope(
-        project_id=PROJECT_ID, target_id=TARGET_ID, scope=LogScope.HOST,
-        allowed_host_paths=(HOST_ROOT,), allowed_container_paths=(CONTAINER_ROOT,),
+        project_id=PROJECT_ID,
+        target_id=TARGET_ID,
+        scope=LogScope.HOST,
+        allowed_host_paths=(HOST_ROOT,),
+        allowed_container_paths=(CONTAINER_ROOT,),
     )
 
 
@@ -169,19 +216,37 @@ def seed_run(
     budget: AgentBudget,
     status: Any = None,
 ) -> AgentRun:
-    from incidentlens_control_plane.investigation.state_machine import InvestigationStatus, AgentRunStatus
+    from incidentlens_control_plane.investigation.state_machine import (
+        AgentRunStatus,
+        InvestigationStatus,
+    )
+
     investigation = Investigation(
-        investigation_id=investigation_id, incident_id="inc-1", project_id=PROJECT_ID,
-        target_id=TARGET_ID, service=SERVICE, symptom="checkout failures",
-        status=InvestigationStatus.RUNNING, budget=InvestigationBudget(), usage=UsageCounters(),
-        created_at=NOW, updated_at=NOW,
+        investigation_id=investigation_id,
+        incident_id="inc-1",
+        project_id=PROJECT_ID,
+        target_id=TARGET_ID,
+        service=SERVICE,
+        symptom="checkout failures",
+        status=InvestigationStatus.RUNNING,
+        budget=InvestigationBudget(),
+        usage=UsageCounters(),
+        created_at=NOW,
+        updated_at=NOW,
     )
     harness.investigations.create_investigation(investigation)
     run = AgentRun(
-        agent_run_id=run_id, investigation_id=investigation_id, parent_run_id=None,
-        kind=AgentRunKind.PARENT, scope=scope or make_scope(),
-        status=status or AgentRunStatus.CREATED, budget=budget,
-        usage=UsageCounters(), evidence=(), created_at=NOW, updated_at=NOW,
+        agent_run_id=run_id,
+        investigation_id=investigation_id,
+        parent_run_id=None,
+        kind=AgentRunKind.PARENT,
+        scope=scope or make_scope(),
+        status=status or AgentRunStatus.CREATED,
+        budget=budget,
+        usage=UsageCounters(),
+        evidence=(),
+        created_at=NOW,
+        updated_at=NOW,
     )
     harness.investigations.create_agent_run(run)
     return run
@@ -189,27 +254,55 @@ def seed_run(
 
 def seed_evidence(harness: Harness, *, run_id: str = "run-1", source_ref: str = "seed") -> str:
     record = harness.evidence.record_validation_result(
-        agent_run_id=run_id, incident_id="inc-1", project_id=PROJECT_ID,
-        target_id=TARGET_ID, service_name=SERVICE, source_ref=source_ref,
-        validator="harness", passed=True, detail="deterministic seed evidence",
-        created_by="harness", now=NOW,
+        agent_run_id=run_id,
+        incident_id="inc-1",
+        project_id=PROJECT_ID,
+        target_id=TARGET_ID,
+        service_name=SERVICE,
+        source_ref=source_ref,
+        validator="harness",
+        passed=True,
+        detail="deterministic seed evidence",
+        created_by="harness",
+        now=NOW,
     )
     run = harness.investigations.get_agent_run(run_id)
     from incidentlens_control_plane.investigation.types import EvidenceReference
-    harness.investigations.update_agent_run(run.model_copy(update={
-        "evidence": (EvidenceReference(evidence_id=record.evidence_ref_id, operation_id=source_ref, summary="seed evidence"),),
-    }))
+
+    harness.investigations.update_agent_run(
+        run.model_copy(
+            update={
+                "evidence": (
+                    EvidenceReference(
+                        evidence_id=record.evidence_ref_id,
+                        operation_id=source_ref,
+                        summary="seed evidence",
+                    ),
+                ),
+            }
+        )
+    )
     return record.evidence_ref_id
 
 
 def make_orchestrator(
-    harness: Harness, provider: Any, *, context_manager: Any = None,
+    harness: Harness,
+    provider: Any,
+    *,
+    context_manager: Any = None,
     default_budget: AgentBudget | None = None,
 ) -> AgentOrchestrator:
     return AgentOrchestrator(
-        store=harness.investigations, provider=provider, executor=harness.executor,
-        evidence=harness.evidence, projects=harness.projects, sessions=harness.sessions,
-        now=lambda: NOW, events=harness.events, broker=harness.broker,
-        context_manager=context_manager, default_budget=default_budget,
+        store=harness.investigations,
+        provider=provider,
+        executor=harness.executor,
+        evidence=harness.evidence,
+        projects=harness.projects,
+        sessions=harness.sessions,
+        now=lambda: NOW,
+        events=harness.events,
+        broker=harness.broker,
+        context_manager=context_manager,
+        default_budget=default_budget,
         hooks=harness.hooks,
     )

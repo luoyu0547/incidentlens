@@ -187,6 +187,7 @@ async def run_live_model_workflow(
             if not pending:
                 raise ValueError("fake_provider_registry requires a pending recording script")
             fake_provider_registry.set_pending_script(pending)
+
         async def prefill_context(run: object) -> None:
             if not prefill_complete_groups:
                 return

@@ -23,12 +23,18 @@ async def test_delegation_equivalence_preserves_distinct_persisted_sources() -> 
     trace = await run_delegation_equivalence()
     assert trace.aggregate_sources == ("run-typed", "run-tool")
     assert tuple(run.agent_run_id for run in trace.source_runs) == (
-        "run-typed", "child-typed", "run-tool", "child-tool"
+        "run-typed",
+        "child-typed",
+        "run-tool",
+        "child-tool",
     )
-    assert tuple(investigation.investigation_id for investigation in trace.source_investigations) == (
-        "inv-typed", "inv-tool"
-    )
-    assert {package.child_run_id for package in trace.delegated_tasks} == {"child-typed", "child-tool"}
+    assert tuple(
+        investigation.investigation_id for investigation in trace.source_investigations
+    ) == ("inv-typed", "inv-tool")
+    assert {package.child_run_id for package in trace.delegated_tasks} == {
+        "child-typed",
+        "child-tool",
+    }
     assert {call.tool_call_id for call in trace.tool_calls} >= {
         "tool-delegate",
     }
@@ -46,7 +52,10 @@ async def test_delegation_equivalence_preserves_distinct_persisted_sources() -> 
     for child in (trace.source_runs[1], trace.source_runs[3]):
         assert child.scope == packages[child.agent_run_id].scope
         assert packages[child.agent_run_id].parent_run_id == child.parent_run_id
-    assert {receipt.child_run_id for receipt in trace.child_receipts} == {"child-typed", "child-tool"}
+    assert {receipt.child_run_id for receipt in trace.child_receipts} == {
+        "child-typed",
+        "child-tool",
+    }
     assert all(receipt.delivered_at is not None for receipt in trace.child_receipts)
     assert len(trace.owned_evidence_by_run) == 4
     assert all(run.agent_run_id in trace.owned_evidence_by_run for run in trace.source_runs)

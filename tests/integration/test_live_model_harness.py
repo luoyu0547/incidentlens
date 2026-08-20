@@ -3,6 +3,7 @@
 Collection is harmless unless INCIDENTLENS_RUN_LIVE_MODEL_TESTS=1 is set: the
 module gate runs before the disposable-target fixture can perform any setup.
 """
+
 from __future__ import annotations
 
 import os
@@ -14,10 +15,9 @@ from incidentlens_control_plane.config import RuntimeSettings
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from record_live_model_demo import run_live_model_workflow  # noqa: E402
 from eval.metrics import evaluate_trace  # noqa: E402
 from eval.types import HarnessTrace  # noqa: E402
-
+from record_live_model_demo import run_live_model_workflow  # noqa: E402
 from test_live_agent_runtime import live_target as _live_target  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
@@ -95,8 +95,7 @@ async def test_real_maas_small_window_compacts_or_pauses_safely(live_target, tmp
         context_overrides={"prefill_complete_groups": 12},
     )
     assert result.compact_boundaries or (
-        result.run["status"] == "paused_budget"
-        and count_overflow_retries(result.hooks) >= 1
+        result.run["status"] == "paused_budget" and count_overflow_retries(result.hooks) >= 1
     )
     assert count_overflow_retries(result.hooks) <= 1
     assert evaluate_trace(HarnessTrace.from_live_result(result)).scope_policy_bypass_count == 0
