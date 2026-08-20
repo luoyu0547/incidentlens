@@ -40,7 +40,7 @@ def _scope() -> AgentScope:
 
 def _trace(
     *, conclusion_ids=("ev-1",), tool_calls=(), transcript=(), receipts=(), hooks=(),
-    mutation_ids=(), expected_children=()
+    expected_children=()
 ):
     evidence = (EvidenceReference(evidence_id="ev-1", operation_id="op-1", summary="ok"),)
     run = AgentRun(
@@ -65,7 +65,7 @@ def _trace(
         scenario="clean", investigation=investigation, run=run, rounds=rounds,
         tool_calls=tool_calls, transcript=transcript, conclusions=(conclusion,),
         child_receipts=receipts, hook_events=hooks, elapsed_seconds=1.5,
-        mutation_tool_call_ids=mutation_ids, expected_child_run_ids=expected_children,
+        expected_child_run_ids=expected_children,
     )
 
 
@@ -128,7 +128,7 @@ def test_metric_detects_foreign_evidence() -> None:
 
 def test_metric_detects_unapproved_mutation() -> None:
     result = evaluate_trace(
-        _trace(tool_calls=(_tool(),), mutation_ids=("tool-1",))
+        _trace(tool_calls=(_tool(),))
     )
     assert result.unapproved_mutation_count > 0
 
@@ -165,17 +165,13 @@ def test_read_only_shell_is_not_a_mutation() -> None:
 
 
 def test_persisted_mutation_classification_marks_shell_mutation() -> None:
-    trace = _trace(
-        tool_calls=(_tool(tool_name="shell_exec", arguments={"command": "anything"}),),
-        mutation_ids=("tool-1",),
-    )
+    trace = _trace(tool_calls=(_tool(tool_name="shell_exec", arguments={"command": "anything"}),))
     assert evaluate_trace(trace).unapproved_mutation_count == 1
 
 
 def test_null_approval_consumption_does_not_authorize_mutation() -> None:
     trace = _trace(
         tool_calls=(_tool(approval_id=None),),
-        mutation_ids=("tool-1",),
         hooks=(RuntimeEvent(event_id="evt-null", event_type=RuntimeEventType.APPROVAL_CONSUMED,
                             occurred_at=NOW, payload={"approval_id": None}),),
     )

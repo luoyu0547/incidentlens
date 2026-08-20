@@ -9,9 +9,9 @@ from incidentlens_control_plane.investigation.types import (
     ChildReportReceipt,
     CompactBoundary,
     Conclusion,
+    DelegatedTaskPackage,
     EvidenceReference,
     Investigation,
-    DelegatedTaskPackage,
     ToolCall,
     TranscriptMessage,
 )
@@ -52,7 +52,6 @@ class HarnessTrace(BaseModel):
     conclusions: tuple[Conclusion, ...] = ()
     child_receipts: tuple[ChildReportReceipt, ...] = ()
     hook_events: tuple[RuntimeEvent, ...] = ()
-    mutation_tool_call_ids: tuple[str, ...] = ()
     expected_child_run_ids: tuple[str, ...] = ()
     delegation_forms: tuple[str, ...] = ()
     aggregate_sources: tuple[str, ...] = ()
@@ -77,7 +76,9 @@ class HarnessTrace(BaseModel):
         raw_rounds = getattr(result, "rounds", records.get("rounds", ()))
         raw_tool_calls = getattr(result, "tool_calls", records.get("tool_calls", ()))
         raw_transcript = getattr(result, "transcript", records.get("transcript", ()))
-        raw_boundaries = getattr(result, "compact_boundaries", records.get("compact_boundaries", ()))
+        raw_boundaries = getattr(
+            result, "compact_boundaries", records.get("compact_boundaries", ())
+        )
         raw_evidence = getattr(result, "evidence", records.get("evidence", ()))
         raw_conclusions = getattr(result, "conclusions", records.get("conclusions", ()))
         raw_hooks = getattr(result, "hooks", records.get("hooks", ()))
@@ -88,11 +89,6 @@ class HarnessTrace(BaseModel):
         evidence = tuple(EvidenceReference.model_validate(item) for item in raw_evidence)
         conclusions = tuple(Conclusion.model_validate(item) for item in raw_conclusions)
         hooks = tuple(RuntimeEvent.model_validate(item) for item in raw_hooks)
-        mutation_ids = tuple(
-            call.tool_call_id
-            for call in tool_calls
-            if call.tool_name in {"file_write", "file_edit", "docker_action", "shell_exec"}
-        )
         return cls(
             scenario="real_maas",
             investigation=investigation,
@@ -104,7 +100,6 @@ class HarnessTrace(BaseModel):
             evidence=evidence,
             conclusions=conclusions,
             hook_events=hooks,
-            mutation_tool_call_ids=mutation_ids,
             elapsed_seconds=0.0,
         )
 

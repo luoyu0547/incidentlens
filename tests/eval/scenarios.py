@@ -83,11 +83,6 @@ def _trace(harness: Any, scenario: str, *, run_id: str = "run-1") -> HarnessTrac
         conclusions=tuple(conclusion for source in all_runs for conclusion in harness.investigations.list_conclusions(agent_run_id=source.agent_run_id)),
         child_receipts=receipts,
         hook_events=harness.events.list_after(0, 1000),
-        mutation_tool_call_ids=tuple(
-            call.tool_call_id for source in all_runs
-            for call in harness.investigations.list_tool_calls(agent_run_id=source.agent_run_id)
-            if call.tool_name in {"file_write", "file_edit", "docker_action", "shell_exec"}
-        ),
         expected_child_run_ids=child_ids,
         delegation_forms=forms,
         aggregate_sources=(run.agent_run_id,),
@@ -188,7 +183,6 @@ async def _delegation_trace(
         harness = build_harness(Path(directory))
         seed_run(harness, run_id=run_id, investigation_id=investigation_id, budget=AgentBudget(max_rounds=8, max_tool_calls=8))
         parent_evidence = seed_evidence(harness, run_id=run_id, source_ref=parent_evidence_id)
-        child_evidence = seed_evidence(harness, run_id=child_id, source_ref=child_evidence_id)
         scope = make_scope()
         registry = FakeProviderRegistry()
         registry.set_script(run_id, [
@@ -197,7 +191,8 @@ async def _delegation_trace(
             StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="parent"), conclusion=Conclusion(summary="parent finding", evidence_ids=(parent_evidence,))),
         ])
         registry.set_script(child_id, [
-            StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="child"), conclusion=Conclusion(summary="child finding", evidence_ids=(child_evidence,))),
+            RequestToolsStep(tool_requests=(tool_request("registry_info", child_evidence_id),)),
+            StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="child"), conclusion=Conclusion(summary="child finding", evidence_ids=(child_evidence_id,))),
         ])
         await make_orchestrator(harness, FakeProvider(registry)).run(run_id)
         trace = _trace(harness, name, run_id=run_id)
@@ -220,7 +215,6 @@ def _merge_delegation_traces(typed: HarnessTrace, tool: HarnessTrace) -> Harness
         conclusions=typed.conclusions + tool.conclusions,
         child_receipts=typed.child_receipts + tool.child_receipts,
         hook_events=typed.hook_events + tool.hook_events,
-        mutation_tool_call_ids=typed.mutation_tool_call_ids + tool.mutation_tool_call_ids,
         expected_child_run_ids=typed.expected_child_run_ids + tool.expected_child_run_ids,
         delegation_forms=typed.delegation_forms + tool.delegation_forms,
         aggregate_sources=(typed.run.agent_run_id, tool.run.agent_run_id),

@@ -133,13 +133,14 @@ async def test_live_workflow_returns_recording_shape_and_scripted_completion(tmp
         "run",
         "rounds",
         "tool_calls",
-        "transcript",
-        "compact_boundaries",
         "evidence",
         "conclusions",
-        "hooks",
         "report",
     }
+    assert result.transcript
+    assert result.compact_boundaries == ()
+    assert result.hooks
+    assert result.provider_type
     assert result.run["status"] == "completed"
     run_id = result.run["agent_run_id"]
     assert registry.requests(run_id)
