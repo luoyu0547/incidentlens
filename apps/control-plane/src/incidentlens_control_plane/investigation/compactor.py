@@ -72,9 +72,13 @@ _TEXT_WIDTHS: dict[str, int] = {
     "objective": 4_000,
     "confirmed_facts": 400,
     "active_hypotheses": 400,
+    "rejected_hypotheses": 400,
     "open_questions": 400,
     "completed_actions": 240,
     "child_findings": 400,
+    "immutable_observations": 400,
+    "pending_actions": 240,
+    "safety_state": 400,
     "user_constraints": 240,
     "todos": 1_000,
     "next_actions": 240,
@@ -120,6 +124,20 @@ class CompactionValidator:
             raise CompactionRejected(
                 f"compactor memory cites foreign evidence: {sorted(foreign)!r}"
             )
+        for index, recipe in enumerate(memory.reacquisition_recipes):
+            self._check_text(f"reacquisition_recipes[{index}].purpose", recipe.purpose, 1_000)
+            self._check_text(
+                f"reacquisition_recipes[{index}].stale_summary",
+                recipe.stale_summary,
+                2_000,
+            )
+            redacted_arguments = redact_message(
+                str(recipe.arguments), max_length=8_000
+            ).message_redacted
+            if redacted_arguments != str(recipe.arguments):
+                raise CompactionRejected(
+                    f"compactor memory recipe {index} contains unredacted arguments"
+                )
         for field, width in _TEXT_WIDTHS.items():
             value = getattr(memory, field)
             if isinstance(value, str):

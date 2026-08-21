@@ -457,6 +457,80 @@ def test_snip_keeps_protected_failed_result(store) -> None:
     assert failed[0].tool_call_id == "call-0"
 
 
+def test_micro_compact_uses_reacquisition_stub_for_reproducible_result() -> None:
+    group = MessageGroup(
+        (
+            TranscriptMessage(
+                agent_run_id="run-1",
+                sequence=1,
+                role=MessageRole.ASSISTANT,
+                blocks=(
+                    ToolUseBlock(
+                        tool_call_id="call-1",
+                        tool_name="log_query",
+                        arguments={"service_name": "orders"},
+                    ),
+                ),
+                created_at=NOW,
+            ),
+            TranscriptMessage(
+                agent_run_id="run-1",
+                sequence=2,
+                role=MessageRole.USER,
+                blocks=(
+                    ToolResultBlock(
+                        tool_call_id="call-1",
+                        status=ToolCallStatus.SUCCEEDED,
+                        content="current log observation",
+                        evidence_ids=("ev-1",),
+                    ),
+                ),
+                created_at=NOW,
+            ),
+        )
+    )
+    result = find_tool_result(flatten(micro_compact((group,), keep_recent=0)), "call-1")
+    assert "reacquire with log_query" in result.content
+    assert "evidence_read" not in result.content
+
+
+def test_micro_compact_uses_evidence_read_only_for_immutable_result() -> None:
+    group = MessageGroup(
+        (
+            TranscriptMessage(
+                agent_run_id="run-1",
+                sequence=1,
+                role=MessageRole.ASSISTANT,
+                blocks=(
+                    ToolUseBlock(
+                        tool_call_id="call-1",
+                        tool_name="file_edit",
+                        arguments={"path": "/etc/orders.env"},
+                    ),
+                ),
+                created_at=NOW,
+            ),
+            TranscriptMessage(
+                agent_run_id="run-1",
+                sequence=2,
+                role=MessageRole.USER,
+                blocks=(
+                    ToolResultBlock(
+                        tool_call_id="call-1",
+                        status=ToolCallStatus.SUCCEEDED,
+                        content="pre-change snapshot",
+                        evidence_ids=("ev-immutable",),
+                    ),
+                ),
+                created_at=NOW,
+            ),
+        )
+    )
+    result = find_tool_result(flatten(micro_compact((group,), keep_recent=0)), "call-1")
+    assert "evidence_read" in result.content
+    assert "only if source is gone" in result.content
+
+
 # -- deterministic session memory under context pressure -----------------------
 
 

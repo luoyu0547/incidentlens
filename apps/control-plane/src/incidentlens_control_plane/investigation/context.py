@@ -72,6 +72,7 @@ from incidentlens_control_plane.investigation.types import (
     EvidenceReference,
     Investigation,
     MessageRole,
+    ReacquisitionRecipe,
     SessionMemory,
     TextBlock,
     TodoItem,
@@ -115,6 +116,27 @@ def _json_default(value: object) -> object:
     if isinstance(value, PurePosixPath):
         return str(value)
     raise TypeError(f"cannot serialize {type(value).__name__}")
+
+
+_REPRODUCIBLE_TOOLS: frozenset[str] = frozenset(
+    {
+        "log_query",
+        "container_read",
+        "host_read",
+        "container_list",
+        "host_list",
+        "container_search",
+        "host_search",
+        "container_stat",
+        "host_stat",
+        "registry_info",
+        "service_info",
+        "source_discover",
+    }
+)
+_IMMUTABLE_TOOLS: frozenset[str] = frozenset(
+    {"file_edit", "file_write", "docker_action", "shell_exec", "evidence_read"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,16 +333,30 @@ def snip_groups(
 
 
 def _stub_succeeded_result(group: MessageGroup) -> MessageGroup:
-    """Replace a succeeded tool result's content with a bounded evidence stub."""
+    """Replace a succeeded tool result with a reacquisition or immutable stub."""
+    tool_names = {
+        block.tool_call_id: block.tool_name
+        for message in group.messages
+        for block in message.blocks
+        if isinstance(block, ToolUseBlock)
+    }
     rebuilt_messages: list[TranscriptMessage] = []
     for message in group.messages:
         blocks: list[object] = []
         for block in message.blocks:
             if isinstance(block, ToolResultBlock):
-                stub = (
-                    f"[output persisted in EvidenceStore ({len(block.content)} chars); "
-                    f"reload via {list(block.evidence_ids)} on demand]"
-                )
+                tool_name = tool_names.get(block.tool_call_id, "")
+                if tool_name in _REPRODUCIBLE_TOOLS:
+                    stub = (
+                        f"[stale observation released; reacquire with {tool_name}; "
+                        f"previous evidence={list(block.evidence_ids)}]"
+                    )
+                else:
+                    stub = (
+                        f"[immutable output persisted in EvidenceStore "
+                        f"({len(block.content)} chars); reload via "
+                        f"evidence_read {list(block.evidence_ids)} only if source is gone]"
+                    )
                 blocks.append(
                     block.model_copy(
                         update={"content": stub, "persisted_output": True}
@@ -1141,6 +1177,11 @@ class AgentContextManager:
             if hypothesis.status
             in {HypothesisStatus.PROPOSED, HypothesisStatus.ACTIVE}
         ]
+        rejected_hypotheses = [
+            hypothesis.summary
+            for hypothesis in run.hypotheses
+            if hypothesis.status is HypothesisStatus.REJECTED
+        ]
         open_questions = [
             question
             for hypothesis in run.hypotheses
@@ -1153,6 +1194,45 @@ class AgentContextManager:
             f"{call.tool_name}: {call.status.value}"
             for call in tool_calls
             if call.finished_at is not None
+        ]
+        recipes = tuple(
+            ReacquisitionRecipe(
+                purpose=f"Refresh current observation from {call.tool_name}",
+                tool_name=call.tool_name,
+                arguments=self._redacted_arguments(call.arguments),
+                stale_summary=self._clean(
+                    next(
+                        (
+                            ref.summary
+                            for ref in reversed(run.evidence)
+                            if ref.operation_id == call.tool_call_id
+                        ),
+                        f"Previously observed by {call.tool_name}; refresh before reuse",
+                    ),
+                    width=2_000,
+                ),
+            )
+            for call in tool_calls
+            if call.status is ToolCallStatus.SUCCEEDED
+            and call.tool_name in _REPRODUCIBLE_TOOLS
+        )[-32:]
+        immutable_observations = [
+            self._clean(ref.summary, width=400)
+            for call in tool_calls
+            if call.status is ToolCallStatus.SUCCEEDED
+            and call.tool_name in _IMMUTABLE_TOOLS
+            for ref in run.evidence
+            if ref.operation_id == call.tool_call_id
+        ]
+        safety_state = [
+            f"{call.tool_call_id} {call.tool_name} status={call.status.value}"
+            for call in tool_calls
+            if call.status
+            in {
+                ToolCallStatus.WAITING_APPROVAL,
+                ToolCallStatus.FAILED,
+                ToolCallStatus.UNCERTAIN,
+            }
         ]
         # No user-constraint store exists yet; the field stays empty (a later
         # task may reconcile it with a durable constraints source).
@@ -1169,9 +1249,18 @@ class AgentContextManager:
             "objective": self._clean(self._task_prompt(run) or investigation.symptom, width=4_000),
             "confirmed_facts": self._bounded_unique(confirmed_facts, limit=24, width=400),
             "active_hypotheses": self._bounded_unique(active_hypotheses, limit=16, width=400),
+            "rejected_hypotheses": self._bounded_unique(
+                rejected_hypotheses, limit=16, width=400
+            ),
             "open_questions": self._bounded_unique(open_questions, limit=16, width=400),
             "completed_actions": self._bounded_unique(completed_actions, limit=24, width=240),
             "child_findings": (),
+            "reacquisition_recipes": recipes,
+            "immutable_observations": self._bounded_unique(
+                immutable_observations, limit=32, width=400
+            ),
+            "pending_actions": self._bounded_unique(next_actions, limit=16, width=240),
+            "safety_state": self._bounded_unique(safety_state, limit=32, width=400),
             "evidence_ids": evidence_ids,
             "user_constraints": self._bounded_unique(user_constraints, limit=16, width=240),
             "todos": tuple(todo_labels)[-64:],
@@ -1251,6 +1340,26 @@ class AgentContextManager:
             return self._store.get_delegated_task(run.agent_run_id).task_prompt
         except DelegatedTaskNotFound:
             return None
+
+    @staticmethod
+    def _redacted_arguments(arguments: dict[str, object]) -> dict[str, object]:
+        """Return JSON arguments with sensitive string values redacted."""
+        redacted: dict[str, object] = {}
+        for key, value in arguments.items():
+            if isinstance(value, str):
+                redacted[key] = redact_message(value, max_length=2_000).message_redacted
+            elif isinstance(value, dict):
+                redacted[key] = AgentContextManager._redacted_arguments(value)
+            elif isinstance(value, list):
+                redacted[key] = [
+                    redact_message(item, max_length=2_000).message_redacted
+                    if isinstance(item, str)
+                    else item
+                    for item in value
+                ]
+            else:
+                redacted[key] = value
+        return redacted
 
     @staticmethod
     def _bounded_unique(
