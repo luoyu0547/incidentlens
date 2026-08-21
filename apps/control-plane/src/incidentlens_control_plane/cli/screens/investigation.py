@@ -10,6 +10,7 @@ from textual.containers import Horizontal
 from textual.screen import Screen
 from textual.widgets import Input, RichLog, Static
 
+from incidentlens_control_plane.cli.presentation import present_event, render_markup
 from incidentlens_control_plane.runtime import RuntimeServices
 
 
@@ -28,6 +29,9 @@ class InvestigationScreen(Screen):
         self.investigation_id = investigation_id
         self.runtime = runtime
         self.events_ready = asyncio.Event()
+        self._event_task: asyncio.Task | None = None
+        self._last_event_sequence = 0
+        self._rendered_event_sequences: set[int] = set()
 
     def compose(self) -> ComposeResult:
         yield Static("", id="workspace-title")
@@ -43,9 +47,54 @@ class InvestigationScreen(Screen):
 
     def on_mount(self) -> None:
         self.events_ready.set()
+        if self.runtime is not None:
+            self._event_task = asyncio.create_task(self._consume_events())
         self.set_interval(1.0, self.refresh_workspace)
         self.refresh_workspace()
         self.query_one("#command-bar", Input).focus()
+
+    async def _consume_events(self) -> None:
+        assert self.runtime is not None
+        async with self.runtime.broker.subscribe() as queue:
+            self._backfill_events()
+            self.events_ready.set()
+            while True:
+                event = await queue.get()
+                self._append_event(event)
+
+    def _backfill_events(self) -> None:
+        assert self.runtime is not None
+        while True:
+            events = self.runtime.events.list_after(self._last_event_sequence, limit=1_000)
+            if not events:
+                return
+            for event in events:
+                self._append_event(event)
+            if len(events) < 1_000:
+                return
+
+    def _append_event(self, event) -> None:
+        if event.sequence in self._rendered_event_sequences:
+            return
+        investigation_id = event.payload.get("investigation_id")
+        run_id = event.payload.get("run_id") or event.payload.get("agent_run_id")
+        if investigation_id not in {None, self.investigation_id}:
+            return
+        if investigation_id is None and run_id:
+            runs = self.runtime.investigations.list_runs(
+                investigation_id=self.investigation_id
+            )
+            if run_id not in {run.agent_run_id for run in runs}:
+                return
+        self.query_one("#activity", RichLog).write(
+            render_markup(present_event(event))
+        )
+        self._rendered_event_sequences.add(event.sequence)
+        self._last_event_sequence = max(self._last_event_sequence, event.sequence)
+
+    def on_unmount(self) -> None:
+        if self._event_task is not None:
+            self._event_task.cancel()
 
     def refresh_workspace(self) -> None:
         if self.runtime is None:
@@ -91,7 +140,8 @@ class InvestigationScreen(Screen):
 
     def _render_activity(self, runs, hypotheses, conclusions) -> None:
         log = self.query_one("#activity", RichLog)
-        log.clear()
+        if self._rendered_event_sequences:
+            return
         log.write("[bold #79c0ff]调查活动[/]  [dim]仅展示结构化、可审计事件[/]")
         if not runs:
             log.write("[dim]尚未创建 Agent 运行。此调查处于等待启动状态。[/]")
