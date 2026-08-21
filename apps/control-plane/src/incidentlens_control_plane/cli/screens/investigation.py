@@ -11,6 +11,7 @@ from textual.screen import Screen
 from textual.widgets import Input, RichLog, Static
 
 from incidentlens_control_plane.cli.presentation import present_event, render_markup
+from incidentlens_control_plane.cli.recording import SessionRecorder
 from incidentlens_control_plane.runtime import RuntimeServices
 
 
@@ -24,10 +25,17 @@ class InvestigationScreen(Screen):
         Binding("escape", "back", "返回"),
     ]
 
-    def __init__(self, investigation_id: str, runtime: RuntimeServices | None = None) -> None:
+    def __init__(
+        self,
+        investigation_id: str,
+        runtime: RuntimeServices | None = None,
+        *,
+        recorder: SessionRecorder | None = None,
+    ) -> None:
         super().__init__()
         self.investigation_id = investigation_id
         self.runtime = runtime
+        self.recorder = recorder
         self.events_ready = asyncio.Event()
         self._event_task: asyncio.Task | None = None
         self._last_event_sequence = 0
@@ -41,7 +49,7 @@ class InvestigationScreen(Screen):
         yield Input(placeholder="输入 :help 查看调查命令", id="command-bar")
         yield Static(
             ":report 报告 · :cancel 取消 · :approve <ID> 批准 · "
-            ":reject <ID> 拒绝 · Ctrl+R 刷新",
+            ":reject <ID> 拒绝 · :rollback <变更集 ID> · Ctrl+R 刷新",
             id="command-hint",
         )
 
@@ -89,6 +97,8 @@ class InvestigationScreen(Screen):
         self.query_one("#activity", RichLog).write(
             render_markup(present_event(event))
         )
+        if self.recorder is not None:
+            self.recorder.record_event(event)
         self._rendered_event_sequences.add(event.sequence)
         self._last_event_sequence = max(self._last_event_sequence, event.sequence)
 
@@ -202,6 +212,8 @@ class InvestigationScreen(Screen):
         event.input.value = ""
         if not command:
             return
+        if self.recorder is not None:
+            self.recorder.record_input(command)
         self.run_worker(self._run_command(command), exclusive=True)
 
     async def _run_command(self, command: str) -> None:
@@ -212,7 +224,7 @@ class InvestigationScreen(Screen):
         if action == ":help":
             log.write(
                 "[bold]可用命令[/]  :report · :cancel · :approve <审批 ID> · "
-                ":reject <审批 ID> · :refresh"
+                ":reject <审批 ID> · :rollback <变更集 ID> · :refresh"
             )
         elif action == ":report":
             self.action_report()
@@ -220,6 +232,12 @@ class InvestigationScreen(Screen):
             self.refresh_workspace()
         elif action == ":cancel" and self.runtime is not None:
             await self.runtime.investigations.cancel(self.investigation_id)
+            self.refresh_workspace()
+        elif action == ":rollback" and argument and self.runtime is not None:
+            try:
+                await self.runtime.changes.rollback(argument)
+            except Exception as exc:
+                log.write(f"[yellow]回滚等待审批或失败：{exc}[/]")
             self.refresh_workspace()
         elif action in {":approve", ":reject"} and argument and self.runtime is not None:
             if action == ":approve":

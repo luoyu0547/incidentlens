@@ -5,10 +5,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 
+from pathlib import Path
+
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer
 
+from incidentlens_control_plane.cli.recording import SessionRecorder
 from incidentlens_control_plane.cli.run_request import (
     RunRequest,
     add_run_parser,
@@ -73,6 +76,11 @@ class IncidentLensApp(App):
         self.investigation_id = investigation_id
         self.show_report = show_report
         self.run_request = run_request
+        self.recorder = (
+            SessionRecorder(Path(run_request.record))
+            if run_request is not None and run_request.record
+            else None
+        )
         self._run_task: asyncio.Task | None = None
 
     def compose(self) -> ComposeResult:
@@ -97,7 +105,9 @@ class IncidentLensApp(App):
             symptom=request.symptom,
         )
         self.investigation_id = investigation.investigation_id
-        screen = InvestigationScreen(investigation.investigation_id, self.runtime)
+        screen = InvestigationScreen(
+            investigation.investigation_id, self.runtime, recorder=self.recorder
+        )
         self.push_screen(screen)
 
         async def start_after_screen_ready() -> None:
@@ -107,6 +117,10 @@ class IncidentLensApp(App):
             )
 
         self._run_task = asyncio.create_task(start_after_screen_ready())
+
+    def on_unmount(self) -> None:
+        if self.recorder is not None:
+            self.recorder.close()
 
     def action_show_dashboard(self) -> None:
         self.push_screen(DashboardScreen(self.runtime))
