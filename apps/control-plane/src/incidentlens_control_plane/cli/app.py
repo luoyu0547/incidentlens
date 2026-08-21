@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer
 
+from incidentlens_control_plane.cli.run_request import (
+    RunRequest,
+    add_run_parser,
+    request_from_args,
+)
 from incidentlens_control_plane.cli.screens.dashboard import DashboardScreen
 from incidentlens_control_plane.cli.screens.investigation import InvestigationScreen
 from incidentlens_control_plane.cli.screens.report import ReportScreen
@@ -60,22 +66,47 @@ class IncidentLensApp(App):
         *,
         investigation_id: str | None = None,
         show_report: bool = False,
+        run_request: RunRequest | None = None,
     ) -> None:
         super().__init__()
         self.runtime = runtime
         self.investigation_id = investigation_id
         self.show_report = show_report
+        self.run_request = run_request
+        self._run_task: asyncio.Task | None = None
 
     def compose(self) -> ComposeResult:
         yield Footer()
 
     def on_mount(self) -> None:
-        if self.investigation_id and self.show_report:
+        if self.run_request is not None:
+            self._launch_request(self.run_request)
+        elif self.investigation_id and self.show_report:
             self.push_screen(ReportScreen(self.investigation_id, self.runtime))
         elif self.investigation_id:
             self.push_screen(InvestigationScreen(self.investigation_id, self.runtime))
         else:
             self.push_screen(DashboardScreen(self.runtime))
+
+    def _launch_request(self, request: RunRequest) -> None:
+        scope = request.resolve_scope(self.runtime.projects)
+        investigation = self.runtime.investigations.create_investigation(
+            project_id=request.project_id,
+            target_id=request.target_id,
+            service=request.service,
+            symptom=request.symptom,
+        )
+        self.investigation_id = investigation.investigation_id
+        screen = InvestigationScreen(investigation.investigation_id, self.runtime)
+        self.push_screen(screen)
+
+        async def start_after_screen_ready() -> None:
+            await screen.events_ready.wait()
+            await self.runtime.investigations.start(
+                investigation.investigation_id, scope
+            )
+
+        self._run_task = asyncio.create_task(start_after_screen_ready())
 
     def action_show_dashboard(self) -> None:
         self.push_screen(DashboardScreen(self.runtime))
@@ -87,6 +118,7 @@ def _parse_args() -> argparse.Namespace:
     for command in ("investigate", "report"):
         subparser = subparsers.add_parser(command)
         subparser.add_argument("investigation_id")
+    add_run_parser(subparsers)
     return parser.parse_args()
 
 
@@ -99,6 +131,7 @@ def main() -> None:
         runtime,
         investigation_id=getattr(args, "investigation_id", None),
         show_report=args.command == "report",
+        run_request=request_from_args(args) if args.command == "run" else None,
     )
     app.run()
 

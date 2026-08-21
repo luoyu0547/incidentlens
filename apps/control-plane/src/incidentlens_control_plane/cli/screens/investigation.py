@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
@@ -25,6 +27,7 @@ class InvestigationScreen(Screen):
         super().__init__()
         self.investigation_id = investigation_id
         self.runtime = runtime
+        self.events_ready = asyncio.Event()
 
     def compose(self) -> ComposeResult:
         yield Static("", id="workspace-title")
@@ -39,6 +42,7 @@ class InvestigationScreen(Screen):
         )
 
     def on_mount(self) -> None:
+        self.events_ready.set()
         self.set_interval(1.0, self.refresh_workspace)
         self.refresh_workspace()
         self.query_one("#command-bar", Input).focus()
