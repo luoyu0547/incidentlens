@@ -41,11 +41,11 @@ incidentlens report <investigation_id>
 
 ### 真实模型流程录制
 
-下方不是页面切换图：它回放了一次实际写入 Runtime 的模型运行。录制脚本启动一次性的受控 OpenSSH 容器，使用真实讯飞 MaaS `xopglm51`，模型先提出 `log_query`，运行时完成 schema、注册服务、路径与只读策略校验后才经 SSH 执行；第二回合再以持久化、脱敏的证据 ID 请求关联日志，最终形成引用证据的结论并生成双格式报告。
+下方不是页面切换图：它回放了一次实际写入 Runtime 的模型运行。录制脚本启动一次性的受控 OpenSSH 容器并调用真实 OpenAI-compatible 模型；模型先提出 `log_query`，运行时完成 schema、注册服务、路径与只读策略校验后才经 SSH 执行；第二回合再以持久化、脱敏的证据 ID 请求关联日志，最终形成引用证据的结论并生成双格式报告。
 
 ![真实模型 CLI 流程录制](docs/assets/incidentlens-live-workflow.gif)
 
-本次运行的原始、已脱敏记录见 [live-model-workflow.json](docs/assets/live-model-workflow.json)，实际生成的 [Markdown 报告](docs/assets/live-model-report.md) 与 [HTML 报告](docs/assets/live-model-report.html) 也一并保留。可在已配置 `XFYUN_MAAS_API_KEY` 的环境中复跑：
+本次运行的原始、已脱敏记录见 [live-model-workflow.json](docs/assets/live-model-workflow.json)，实际生成的 [Markdown 报告](docs/assets/live-model-report.md) 与 [HTML 报告](docs/assets/live-model-report.html) 也一并保留。可在已配置 OpenAI-compatible 模型环境变量后复跑：
 
 ```bash
 uv run python scripts/record_live_model_demo.py \
@@ -150,17 +150,16 @@ API 启动调查时需要明确 scope，例如主机日志范围：
 }
 ```
 
-默认使用确定性的 `FakeProvider`，用于可重复的离线调查和验收。设置 `.env` 后可启用讯飞星辰 MaaS 的 OpenAI 兼容模型：
+默认使用确定性的 `FakeProvider`，用于可重复的离线调查和验收。设置 `.env` 后可启用任意支持 Chat Completions 的 OpenAI-compatible 模型：
 
 ```dotenv
 INCIDENTLENS_AGENT_MODE=llm_agent
-INCIDENTLENS_LLM_ACTIVE_MODEL=xfyun-xopglm51
-XFYUN_MAAS_API_KEY=your_key
-# 可选；默认使用讯飞 Coding Plan 的 OpenAI 兼容地址
-INCIDENTLENS_LLM_BASE_URL=https://maas-coding-api.cn-huabei-1.xf-yun.com/v2
+INCIDENTLENS_LLM_ACTIVE_MODEL=deepseek-v4-flash
+INCIDENTLENS_LLM_BASE_URL=https://api.deepseek.com
+INCIDENTLENS_LLM_API_KEY=your_key
 ```
 
-运行时会将 `xfyun-` 前缀映射为讯飞实际 model ID（如 `xopglm51`）。无论使用 FakeProvider 还是真实模型，模型都只能通过同一受限的 `ModelProvider` 合约提出建议，不能绕过工具白名单、scope、证据校验或审批边界。
+模型 ID 会原样发送给所配置的 OpenAI-compatible API。无论使用 FakeProvider 还是真实模型，模型都只能通过同一受限的 `ModelProvider` 合约提出建议，不能绕过工具白名单、scope、证据校验或审批边界。
 
 ## 安全边界
 
@@ -184,7 +183,7 @@ uv run ruff check .
 uv run pytest tests/eval/test_harness_eval.py -q
 uv run python tests/eval/runner.py --json .incidentlens/harness-eval.json
 
-# Opt-in real MaaS invariants (reuses configured MaaS settings; skipped otherwise)
+# Opt-in real model invariants (reuses configured model settings; skipped otherwise)
 # Targets: foreign evidence, scope/policy bypass, and unapproved mutation = 0;
 # tool pairing and child exactly-once = 100%.
 INCIDENTLENS_RUN_LIVE_MODEL_TESTS=1 uv run pytest tests/integration/test_live_model_harness.py -q
@@ -230,10 +229,14 @@ apps/control-plane/src/incidentlens_control_plane/
 | 环境变量 | 用途 | 默认值 |
 | --- | --- | --- |
 | `INCIDENTLENS_DATA_DIR` | SQLite、加密备份库与报告输出目录 | `~/.incidentlens` |
+| `INCIDENTLENS_AGENT_MODE` | `fake` 或 `llm_agent` | `fake` |
+| `INCIDENTLENS_LLM_BASE_URL` | OpenAI-compatible API 根地址 | 无 |
+| `INCIDENTLENS_LLM_ACTIVE_MODEL` | 原样发送给 Provider 的模型 ID | 无 |
+| `INCIDENTLENS_LLM_API_KEY` | Provider API Key | 无 |
 | `INCIDENTLENS_RUN_LIVE_SSH` | 启用真实 SSH 集成测试 | 未设置（跳过） |
 | `INCIDENTLENS_RUN_LIVE_LOG_TESTS` | 启用真实日志集成测试 | 未设置（跳过） |
 | `INCIDENTLENS_RUN_LIVE_AGENT_TESTS` | 启用真实 Agent 集成测试 | 未设置（跳过） |
-| `INCIDENTLENS_RUN_LIVE_MODEL_TESTS` | 启用真实 MaaS harness invariant 测试 | 未设置（跳过） |
+| `INCIDENTLENS_RUN_LIVE_MODEL_TESTS` | 启用真实 model harness invariant 测试 | 未设置（跳过） |
 
 ## 当前范围
 

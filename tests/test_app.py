@@ -48,8 +48,9 @@ def _llm_settings(tmp_path: Path) -> RuntimeSettings:
     return RuntimeSettings(
         data_dir=tmp_path / "incidentlens",
         agent_mode="llm_agent",
-        xfyun_maas_api_key="test-key",
+        llm_api_key="test-key",
         llm_active_model="spark-x",
+        llm_base_url="https://llm.example/v1",
     )
 
 
@@ -57,16 +58,16 @@ def _fake_settings(tmp_path: Path) -> RuntimeSettings:
     return RuntimeSettings(data_dir=tmp_path / "incidentlens")
 
 
-def test_llm_runtime_injects_maas_compactor(tmp_path: Path) -> None:
-    from incidentlens_control_plane.investigation.xfyun_compactor import (
-        XfyunMaaSCompactor,
+def test_llm_runtime_injects_openai_compatible_compactor(tmp_path: Path) -> None:
+    from incidentlens_control_plane.investigation.openai_compactor import (
+        OpenAICompatibleCompactor,
     )
     from incidentlens_control_plane.remote_ops.fakes import FakeTransportFactory
     from incidentlens_control_plane.runtime import build_runtime
 
     settings = _llm_settings(tmp_path)
     runtime = build_runtime(settings, transport_factory=FakeTransportFactory())
-    assert isinstance(runtime.context_manager._compactor, XfyunMaaSCompactor)
+    assert isinstance(runtime.context_manager._compactor, OpenAICompatibleCompactor)
 
 
 def test_fake_runtime_does_not_inject_network_compactor(tmp_path: Path) -> None:

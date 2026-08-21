@@ -91,7 +91,7 @@ class HarnessTrace(BaseModel):
         conclusions = tuple(Conclusion.model_validate(item) for item in raw_conclusions)
         hooks = tuple(RuntimeEvent.model_validate(item) for item in raw_hooks)
         return cls(
-            scenario="real_maas",
+            scenario="real_model",
             investigation=investigation,
             run=run,
             rounds=rounds,

@@ -30,6 +30,13 @@ from incidentlens_control_plane.investigation.hooks import (
     HookRunner,
     RuntimeHookRecorder,
 )
+from incidentlens_control_plane.investigation.openai_compactor import (
+    OpenAICompatibleCompactor,
+)
+from incidentlens_control_plane.investigation.openai_provider import (
+    OpenAICompatibleConfig,
+    OpenAICompatibleProvider,
+)
 from incidentlens_control_plane.investigation.orchestrator import AgentOrchestrator
 from incidentlens_control_plane.investigation.recovery import RecoveryService
 from incidentlens_control_plane.investigation.registry_proposals import (
@@ -41,13 +48,6 @@ from incidentlens_control_plane.investigation.source_discovery import (
 )
 from incidentlens_control_plane.investigation.store import InvestigationStore
 from incidentlens_control_plane.investigation.tool_executor import ToolExecutor
-from incidentlens_control_plane.investigation.xfyun_compactor import (
-    XfyunMaaSCompactor,
-)
-from incidentlens_control_plane.investigation.xfyun_provider import (
-    XfyunMaaSConfig,
-    XfyunMaaSProvider,
-)
 from incidentlens_control_plane.logs.service import LogService
 from incidentlens_control_plane.logs.store import LogStore
 from incidentlens_control_plane.logs.subscriptions import LogSubscriptionManager
@@ -204,17 +204,22 @@ def build_runtime(
     provider = FakeProvider(fake_provider)
     compactor = None
     if settings.agent_mode == "llm_agent":
-        if not settings.xfyun_maas_api_key or not settings.llm_active_model:
+        if (
+            not settings.llm_api_key
+            or not settings.llm_active_model
+            or not settings.llm_base_url
+        ):
             raise ValueError(
-                "llm_agent 模式需要 XFYUN_MAAS_API_KEY 和 INCIDENTLENS_LLM_ACTIVE_MODEL"
+                "llm_agent 模式需要 INCIDENTLENS_LLM_API_KEY、"
+                "INCIDENTLENS_LLM_BASE_URL 和 INCIDENTLENS_LLM_ACTIVE_MODEL"
             )
-        maas_config = XfyunMaaSConfig(
-            api_key=settings.xfyun_maas_api_key,
+        provider_config = OpenAICompatibleConfig(
+            api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
-            model=settings.llm_active_model.removeprefix("xfyun-"),
+            model=settings.llm_active_model,
         )
-        provider = XfyunMaaSProvider(maas_config)
-        compactor = XfyunMaaSCompactor(maas_config)
+        provider = OpenAICompatibleProvider(provider_config)
+        compactor = OpenAICompatibleCompactor(provider_config)
     context_manager = AgentContextManager(
         investigation_store,
         policy=ContextBudgetPolicy(
@@ -238,6 +243,7 @@ def build_runtime(
         sessions=sessions,
         global_child_limit=settings.max_active_children,
         default_budget=settings.default_run_budget(),
+        max_provider_retries=settings.max_provider_retries,
         events=events,
         broker=broker,
         context_manager=context_manager,

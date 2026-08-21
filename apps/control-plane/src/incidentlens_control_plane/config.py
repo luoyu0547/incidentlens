@@ -51,6 +51,7 @@ class RuntimeSettings(BaseModel):
     )
     max_evidence_per_run: int = Field(default=100, ge=1, le=5_000)
     max_no_new_evidence_rounds: int = Field(default=3, ge=1, le=20)
+    max_provider_retries: int = Field(default=2, ge=0, le=10)
 
     # -- active context materialization ----------------------------------------
     # The token-based budget that bounds every provider turn.
@@ -86,12 +87,12 @@ class RuntimeSettings(BaseModel):
     report_output_dir: Path | None = None
     agent_mode: str = "fake"
     llm_active_model: str | None = None
-    llm_base_url: str = "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2"
-    xfyun_maas_api_key: str | None = None
+    llm_base_url: str | None = None
+    llm_api_key: str | None = None
 
     @classmethod
     def from_environment(cls) -> RuntimeSettings:
-        """Create settings from the INCIDENTLENS_DATA_DIR environment variable."""
+        """Create local runtime settings from ``INCIDENTLENS_*`` environment variables."""
         _load_local_dotenv()
         configured = os.environ.get("INCIDENTLENS_DATA_DIR")
         data_dir = Path(configured).expanduser() if configured else Path.home() / ".incidentlens"
@@ -101,11 +102,34 @@ class RuntimeSettings(BaseModel):
             report_output_dir=report_output_dir,
             agent_mode=os.environ.get("INCIDENTLENS_AGENT_MODE", "fake"),
             llm_active_model=os.environ.get("INCIDENTLENS_LLM_ACTIVE_MODEL"),
-            llm_base_url=os.environ.get(
-                "INCIDENTLENS_LLM_BASE_URL",
-                "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2",
+            llm_base_url=os.environ.get("INCIDENTLENS_LLM_BASE_URL"),
+            llm_api_key=os.environ.get("INCIDENTLENS_LLM_API_KEY"),
+            agent_context_window_tokens=_environment_int(
+                "INCIDENTLENS_AGENT_CONTEXT_WINDOW_TOKENS", 128_000
             ),
-            xfyun_maas_api_key=os.environ.get("XFYUN_MAAS_API_KEY"),
+            agent_context_max_output_tokens=_environment_int(
+                "INCIDENTLENS_AGENT_CONTEXT_MAX_OUTPUT_TOKENS", 8_000
+            ),
+            agent_context_reserve_tokens=_environment_int(
+                "INCIDENTLENS_AGENT_CONTEXT_RESERVE_TOKENS", 13_000
+            ),
+            agent_tool_result_budget_chars=_environment_int(
+                "INCIDENTLENS_AGENT_TOOL_RESULT_BUDGET_CHARS", 200_000
+            ),
+            agent_context_max_message_groups=_environment_int(
+                "INCIDENTLENS_AGENT_CONTEXT_MAX_MESSAGE_GROUPS", 50
+            ),
+            agent_context_keep_recent_tool_results=_environment_int(
+                "INCIDENTLENS_AGENT_CONTEXT_KEEP_RECENT_TOOL_RESULTS", 3
+            ),
+            max_rounds_per_run=_environment_int("INCIDENTLENS_MAX_ROUNDS_PER_RUN", 8),
+            max_tool_calls_per_run=_environment_int(
+                "INCIDENTLENS_MAX_TOOL_CALLS_PER_RUN", 16
+            ),
+            max_no_new_evidence_rounds=_environment_int(
+                "INCIDENTLENS_MAX_NO_NEW_EVIDENCE_ROUNDS", 3
+            ),
+            max_provider_retries=_environment_int("INCIDENTLENS_MAX_PROVIDER_RETRIES", 2),
         )
 
     def default_run_budget(self) -> AgentBudget:
@@ -144,3 +168,9 @@ def _load_local_dotenv() -> None:
             continue
         name, value = line.split("=", 1)
         os.environ.setdefault(name.strip(), value.strip().strip('"').strip("'"))
+
+
+def _environment_int(name: str, default: int) -> int:
+    """Read an optional integer override while keeping defaults explicit."""
+    value = os.environ.get(name)
+    return default if value is None else int(value)

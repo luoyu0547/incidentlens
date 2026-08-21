@@ -206,7 +206,11 @@ class InvestigationEventPublisher:
         )
 
     def agent_run_failed(
-        self, run: AgentRun, *, occurred_at: datetime | None = None
+        self,
+        run: AgentRun,
+        *,
+        reason: str | None = None,
+        occurred_at: datetime | None = None,
     ) -> RuntimeEvent:
         return self.emit(
             RuntimeEventType.AGENT_RUN_FAILED,
@@ -215,6 +219,7 @@ class InvestigationEventPublisher:
             investigation_id=run.investigation_id,
             kind=run.kind.value,
             status=run.status.value,
+            reason_preview=self._preview(reason) if reason else None,
         )
 
     def agent_run_cancelled(

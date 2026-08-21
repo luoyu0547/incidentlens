@@ -111,8 +111,8 @@ ToolExecutor 对输出设硬上限，并先将完整的脱敏结果写入 Eviden
 breaker，第 N 次尝试抛出 `CompactionCircuitOpen`，阻塞后续自动语义压缩；手动 compact 可
 探测已打开的 breaker，成功后重置失败计数。
 
-在生产 `llm_agent` 模式中，runtime 会用共享的 XFYUN MaaS 配置注入
-`XfyunMaaSCompactor`；它发送 tool-free 的结构化摘要请求，绝不执行模型提出的操作。fake
+在生产 `llm_agent` 模式中，runtime 会用共享的 OpenAI-compatible model 配置注入
+`OpenAICompatibleCompactor`；它发送 tool-free 的结构化摘要请求，绝不执行模型提出的操作。fake
 模式不注入网络 compactor，保持离线、确定性的测试行为。`agent_reactive_keep_recent_groups`
 控制响应式压缩保留的完整 transcript 组数。模型返回 prompt-too-long 时最多执行一次响应式
 压缩并重试；再次失败则安全暂停调查，不会无限重试。

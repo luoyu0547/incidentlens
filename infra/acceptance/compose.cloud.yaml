@@ -1,11 +1,18 @@
 services:
+  api-gateway:
+    # Docker Compose 2.24+ supports !override for replacing, rather than
+    # appending to, the development binding in docker-compose.yml.
+    ports: !override ["127.0.0.1:18080:8080"]
   postgres:
-    ports: ["127.0.0.1:5432:5432"]
+    # Keep cloud acceptance isolated from any pre-existing local services on the
+    # target host. These bindings remain loopback-only; containers still use
+    # their normal internal ports.
+    ports: ["127.0.0.1:15432:5432"]
   order-stable:
-    ports: ["127.0.0.1:5001:5000"]
+    ports: ["127.0.0.1:15001:5000"]
   order-canary:
-    ports: ["127.0.0.1:5002:5000"]
+    ports: ["127.0.0.1:15002:5000"]
   payment-service:
-    ports: ["127.0.0.1:5003:5000"]
+    ports: ["127.0.0.1:15003:5000"]
   inventory-service:
-    ports: ["127.0.0.1:5004:5000"]
+    ports: ["127.0.0.1:15004:5000"]

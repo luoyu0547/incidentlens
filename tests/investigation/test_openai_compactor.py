@@ -1,4 +1,4 @@
-"""Tests for the tool-free XFYUN MaaS compactor adapter.
+"""Tests for the tool-free OpenAI-compatible compactor adapter.
 
 Covers: payload construction (no executable tools), strict SessionMemory
 response parsing, malformed/empty provider shapes, transport error redaction,
@@ -17,6 +17,11 @@ from incidentlens_control_plane.investigation.compactor import (
     CompactionRejected,
     CompactionRequest,
 )
+from incidentlens_control_plane.investigation.openai_compactor import (
+    OpenAICompatibleCompactor,
+    _strip_fence,
+)
+from incidentlens_control_plane.investigation.openai_provider import OpenAICompatibleConfig
 from incidentlens_control_plane.investigation.types import (
     MessageRole,
     TextBlock,
@@ -24,11 +29,6 @@ from incidentlens_control_plane.investigation.types import (
     ToolUseBlock,
     TranscriptMessage,
 )
-from incidentlens_control_plane.investigation.xfyun_compactor import (
-    XfyunMaaSCompactor,
-    _strip_fence,
-)
-from incidentlens_control_plane.investigation.xfyun_provider import XfyunMaaSConfig
 
 NOW = datetime(2026, 8, 18, 10, 0, 0, tzinfo=UTC)
 
@@ -40,7 +40,7 @@ NOW = datetime(2026, 8, 18, 10, 0, 0, tzinfo=UTC)
 
 def http_error(status: int) -> HTTPError:
     return HTTPError(
-        url="https://maas.example.com/v1/chat/completions",
+        url="https://llm.example.com/v1/chat/completions",
         code=status,
         msg="error",
         hdrs={},
@@ -63,7 +63,7 @@ class _FakeResponse:
 
 
 def _response(payload: dict[str, object]) -> dict[str, object]:
-    """Wrap a SessionMemory-like dict in a fake MaaS response envelope."""
+    """Wrap a SessionMemory-like dict in a fake model response envelope."""
     return {
         "choices": [
             {
@@ -140,10 +140,10 @@ def _sample_transcript() -> tuple[TranscriptMessage, ...]:
 
 
 @pytest.fixture
-def config() -> XfyunMaaSConfig:
-    return XfyunMaaSConfig(
+def config() -> OpenAICompatibleConfig:
+    return OpenAICompatibleConfig(
         api_key="test-key",
-        base_url="https://maas.example.com/v1",
+        base_url="https://llm.example.com/v1",
         model="spark-x",
     )
 
@@ -167,11 +167,11 @@ def compact_request() -> CompactionRequest:
 
 @pytest.mark.asyncio
 async def test_compactor_sends_no_executable_tools(
-    config: XfyunMaaSConfig,
+    config: OpenAICompatibleConfig,
     compact_request: CompactionRequest,
     memory_payload: dict[str, object],
 ) -> None:
-    compactor = XfyunMaaSCompactor(config)
+    compactor = OpenAICompatibleCompactor(config)
     with patch.object(compactor, "_post", return_value=_response(memory_payload)) as post:
         memory = await compactor.compact(compact_request)
     payload = post.call_args.args[0]
@@ -182,9 +182,9 @@ async def test_compactor_sends_no_executable_tools(
 
 @pytest.mark.asyncio
 async def test_compactor_rejects_malformed_provider_shape(
-    config: XfyunMaaSConfig, compact_request: CompactionRequest
+    config: OpenAICompatibleConfig, compact_request: CompactionRequest
 ) -> None:
-    compactor = XfyunMaaSCompactor(config)
+    compactor = OpenAICompatibleCompactor(config)
     with patch.object(compactor, "_post", return_value={"choices": []}):
         with pytest.raises(CompactionRejected, match="invalid"):
             await compactor.compact(compact_request)
@@ -197,13 +197,13 @@ async def test_compactor_rejects_malformed_provider_shape(
 
 @pytest.mark.asyncio
 async def test_compactor_does_not_repair_wrong_identity(
-    config: XfyunMaaSConfig,
+    config: OpenAICompatibleConfig,
     compact_request: CompactionRequest,
     memory_payload: dict[str, object],
 ) -> None:
     """A wrong echoed identity must pass through unchanged for the manager to reject."""
     memory_payload = {**memory_payload, "agent_run_id": "other-run"}
-    compactor = XfyunMaaSCompactor(config)
+    compactor = OpenAICompatibleCompactor(config)
     with patch.object(compactor, "_post", return_value=_response(memory_payload)):
         memory = await compactor.compact(compact_request)
     assert memory.agent_run_id == "other-run"
@@ -211,13 +211,13 @@ async def test_compactor_does_not_repair_wrong_identity(
 
 @pytest.mark.asyncio
 async def test_compactor_does_not_repair_foreign_evidence(
-    config: XfyunMaaSConfig,
+    config: OpenAICompatibleConfig,
     compact_request: CompactionRequest,
     memory_payload: dict[str, object],
 ) -> None:
     """Foreign evidence is not filtered by the adapter; the validator rejects it."""
     memory_payload = {**memory_payload, "evidence_ids": ["foreign"]}
-    compactor = XfyunMaaSCompactor(config)
+    compactor = OpenAICompatibleCompactor(config)
     with patch.object(compactor, "_post", return_value=_response(memory_payload)):
         memory = await compactor.compact(compact_request)
     assert memory.evidence_ids == ("foreign",)
@@ -225,13 +225,13 @@ async def test_compactor_does_not_repair_foreign_evidence(
 
 @pytest.mark.asyncio
 async def test_compactor_requires_full_strict_memory_shape(
-    config: XfyunMaaSConfig,
+    config: OpenAICompatibleConfig,
     compact_request: CompactionRequest,
     memory_payload: dict[str, object],
 ) -> None:
     """A payload missing a mandatory semantic field is rejected, never filled in."""
     del memory_payload["objective"]
-    compactor = XfyunMaaSCompactor(config)
+    compactor = OpenAICompatibleCompactor(config)
     with patch.object(compactor, "_post", return_value=_response(memory_payload)):
         with pytest.raises(CompactionRejected, match="invalid"):
             await compactor.compact(compact_request)
@@ -258,11 +258,11 @@ def test_compaction_request_carries_investigation_identity(
 
 
 def test_compactor_maps_429_to_rejected_without_response_body(
-    config: XfyunMaaSConfig,
+    config: OpenAICompatibleConfig,
 ) -> None:
-    compactor = XfyunMaaSCompactor(config)
+    compactor = OpenAICompatibleCompactor(config)
     with patch(
-        "incidentlens_control_plane.investigation.xfyun_compactor.urlopen",
+        "incidentlens_control_plane.investigation.openai_compactor.urlopen",
         side_effect=http_error(429),
     ):
         with pytest.raises(CompactionRejected) as excinfo:
@@ -271,10 +271,10 @@ def test_compactor_maps_429_to_rejected_without_response_body(
     assert "429" in str(excinfo.value)
 
 
-def test_compactor_maps_connection_failure_to_rejected(config: XfyunMaaSConfig) -> None:
-    compactor = XfyunMaaSCompactor(config)
+def test_compactor_maps_connection_failure_to_rejected(config: OpenAICompatibleConfig) -> None:
+    compactor = OpenAICompatibleCompactor(config)
     with patch(
-        "incidentlens_control_plane.investigation.xfyun_compactor.urlopen",
+        "incidentlens_control_plane.investigation.openai_compactor.urlopen",
         side_effect=URLError("secret connection detail"),
     ):
         with pytest.raises(CompactionRejected) as excinfo:
@@ -309,10 +309,10 @@ def test_strip_fence_rejects_non_string() -> None:
 
 
 def test_compaction_payload_has_system_and_user_messages(
-    config: XfyunMaaSConfig,
+    config: OpenAICompatibleConfig,
     compact_request: CompactionRequest,
 ) -> None:
-    from incidentlens_control_plane.investigation.xfyun_compactor import (
+    from incidentlens_control_plane.investigation.openai_compactor import (
         _compaction_messages,
     )
 
@@ -323,10 +323,10 @@ def test_compaction_payload_has_system_and_user_messages(
 
 
 def test_expected_output_includes_identity_fields(
-    config: XfyunMaaSConfig,
+    config: OpenAICompatibleConfig,
     compact_request: CompactionRequest,
 ) -> None:
-    from incidentlens_control_plane.investigation.xfyun_compactor import (
+    from incidentlens_control_plane.investigation.openai_compactor import (
         _serialize_expected_output,
     )
 

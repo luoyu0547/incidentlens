@@ -1679,6 +1679,31 @@ async def test_tool_result_is_in_next_model_conversation(runtime: SimpleNamespac
 
 
 @pytest.mark.asyncio
+async def test_tool_turn_keeps_hypotheses_in_next_model_conversation(
+    runtime: SimpleNamespace,
+) -> None:
+    runtime.fake.script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=request_registry_info().tool_requests,
+                hypotheses=(_hypothesis("separate payment policy regression"),),
+            ),
+            completed_step("ev-1"),
+        ],
+    )
+    await runtime.orchestrator.run("run-1")
+
+    second = runtime.fake.requests("run-1")[1]
+    assert any(
+        isinstance(block, TextBlock)
+        and "separate payment policy regression" in block.text
+        for message in second.messages
+        for block in message.blocks
+    )
+
+
+@pytest.mark.asyncio
 async def test_prompt_too_long_compacts_once_then_retries(runtime: SimpleNamespace) -> None:
     runtime.fake.script("run-1", [PromptTooLongError(), completed_step("ev-1")])
     run = await runtime.orchestrator.run("run-1")

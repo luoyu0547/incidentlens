@@ -1,4 +1,4 @@
-"""Run the real MaaS provider against a disposable, controlled SSH target.
+"""Run the real model provider against a disposable, controlled SSH target.
 
 This is a documentation-recording harness, not a mock: it creates a fresh SSH
 key, starts ``infra/test-ssh``, writes a known log through the real SSH
@@ -161,7 +161,7 @@ async def run_live_model_workflow(
         runtime.projects.create(
             ProjectRegistration(
                 project_id=project_id,
-                display_name="Live MaaS recording",
+                display_name="Live model recording",
                 targets=(target,),
                 services=(service,),
             ),

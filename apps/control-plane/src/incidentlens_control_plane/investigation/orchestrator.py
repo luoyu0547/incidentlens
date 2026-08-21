@@ -836,38 +836,43 @@ class AgentOrchestrator:
         delegation, the stop signal and any textual status remain a bounded text
         JSON block (the structured copy stays in the domain stores).
         """
-        if result.tool_requests:
-            blocks = tuple(
+        payload = {
+            "hypotheses": [
+                proposal.model_dump(mode="json")
+                for proposal in result.hypotheses
+            ],
+            "conclusions": [
+                conclusion.model_dump(mode="json")
+                for conclusion in result.conclusions
+            ],
+            "delegation": (
+                result.child_delegation.model_dump(mode="json")
+                if result.child_delegation is not None
+                else None
+            ),
+            "stop": (
+                result.stop_signal.model_dump(mode="json")
+                if result.stop_signal is not None
+                else None
+            ),
+        }
+        text = json.dumps(payload, default=str, sort_keys=True)[:100_000]
+        blocks = (
+            *(
                 ToolUseBlock(
                     tool_call_id=request.tool_call_id,
                     tool_name=request.tool_name,
                     arguments=request.arguments,
                 )
                 for request in result.tool_requests
-            )
-        else:
-            payload = {
-                "hypotheses": [
-                    proposal.model_dump(mode="json")
-                    for proposal in result.hypotheses
-                ],
-                "conclusions": [
-                    conclusion.model_dump(mode="json")
-                    for conclusion in result.conclusions
-                ],
-                "delegation": (
-                    result.child_delegation.model_dump(mode="json")
-                    if result.child_delegation is not None
-                    else None
-                ),
-                "stop": (
-                    result.stop_signal.model_dump(mode="json")
-                    if result.stop_signal is not None
-                    else None
-                ),
-            }
-            text = json.dumps(payload, default=str, sort_keys=True)[:100_000]
-            blocks = (TextBlock(text=text),)
+            ),
+            # Tool-use turns must preserve the model's bounded planning state
+            # too.  Otherwise hypotheses declared alongside observations are
+            # persisted in SQLite but disappear from the next provider turn,
+            # making it impossible for the model to coordinate a genuine
+            # multi-path investigation or decide when compaction is due.
+            TextBlock(text=text),
+        )
         return TranscriptMessage(
             agent_run_id=run.agent_run_id,
             sequence=self._next_sequence(run.agent_run_id),
@@ -1035,7 +1040,11 @@ class AgentOrchestrator:
         self, run: AgentRun, investigation: Investigation, now: datetime, *, reason: str
     ) -> AgentRun:
         self._transition_run(
-            run, AgentRunStatus.FAILED, now=now, stop_reason=StopReason.FAILED
+            run,
+            AgentRunStatus.FAILED,
+            now=now,
+            stop_reason=StopReason.FAILED,
+            failure_reason=reason,
         )
         if run.kind is AgentRunKind.PARENT:
             self._transition_investigation(
@@ -1737,6 +1746,8 @@ class AgentOrchestrator:
                 status=run.status.value,
                 metadata={"parent_run_id": package.parent_run_id},
             )
+            if self._events_pub is not None:
+                self._events_pub.child_run_started(run, occurred_at=self._now())
             async with self._child_semaphore:
                 if run.scope.scope is LogScope.CONTAINER:
                     container_session_id = await self._spawn_container_session(run)
@@ -2294,6 +2305,7 @@ class AgentOrchestrator:
         *,
         now: datetime,
         stop_reason: StopReason | None = None,
+        failure_reason: str | None = None,
     ) -> AgentRun:
         previous = run.status.value
         updated = self._store.transition_agent_run_status(
@@ -2307,7 +2319,9 @@ class AgentOrchestrator:
             if target is AgentRunStatus.COMPLETED:
                 self._events_pub.agent_run_completed(updated, occurred_at=now)
             elif target is AgentRunStatus.FAILED:
-                self._events_pub.agent_run_failed(updated, occurred_at=now)
+                self._events_pub.agent_run_failed(
+                    updated, reason=failure_reason, occurred_at=now
+                )
             elif target is AgentRunStatus.CANCELLED:
                 self._events_pub.agent_run_cancelled(updated, occurred_at=now)
             if previous == AgentRunStatus.CREATED.value and target is AgentRunStatus.RUNNING:
