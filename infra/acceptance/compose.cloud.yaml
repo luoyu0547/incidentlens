@@ -1,0 +1,11 @@
+services:
+  postgres:
+    ports: ["127.0.0.1:5432:5432"]
+  order-stable:
+    ports: ["127.0.0.1:5001:5000"]
+  order-canary:
+    ports: ["127.0.0.1:5002:5000"]
+  payment-service:
+    ports: ["127.0.0.1:5003:5000"]
+  inventory-service:
+    ports: ["127.0.0.1:5004:5000"]
