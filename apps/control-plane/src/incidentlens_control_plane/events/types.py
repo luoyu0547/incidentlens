@@ -53,6 +53,15 @@ class RuntimeEventType(StrEnum):
     AGENT_RUN_CANCELLED = "agent_run.cancelled"
     AGENT_HOOK = "agent_hook"
 
+    MODEL_ROUND_STARTED = "model_round.started"
+    MODEL_ROUND_COMPLETED = "model_round.completed"
+    TOOL_PROPOSED = "tool.proposed"
+    POLICY_DECIDED = "policy.decided"
+    TODO_CHANGED = "todo.changed"
+    HYPOTHESIS_CHANGED = "hypothesis.changed"
+    CONTEXT_COMPACTED = "context.compacted"
+    SAFETY_STATE_CHANGED = "safety_state.changed"
+
     TOOL_CALL_STARTED = "tool_call.started"
     TOOL_CALL_STATUS_CHANGED = "tool_call.status_changed"
     TOOL_CALL_COMPLETED = "tool_call.completed"

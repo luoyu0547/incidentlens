@@ -22,10 +22,14 @@ from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.events.types import RuntimeEvent, RuntimeEventType
 from incidentlens_control_plane.investigation.types import (
     AgentRun,
+    Hypothesis,
     Investigation,
     RegistryUpdateProposal,
+    SessionMemory,
+    TodoItem,
     ToolCall,
 )
+from incidentlens_control_plane.logs.redaction import redact_message
 
 _JsonValue = str | int | float | bool | None | list[Any] | dict[str, Any]
 
@@ -224,6 +228,161 @@ class InvestigationEventPublisher:
             kind=run.kind.value,
             status=run.status.value,
         )
+
+    # -- semantic agent lifecycle ----------------------------------------------
+
+    def model_round_started(
+        self, run: AgentRun, *, round_number: int, occurred_at: datetime
+    ) -> RuntimeEvent:
+        return self.emit(
+            RuntimeEventType.MODEL_ROUND_STARTED,
+            occurred_at=occurred_at,
+            run_id=run.agent_run_id,
+            investigation_id=run.investigation_id,
+            round_number=round_number,
+            status=run.status.value,
+        )
+
+    def model_round_completed(
+        self,
+        run: AgentRun,
+        *,
+        round_number: int,
+        input_tokens: int,
+        output_tokens: int,
+        output_bytes: int,
+        duration_ms: int,
+        stop_reason: str | None,
+        occurred_at: datetime,
+    ) -> RuntimeEvent:
+        return self.emit(
+            RuntimeEventType.MODEL_ROUND_COMPLETED,
+            occurred_at=occurred_at,
+            run_id=run.agent_run_id,
+            investigation_id=run.investigation_id,
+            round_number=round_number,
+            status=run.status.value,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            output_bytes=output_bytes,
+            duration_ms=max(0, duration_ms),
+            stop_reason=stop_reason,
+        )
+
+    def tool_proposed(
+        self,
+        run: AgentRun,
+        *,
+        tool_call_id: str,
+        provider_tool_call_id: str | None,
+        tool_name: str,
+        arguments: dict[str, Any],
+        occurred_at: datetime,
+    ) -> RuntimeEvent:
+        return self.emit(
+            RuntimeEventType.TOOL_PROPOSED,
+            occurred_at=occurred_at,
+            run_id=run.agent_run_id,
+            investigation_id=run.investigation_id,
+            tool_call_id=tool_call_id,
+            provider_tool_call_id=provider_tool_call_id,
+            tool_name=tool_name,
+            arguments_preview=self._preview(arguments),
+            status="proposed",
+        )
+
+    def policy_decided(
+        self,
+        run: AgentRun,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        decision: str,
+        requires_approval: bool,
+        occurred_at: datetime,
+    ) -> RuntimeEvent:
+        return self.emit(
+            RuntimeEventType.POLICY_DECIDED,
+            occurred_at=occurred_at,
+            run_id=run.agent_run_id,
+            investigation_id=run.investigation_id,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            decision=decision,
+            requires_approval=requires_approval,
+        )
+
+    def todo_changed(
+        self, run: AgentRun, items: tuple[TodoItem, ...], *, occurred_at: datetime
+    ) -> RuntimeEvent:
+        counts = {
+            status: sum(item.status.value == status for item in items)
+            for status in ("pending", "in_progress", "completed")
+        }
+        return self.emit(
+            RuntimeEventType.TODO_CHANGED,
+            occurred_at=occurred_at,
+            run_id=run.agent_run_id,
+            investigation_id=run.investigation_id,
+            total=len(items),
+            **counts,
+        )
+
+    def hypothesis_changed(
+        self, hypothesis: Hypothesis, *, occurred_at: datetime
+    ) -> RuntimeEvent:
+        return self.emit(
+            RuntimeEventType.HYPOTHESIS_CHANGED,
+            occurred_at=occurred_at,
+            run_id=hypothesis.agent_run_id,
+            hypothesis_id=hypothesis.hypothesis_id,
+            status=hypothesis.status.value,
+            summary_preview=self._preview(hypothesis.summary),
+            evidence_count=len(hypothesis.evidence_ids),
+        )
+
+    def context_compacted(
+        self,
+        run: AgentRun,
+        memory: SessionMemory,
+        *,
+        mode: str,
+        occurred_at: datetime,
+    ) -> RuntimeEvent:
+        return self.emit(
+            RuntimeEventType.CONTEXT_COMPACTED,
+            occurred_at=occurred_at,
+            run_id=run.agent_run_id,
+            investigation_id=run.investigation_id,
+            mode=mode,
+            memory_revision=memory.revision,
+            through_sequence=memory.through_transcript_sequence,
+            recipe_count=len(memory.reacquisition_recipes),
+            immutable_count=len(memory.immutable_observations),
+            pending_count=len(memory.pending_actions),
+            safety_count=len(memory.safety_state),
+        )
+
+    def safety_state_changed(
+        self,
+        run: AgentRun,
+        *,
+        status: str,
+        reason: str,
+        occurred_at: datetime,
+    ) -> RuntimeEvent:
+        return self.emit(
+            RuntimeEventType.SAFETY_STATE_CHANGED,
+            occurred_at=occurred_at,
+            run_id=run.agent_run_id,
+            investigation_id=run.investigation_id,
+            status=status,
+            reason_preview=self._preview(reason),
+        )
+
+    @staticmethod
+    def _preview(value: object, width: int = 600) -> str:
+        return redact_message(str(value), max_length=width).message_redacted
 
     # -- tool calls -----------------------------------------------------------
 

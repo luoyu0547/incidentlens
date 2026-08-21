@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -409,6 +410,11 @@ class AgentOrchestrator:
             return self._store.get_agent_run(agent_run_id)
 
         self._write_checkpoint(run, sequence=before_seq, round_number=round_number, now=now)
+        if self._events_pub is not None:
+            self._events_pub.model_round_started(
+                run, round_number=round_number, occurred_at=now
+            )
+        provider_started = time.monotonic()
 
         try:
             request = self._build_request(run, investigation, round_number, child_reports)
@@ -485,6 +491,22 @@ class AgentOrchestrator:
         run = self._bump_usage(run, rounds=run.usage.rounds + 1)
         self._store.update_agent_run(run)
         run = self._store.get_agent_run(agent_run_id)
+        if self._events_pub is not None:
+            stop_reason = (
+                result.stop_signal.stop_reason.value
+                if result.stop_signal is not None
+                else None
+            )
+            self._events_pub.model_round_completed(
+                run,
+                round_number=round_number,
+                input_tokens=result.usage.input_tokens,
+                output_tokens=result.usage.output_tokens,
+                output_bytes=result.usage.output_bytes,
+                duration_ms=int((time.monotonic() - provider_started) * 1_000),
+                stop_reason=stop_reason,
+                occurred_at=self._now(),
+            )
         self._append_round_summary(run, round_number, result.usage, now)
 
         run = self._bump_usage(
@@ -506,6 +528,28 @@ class AgentOrchestrator:
         # Provider IDs only correlate blocks inside this turn. Persist and execute
         # harness-allocated IDs so two runs may safely receive the same provider ID.
         result = self._namespace_tool_requests(run, result)
+        if self._events_pub is not None:
+            for proposal in result.tool_requests:
+                self._events_pub.tool_proposed(
+                    run,
+                    tool_call_id=proposal.tool_call_id,
+                    provider_tool_call_id=proposal.provider_tool_call_id,
+                    tool_name=proposal.tool_name,
+                    arguments=proposal.arguments,
+                    occurred_at=self._now(),
+                )
+                self._events_pub.policy_decided(
+                    run,
+                    tool_call_id=proposal.tool_call_id,
+                    tool_name=proposal.tool_name,
+                    decision="approval_required"
+                    if self._executor.requires_approval(proposal.tool_name)
+                    else "allowed",
+                    requires_approval=self._executor.requires_approval(
+                        proposal.tool_name
+                    ),
+                    occurred_at=self._now(),
+                )
 
         # Step 4: append the assistant message BEFORE executing any tool or
         # spawning any child (append-before-act).  On an append failure the
@@ -525,6 +569,8 @@ class AgentOrchestrator:
         for proposal in result.hypotheses:
             hypothesis = self._materialize_hypothesis(run, proposal, now)
             self._store.create_hypothesis(hypothesis)
+            if self._events_pub is not None:
+                self._events_pub.hypothesis_changed(hypothesis, occurred_at=now)
             run = run.model_copy(
                 update={"hypotheses": run.hypotheses + (hypothesis,)}
             )
@@ -1009,6 +1055,11 @@ class AgentOrchestrator:
         stop_reason: StopReason,
     ) -> None:
         self._transition_run(run, run_status, now=now, stop_reason=stop_reason)
+        if self._events_pub is not None:
+            current = self._store.get_agent_run(run.agent_run_id)
+            self._events_pub.safety_state_changed(
+                current, status=run_status.value, reason=reason, occurred_at=now
+            )
         if run.kind is AgentRunKind.PARENT:
             self._transition_investigation(
                 investigation, self._investigation_pause(run_status), now=now,
@@ -1438,7 +1489,11 @@ class AgentOrchestrator:
             )
             compact_status = "failed"
             try:
-                await self._context.semantic_compact(run, manual=True)
+                memory = await self._context.semantic_compact(run, manual=True)
+                if self._events_pub is not None:
+                    self._events_pub.context_compacted(
+                        run, memory, mode="manual", occurred_at=self._now()
+                    )
                 compact_status = "completed"
                 result_block = ToolResultBlock(
                     tool_call_id=block.tool_call_id,
