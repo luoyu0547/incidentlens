@@ -29,7 +29,7 @@
 - `investigation/context.py`: token estimation, active-context materialization, deterministic compression, and post-compact restoration.
 - `investigation/compactor.py`: semantic compactor contract, schema validation, and failure circuit breaker.
 - `investigation/provider.py`: conversation request contract and typed prompt-too-long error.
-- `investigation/xfyun_provider.py`: mapping active messages to the OpenAI-compatible API and provider error classification.
+- `investigation/openai_provider.py`: mapping active messages to the OpenAI-compatible API and provider error classification.
 - `investigation/fake_provider.py`: scripted conversation provider and compactor responses for deterministic tests.
 - `investigation/tools.py`: `todo_write` schema and concurrency metadata.
 - `investigation/tool_executor.py`: persistent `todo_write` handler and execution-result-to-message conversion support.
@@ -42,7 +42,7 @@
 - `tests/investigation/test_compactor.py`: semantic compactor validation and breaker behavior.
 - `tests/investigation/test_orchestrator.py`: end-to-end loop, Todo, reactive retry, and child isolation.
 - `tests/investigation/test_recovery.py`: restart reconstruction and no-replay guarantees.
-- `tests/investigation/test_xfyun_provider.py`: message mapping and prompt-too-long classification.
+- `tests/investigation/test_openai_provider.py`: message mapping and prompt-too-long classification.
 - `tests/web/test_investigations_api.py`: transcript, memory, and plan inspection APIs.
 
 ---
@@ -255,10 +255,10 @@ git commit -m "feat(agent): persist transcript and work plan"
 
 **Files:**
 - Modify: `apps/control-plane/src/incidentlens_control_plane/investigation/provider.py`
-- Modify: `apps/control-plane/src/incidentlens_control_plane/investigation/xfyun_provider.py`
+- Modify: `apps/control-plane/src/incidentlens_control_plane/investigation/openai_provider.py`
 - Modify: `apps/control-plane/src/incidentlens_control_plane/investigation/fake_provider.py`
 - Modify: `tests/investigation/test_fake_provider.py`
-- Modify: `tests/investigation/test_xfyun_provider.py`
+- Modify: `tests/investigation/test_openai_provider.py`
 
 **Interfaces:**
 - Consumes: `TranscriptMessage` from Task 1.
@@ -284,15 +284,15 @@ async def test_provider_receives_continuous_messages() -> None:
 
 
 def test_http_413_is_prompt_too_long(provider_config) -> None:
-    provider = XfyunMaaSProvider(provider_config)
-    with patch("incidentlens_control_plane.investigation.xfyun_provider.urlopen", side_effect=http_error(413)):
+    provider = OpenAICompatibleProvider(provider_config)
+    with patch("incidentlens_control_plane.investigation.openai_provider.urlopen", side_effect=http_error(413)):
         with pytest.raises(PromptTooLongError):
             provider._post({"messages": []})
 ```
 
 - [ ] **Step 2: Run provider tests and verify failure**
 
-Run: `uv run pytest tests/investigation/test_fake_provider.py tests/investigation/test_xfyun_provider.py -q`
+Run: `uv run pytest tests/investigation/test_fake_provider.py tests/investigation/test_openai_provider.py -q`
 
 Expected: FAIL because `ConversationRequest` and `PromptTooLongError` are missing.
 
@@ -345,14 +345,14 @@ Store received requests per run and continue returning the existing scripted `Ag
 
 - [ ] **Step 6: Run provider tests**
 
-Run: `uv run pytest tests/investigation/test_fake_provider.py tests/investigation/test_xfyun_provider.py -q`
+Run: `uv run pytest tests/investigation/test_fake_provider.py tests/investigation/test_openai_provider.py -q`
 
 Expected: PASS.
 
 - [ ] **Step 7: Commit Task 2**
 
 ```bash
-git add apps/control-plane/src/incidentlens_control_plane/investigation/provider.py apps/control-plane/src/incidentlens_control_plane/investigation/xfyun_provider.py apps/control-plane/src/incidentlens_control_plane/investigation/fake_provider.py tests/investigation/test_fake_provider.py tests/investigation/test_xfyun_provider.py
+git add apps/control-plane/src/incidentlens_control_plane/investigation/provider.py apps/control-plane/src/incidentlens_control_plane/investigation/openai_provider.py apps/control-plane/src/incidentlens_control_plane/investigation/fake_provider.py tests/investigation/test_fake_provider.py tests/investigation/test_openai_provider.py
 git commit -m "refactor(agent): send continuous model conversations"
 ```
 

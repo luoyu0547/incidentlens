@@ -152,10 +152,9 @@
 **Files:** add redacted `docs/cloud-acceptance/hard-incident/` manifest/final matrix; add `docs/assets/hard-incident.cast`, `.txt`, `.trace.jsonl`, Markdown and HTML report.
 
 - [ ] Provision with `scripts/cloud_acceptance_target.sh provision --host incidentlens-tencent` and verify the four pre-repair matrix cells.
-- [ ] Run the exact `INCIDENTLENS_DATA_DIR=... uv run --env-file .env incidentlens run ... --record ...` command from the spec; perform all approvals in the same TUI.
+- [ ] Run the exact command from the spec with `INCIDENTLENS_DATA_DIR="$PWD/artifacts/hard-cloud-runtime"`, `--record "$PWD/artifacts/hard-incident.cast"`, project `tencent-cloud-acceptance`, target `tencent-cvm`, service `api-gateway`, host scope, and the approved Chinese symptom; perform all approvals in the same TUI.
 - [ ] Confirm the trace shows compaction followed by a fresh remote Observation, both root causes, two approved changes, verification, rollback reproduction, reapply and final matrix success.
 - [ ] Redact and hash artifacts; record investigation/run IDs, model, UTC timestamps, target label and evaluator version in the manifest.
 - [ ] Run `uv run ruff check . && uv run pytest -q` and the cloud evaluator from the published trace/report/matrix.
 - [ ] Update README and runtime verification docs with the honest controlled-scenario scope and limitations.
 - [ ] Commit: `docs: publish real hard cloud incident run`.
-

@@ -2,18 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Connect the existing semantic compaction contract to the configured XFYUN MaaS runtime and prove overflow recovery and failure behavior work outside test-only wiring.
+**Goal:** Connect the existing semantic compaction contract to the configured OpenAI-compatible model runtime and prove overflow recovery and failure behavior work outside test-only wiring.
 
-**Architecture:** Add one tool-free MaaS compactor adapter beside the existing investigation provider, inject it only in `llm_agent` mode, and move the existing breaker/tail literals into `ContextBudgetPolicy`. Preserve the current transcript, memory, validation, and one-shot retry mechanisms.
+**Architecture:** Add one tool-free OpenAI-compatible compactor adapter beside the existing investigation provider, inject it only in `llm_agent` mode, and move the existing breaker/tail literals into `ContextBudgetPolicy`. Preserve the current transcript, memory, validation, and one-shot retry mechanisms.
 
-**Tech Stack:** Python 3.12, asyncio, urllib OpenAI-compatible MaaS API, Pydantic, SQLite, pytest.
+**Tech Stack:** Python 3.12, asyncio, urllib OpenAI-compatible OpenAI-compatible API, Pydantic, SQLite, pytest.
 
 **Spec:** `docs/superpowers/specs/2026-08-18-runtime-context-compactor-design.md`
 
 ## Global Constraints
 
 - Do not change transcript grouping, Session Memory fields, Todo restoration, evidence ownership, or compact-boundary persistence.
-- Compactor requests contain no executable tools; use `tools: []` only if the MaaS endpoint requires the field.
+- Compactor requests contain no executable tools; use `tools: []` only if the OpenAI-compatible endpoint requires the field.
 - Semantic compaction runs only for explicit `compact_context` or provider-reported context overflow.
 - Never overwrite the previous valid memory or boundary after a failed compaction.
 - A provider overflow gets at most one reactive compact and one retry per round.
@@ -124,25 +124,25 @@ git add apps/control-plane/src/incidentlens_control_plane/investigation/context.
 git commit -m "fix(agent): wire context compaction limits"
 ```
 
-### Task 2: Implement the tool-free MaaS compactor adapter
+### Task 2: Implement the tool-free OpenAI-compatible compactor adapter
 
 **Files:**
-- Create: `apps/control-plane/src/incidentlens_control_plane/investigation/xfyun_compactor.py`
+- Create: `apps/control-plane/src/incidentlens_control_plane/investigation/openai_compactor.py`
 - Modify: `apps/control-plane/src/incidentlens_control_plane/investigation/compactor.py:35`
 - Modify: `apps/control-plane/src/incidentlens_control_plane/investigation/context.py:752`
-- Test: `tests/investigation/test_xfyun_compactor.py`
+- Test: `tests/investigation/test_openai_compactor.py`
 - Modify: `tests/investigation/test_compactor.py`
 
 **Interfaces:**
-- Consumes: `XfyunMaaSConfig`, `CompactionRequest`, `SessionMemory`, and `ContextCompactor`.
-- Produces: `XfyunMaaSCompactor(config: XfyunMaaSConfig)` with `async compact(request: CompactionRequest) -> SessionMemory`.
+- Consumes: `OpenAICompatibleConfig`, `CompactionRequest`, `SessionMemory`, and `ContextCompactor`.
+- Produces: `OpenAICompatibleCompactor(config: OpenAICompatibleConfig)` with `async compact(request: CompactionRequest) -> SessionMemory`.
 
 - [ ] **Step 1: Write adapter contract tests with a mocked HTTP boundary**
 
 ```python
 @pytest.mark.asyncio
 async def test_compactor_sends_no_executable_tools(config, request, memory_payload) -> None:
-    compactor = XfyunMaaSCompactor(config)
+    compactor = OpenAICompatibleCompactor(config)
     with patch.object(compactor, "_post", return_value=_response(memory_payload)) as post:
         memory = await compactor.compact(request)
     payload = post.call_args.args[0]
@@ -153,7 +153,7 @@ async def test_compactor_sends_no_executable_tools(config, request, memory_paylo
 
 @pytest.mark.asyncio
 async def test_compactor_rejects_malformed_provider_shape(config, request) -> None:
-    compactor = XfyunMaaSCompactor(config)
+    compactor = OpenAICompatibleCompactor(config)
     with patch.object(compactor, "_post", return_value={"choices": []}):
         with pytest.raises(CompactionRejected, match="invalid"):
             await compactor.compact(request)
@@ -165,9 +165,9 @@ missing semantic fields.
 
 - [ ] **Step 2: Run the new tests and verify import failure**
 
-Run: `uv run pytest tests/investigation/test_xfyun_compactor.py -q`
+Run: `uv run pytest tests/investigation/test_openai_compactor.py -q`
 
-Expected: FAIL because `xfyun_compactor.py` does not exist.
+Expected: FAIL because `openai_compactor.py` does not exist.
 
 - [ ] **Step 3: Make the compaction request self-contained**
 
@@ -191,8 +191,8 @@ the request still has no tools or execution capability.
 - [ ] **Step 4: Implement request serialization and strict response parsing**
 
 ```python
-class XfyunMaaSCompactor(ContextCompactor):
-    def __init__(self, config: XfyunMaaSConfig) -> None:
+class OpenAICompatibleCompactor(ContextCompactor):
+    def __init__(self, config: OpenAICompatibleConfig) -> None:
         self._config = config
 
     async def compact(self, request: CompactionRequest) -> SessionMemory:
@@ -208,11 +208,11 @@ class XfyunMaaSCompactor(ContextCompactor):
             content = response["choices"][0]["message"]["content"]
             return SessionMemory.model_validate_json(_strip_fence(content))
         except (KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
-            raise CompactionRejected("MaaS compaction response is invalid") from exc
+            raise CompactionRejected("model compaction response is invalid") from exc
 ```
 
 Implement `_post()` with the same URL, authorization, timeout, retryable status
-classification, and bounded error messages as `XfyunMaaSProvider`. Serialize
+classification, and bounded error messages as `OpenAICompatibleProvider`. Serialize
 transcript blocks to bounded JSON text and instruct the model to echo the exact
 `agent_run_id`, `investigation_id`, expected next revision, `through_round`, and
 `through_sequence`; do not add tool schemas. The manager-side validator still
@@ -222,8 +222,8 @@ rejects any incorrect echoed identity or boundary.
 
 ```python
 def test_compactor_maps_429_to_rejected_without_response_body(config) -> None:
-    compactor = XfyunMaaSCompactor(config)
-    with patch("incidentlens_control_plane.investigation.xfyun_compactor.urlopen",
+    compactor = OpenAICompatibleCompactor(config)
+    with patch("incidentlens_control_plane.investigation.openai_compactor.urlopen",
                side_effect=http_error(429)):
         with pytest.raises(CompactionRejected) as excinfo:
             compactor._post({"messages": []})
@@ -232,13 +232,13 @@ def test_compactor_maps_429_to_rejected_without_response_body(config) -> None:
 
 - [ ] **Step 6: Run tests and commit**
 
-Run: `uv run pytest tests/investigation/test_xfyun_compactor.py tests/investigation/test_compactor.py -q`
+Run: `uv run pytest tests/investigation/test_openai_compactor.py tests/investigation/test_compactor.py -q`
 
 Expected: PASS.
 
 ```bash
-git add apps/control-plane/src/incidentlens_control_plane/investigation/xfyun_compactor.py apps/control-plane/src/incidentlens_control_plane/investigation/compactor.py apps/control-plane/src/incidentlens_control_plane/investigation/context.py tests/investigation/test_xfyun_compactor.py tests/investigation/test_compactor.py
-git commit -m "feat(agent): add MaaS context compactor"
+git add apps/control-plane/src/incidentlens_control_plane/investigation/openai_compactor.py apps/control-plane/src/incidentlens_control_plane/investigation/compactor.py apps/control-plane/src/incidentlens_control_plane/investigation/context.py tests/investigation/test_openai_compactor.py tests/investigation/test_compactor.py
+git commit -m "feat(agent): add model context compactor"
 ```
 
 ### Task 3: Inject the compactor into production runtime composition
@@ -248,16 +248,16 @@ git commit -m "feat(agent): add MaaS context compactor"
 - Test: `tests/test_app.py`
 
 **Interfaces:**
-- Consumes: `XfyunMaaSCompactor` from Task 2 and existing `XfyunMaaSConfig`.
+- Consumes: `OpenAICompatibleCompactor` from Task 2 and existing `OpenAICompatibleConfig`.
 - Produces: `RuntimeServices.context_manager` with a compactor in `llm_agent` mode and no network-capable compactor in fake mode.
 
 - [ ] **Step 1: Write runtime composition tests**
 
 ```python
-def test_llm_runtime_injects_maas_compactor(tmp_path, monkeypatch) -> None:
+def test_llm_runtime_injects_openai_compatible_compactor(tmp_path, monkeypatch) -> None:
     settings = llm_settings(tmp_path)
     runtime = build_runtime(settings, transport_factory=FakeTransportFactory())
-    assert isinstance(runtime.context_manager._compactor, XfyunMaaSCompactor)
+    assert isinstance(runtime.context_manager._compactor, OpenAICompatibleCompactor)
 
 
 def test_fake_runtime_does_not_inject_network_compactor(tmp_path) -> None:
@@ -269,20 +269,20 @@ def test_fake_runtime_does_not_inject_network_compactor(tmp_path) -> None:
 
 Run: `uv run pytest tests/test_app.py -q`
 
-Expected: FAIL because runtime does not instantiate `XfyunMaaSCompactor`.
+Expected: FAIL because runtime does not instantiate `OpenAICompatibleCompactor`.
 
-- [ ] **Step 3: Create one shared MaaS config and inject the adapter**
+- [ ] **Step 3: Create one shared model config and inject the adapter**
 
 ```python
 compactor = None
 if settings.agent_mode == "llm_agent":
-    maas_config = XfyunMaaSConfig(
-        api_key=settings.xfyun_maas_api_key,
+    provider_config = OpenAICompatibleConfig(
+        api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
-        model=settings.llm_active_model.removeprefix("xfyun-"),
+        model=settings.llm_active_model.strip(),
     )
-    provider = XfyunMaaSProvider(maas_config)
-    compactor = XfyunMaaSCompactor(maas_config)
+    provider = OpenAICompatibleProvider(provider_config)
+    compactor = OpenAICompatibleCompactor(provider_config)
 
 context_manager = AgentContextManager(
     investigation_store,
@@ -296,7 +296,7 @@ adapter is constructed.
 
 - [ ] **Step 4: Run runtime and provider tests and commit**
 
-Run: `uv run pytest tests/test_app.py tests/investigation/test_xfyun_provider.py tests/investigation/test_xfyun_compactor.py -q`
+Run: `uv run pytest tests/test_app.py tests/investigation/test_openai_provider.py tests/investigation/test_openai_compactor.py -q`
 
 Expected: PASS without network calls.
 
@@ -362,13 +362,13 @@ that exact value through without changing transcript or memory schemas.
 
 - [ ] **Step 4: Update the context design documentation**
 
-Document that `llm_agent` injects the MaaS compactor, fake mode is offline, the
+Document that `llm_agent` injects the OpenAI-compatible compactor, fake mode is offline, the
 breaker/tail are setting-driven, and overflow retries exactly once. Remove any
 statement implying semantic compaction is merely an injectable prototype.
 
 - [ ] **Step 5: Run the Phase A verification suite and commit**
 
-Run: `uv run pytest tests/investigation/test_context.py tests/investigation/test_compactor.py tests/investigation/test_orchestrator.py tests/investigation/test_xfyun_provider.py tests/investigation/test_xfyun_compactor.py tests/test_app.py -q`
+Run: `uv run pytest tests/investigation/test_context.py tests/investigation/test_compactor.py tests/investigation/test_orchestrator.py tests/investigation/test_openai_provider.py tests/investigation/test_openai_compactor.py tests/test_app.py -q`
 
 Run: `uv run ruff check apps/control-plane/src/incidentlens_control_plane/investigation apps/control-plane/src/incidentlens_control_plane/runtime.py tests/investigation tests/test_app.py`
 
