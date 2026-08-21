@@ -1,30 +1,43 @@
 # infra/acceptance/services/payment-service/app.py
-"""模拟支付服务。"""
+"""Payment service with a repairable policy setting."""
 
-import os
 import logging
-from flask import Flask, request, jsonify
+import os
+
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("payment-service")
-
-FAULT = os.environ.get("FAULT_DEPENDENCY", "false").lower() == "true"
+POLICY_VERSION = os.environ.get("PAYMENT_POLICY_VERSION", "2026-08-policy-a")
+REJECT_ABOVE = float(os.environ.get("PAYMENT_REJECT_ABOVE", "1000000"))
 
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "policy_version": POLICY_VERSION})
 
 
 @app.route("/payments", methods=["POST"])
 def create_payment():
-    data = request.json
-    if FAULT:
-        logger.error("ERROR: Payment processing failed - external dependency unavailable")
-        return jsonify({"error": "external payment gateway unavailable"}), 503
-    logger.info("Payment processed for order=%s amount=%s", data.get("order_id"), data.get("amount"))
-    return jsonify({"status": "processed"}), 201
+    data = request.get_json(silent=True) or {}
+    request_id = request.headers.get("X-Request-ID", "missing")
+    amount = float(data.get("amount", 0))
+    if amount > REJECT_ABOVE:
+        logger.warning(
+            "payment decision=reject request_id=%s policy_version=%s amount=%.2f",
+            request_id,
+            POLICY_VERSION,
+            amount,
+        )
+        return jsonify({"error": "payment processing declined", "request_id": request_id}), 429
+    logger.info(
+        "payment decision=allow request_id=%s policy_version=%s amount=%.2f",
+        request_id,
+        POLICY_VERSION,
+        amount,
+    )
+    return jsonify({"status": "processed", "request_id": request_id}), 201
 
 
 if __name__ == "__main__":

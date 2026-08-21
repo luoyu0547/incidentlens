@@ -1,19 +1,17 @@
 # infra/acceptance/services/order-service/app.py
-"""模拟订单服务：接收订单，调用支付和库存服务。"""
+"""Order service replica for the controlled acceptance target."""
 
-import os
-import time
 import logging
-from flask import Flask, request, jsonify
+import os
+
 import psycopg2
 import requests
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("order-service")
-
-FAULT_DB_POOL = os.environ.get("FAULT_DB_POOL", "false").lower() == "true"
-FAULT_PAYMENT_TIMEOUT = os.environ.get("FAULT_PAYMENT_TIMEOUT", "false").lower() == "true"
+REPLICA_NAME = os.environ.get("REPLICA_NAME", "stable")
 
 
 def get_db():
@@ -23,26 +21,35 @@ def get_db():
         dbname=os.environ.get("DB_NAME", "acceptance"),
         user=os.environ.get("DB_USER", "test"),
         password=os.environ.get("DB_PASSWORD", "test"),
+        connect_timeout=2,
     )
+
+
+def response(payload: dict, status: int):
+    result = jsonify({**payload, "served_by": REPLICA_NAME})
+    result.headers["X-Served-By"] = REPLICA_NAME
+    result.headers["X-Request-ID"] = request.headers.get("X-Request-ID", "")
+    return result, status
 
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "replica": REPLICA_NAME})
 
 
 @app.route("/orders", methods=["POST"])
 def create_order():
-    data = request.json
-    user_id = data.get("user_id", "anonymous")
+    data = request.get_json(silent=True) or {}
+    request_id = request.headers.get("X-Request-ID", "missing")
     total = data.get("total", 0)
-
-    logger.info("Creating order for user=%s total=%.2f", user_id, total)
-
-    if FAULT_DB_POOL:
-        logger.error("ERROR: Cannot acquire database connection - pool exhausted")
-        return jsonify({"error": "database connection pool exhausted"}), 503
-
+    user_id = data.get("user_id", "anonymous")
+    logger.info(
+        "order request_id=%s replica=%s user=%s amount=%.2f",
+        request_id,
+        REPLICA_NAME,
+        user_id,
+        float(total),
+    )
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -54,41 +61,54 @@ def create_order():
         conn.commit()
         cur.close()
         conn.close()
-        logger.info("Order %d created successfully", order_id)
-    except Exception as e:
-        logger.error("ERROR: Database error: %s", str(e))
-        return jsonify({"error": str(e)}), 500
+    except Exception:
+        logger.error("database operation failed request_id=%s replica=%s", request_id, REPLICA_NAME)
+        return response({"error": "order storage unavailable", "request_id": request_id}, 503)
 
-    # Call payment service
     try:
-        timeout = 0.001 if FAULT_PAYMENT_TIMEOUT else 5
-        resp = requests.post(
+        payment = requests.post(
             f"{os.environ.get('PAYMENT_URL', 'http://localhost:5000')}/payments",
             json={"order_id": order_id, "amount": total},
-            timeout=timeout,
+            headers={"X-Request-ID": request_id},
+            timeout=5,
         )
-        logger.info("Payment response: %s", resp.status_code)
-    except requests.Timeout:
-        logger.error("ERROR: Payment service timeout after %.3fs", timeout)
-        return jsonify({"error": "payment service timeout"}), 504
-    except Exception as e:
-        logger.error("ERROR: Payment service unavailable: %s", str(e))
-        return jsonify({"error": str(e)}), 502
-
-    return jsonify({"order_id": order_id, "status": "created"}), 201
+    except requests.exceptions.RequestException:
+        logger.error("payment call unavailable request_id=%s replica=%s", request_id, REPLICA_NAME)
+        return response({"error": "payment unavailable", "request_id": request_id}, 502)
+    if payment.status_code >= 400:
+        logger.warning(
+            "payment declined request_id=%s replica=%s status=%s",
+            request_id,
+            REPLICA_NAME,
+            payment.status_code,
+        )
+        return response(
+            {"error": "payment processing declined", "request_id": request_id},
+            payment.status_code,
+        )
+    logger.info(
+        "order completed request_id=%s replica=%s order_id=%s",
+        request_id,
+        REPLICA_NAME,
+        order_id,
+    )
+    return response({"order_id": order_id, "status": "created", "request_id": request_id}, 201)
 
 
 @app.route("/orders/<int:order_id>")
 def get_order(order_id):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id, user_id, total, status FROM orders WHERE id = %s", (order_id,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, user_id, total, status FROM orders WHERE id = %s", (order_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+    except Exception:
+        return response({"error": "order storage unavailable"}, 503)
     if row:
-        return jsonify({"id": row[0], "user_id": row[1], "total": row[2], "status": row[3]})
-    return jsonify({"error": "not found"}), 404
+        return response({"id": row[0], "user_id": row[1], "total": row[2], "status": row[3]}, 200)
+    return response({"error": "not found"}, 404)
 
 
 if __name__ == "__main__":
