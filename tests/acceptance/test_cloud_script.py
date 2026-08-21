@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 SCRIPT = Path("scripts/cloud_acceptance_target.sh").read_text()
 
 

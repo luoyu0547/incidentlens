@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-
 from pathlib import Path
 
 from textual.app import App, ComposeResult

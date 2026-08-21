@@ -31,7 +31,15 @@ class SessionRecorder:
         self._text = self.text_path.open("w", encoding="utf-8")
         self._started = time.monotonic()
         self._sequence = 0
-        self._write_cast({"version": 2, "width": 120, "height": 40, "timestamp": int(datetime.now(UTC).timestamp()), "env": {"TERM": "xterm-256color"}})
+        self._write_cast(
+            {
+                "version": 2,
+                "width": 120,
+                "height": 40,
+                "timestamp": int(datetime.now(UTC).timestamp()),
+                "env": {"TERM": "xterm-256color"},
+            }
+        )
 
     def record_event(self, event: RuntimeEvent) -> None:
         payload = self._redact(event.payload)

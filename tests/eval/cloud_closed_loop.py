@@ -21,7 +21,11 @@ def evaluate(trace_path: Path, matrix_path: Path) -> CloudClosedLoopResult:
         return CloudClosedLoopResult(False, ("trace_unreadable",))
     if not events:
         return CloudClosedLoopResult(False, ("trace_empty",))
-    sequences = [event.get("sequence") for event in events if isinstance(event.get("sequence"), int)]
+    sequences = [
+        event.get("sequence")
+        for event in events
+        if isinstance(event.get("sequence"), int)
+    ]
     if sequences != sorted(sequences) or len(sequences) != len(set(sequences)):
         failures.append("trace_sequence_invalid")
     types = [event.get("event_type") for event in events]
@@ -33,19 +37,34 @@ def evaluate(trace_path: Path, matrix_path: Path) -> CloudClosedLoopResult:
     compact_index = _first(types, "context.compacted")
     if compact_index is None:
         failures.append("compaction_missing")
-    elif not any(item in {"tool_call.started", "tool.proposed"} for item in types[compact_index + 1 :]):
+    elif not any(
+        item in {"tool_call.started", "tool.proposed"}
+        for item in types[compact_index + 1 :]
+    ):
         failures.append("fresh_remote_observation_after_compaction_missing")
-    proposals = [payload for kind, payload in zip(types, payloads) if kind == "tool.proposed"]
-    mutations = [item for item in proposals if item.get("tool_name") in {"file_edit", "file_write", "docker_action"}]
+    proposals = [
+        payload for kind, payload in zip(types, payloads) if kind == "tool.proposed"
+    ]
+    mutations = [
+        item
+        for item in proposals
+        if item.get("tool_name") in {"file_edit", "file_write", "docker_action"}
+    ]
     if len(mutations) < 2:
         failures.append("two_repairs_missing")
-    approvals = [payload.get("approval_id") for kind, payload in zip(types, payloads) if kind == "approval.approved"]
+    approvals = [
+        payload.get("approval_id")
+        for kind, payload in zip(types, payloads)
+        if kind == "approval.approved"
+    ]
     if not approvals:
         failures.append("approval_missing")
     if "changeset.rolled_back" not in types:
         failures.append("rollback_missing")
     rolled = _first(types, "changeset.rolled_back")
-    if rolled is not None and not any(kind == "changeset.status_changed" for kind in types[rolled + 1 :]):
+    if rolled is not None and not any(
+        kind == "changeset.status_changed" for kind in types[rolled + 1 :]
+    ):
         failures.append("reapply_missing")
     try:
         cells = [json.loads(line) for line in matrix_path.read_text().splitlines() if line.strip()]

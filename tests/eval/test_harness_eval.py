@@ -35,7 +35,7 @@ async def test_delegation_equivalence_preserves_distinct_persisted_sources() -> 
         "child-typed",
         "child-tool",
     }
-    assert {call.tool_call_id for call in trace.tool_calls} >= {
+    assert {call.provider_tool_call_id for call in trace.tool_calls} >= {
         "tool-delegate",
     }
     assert len({call.tool_call_id for call in trace.tool_calls}) == len(trace.tool_calls)

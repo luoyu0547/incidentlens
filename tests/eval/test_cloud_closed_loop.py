@@ -46,7 +46,11 @@ def test_evaluator_accepts_complete_closed_loop(tmp_path) -> None:
 
 def test_evaluator_fails_closed_on_partial_artifacts(tmp_path) -> None:
     trace = tmp_path / "trace.jsonl"
-    trace.write_text(json.dumps({"sequence": 1, "event_type": "model_round.started", "payload": {}}))
+    trace.write_text(
+        json.dumps(
+            {"sequence": 1, "event_type": "model_round.started", "payload": {}}
+        )
+    )
     matrix = tmp_path / "matrix.jsonl"
     matrix.write_text("")
     result = evaluate(trace, matrix)
