@@ -1577,6 +1577,21 @@ class InvestigationStore:
             raise ToolCallNotFound(f"tool call not found: {tool_call_id}")
         return ToolCall.model_validate_json(row[3])
 
+    def get_tool_call_by_provider_id(
+        self, agent_run_id: str, provider_tool_call_id: str
+    ) -> ToolCall:
+        """Return one run-local provider correlation, or raise ToolCallNotFound."""
+        matches = tuple(
+            call
+            for call in self.list_tool_calls(agent_run_id=agent_run_id)
+            if (call.provider_tool_call_id or call.tool_call_id) == provider_tool_call_id
+        )
+        if len(matches) != 1:
+            raise ToolCallNotFound(
+                f"provider tool call not found: {agent_run_id}/{provider_tool_call_id}"
+            )
+        return matches[0]
+
     def list_tool_calls(
         self,
         *,

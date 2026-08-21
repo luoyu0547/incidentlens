@@ -380,7 +380,7 @@ async def test_startup_reconciles_decided_approval_and_resumes_run(tmp_path: Any
     summary = await recovery.startup()
 
     assert summary.reconciled_approvals == 1
-    tool_call = harness.investigations.get_tool_call("call-1")
+    tool_call = harness.investigations.get_tool_call_by_provider_id("run-1", "call-1")
     assert tool_call.status is ToolCallStatus.SUCCEEDED
     assert service.get_run("run-1").status is AgentRunStatus.COMPLETED
     assert service.get_investigation("inv-1").status is InvestigationStatus.COMPLETED
@@ -418,7 +418,7 @@ async def test_startup_leaves_pending_approvals_for_the_operator(tmp_path: Any) 
     assert summary.reconciled_approvals == 0
     assert service.get_run("run-1").status is AgentRunStatus.WAITING_APPROVAL
     assert (
-        harness.investigations.get_tool_call("call-1").status
+        harness.investigations.get_tool_call_by_provider_id("run-1", "call-1").status
         is ToolCallStatus.WAITING_APPROVAL
     )
 
@@ -447,7 +447,7 @@ async def test_startup_parks_dangerous_in_flight_run_uncertain_and_never_replays
         service.get_investigation("inv-1").status
         is InvestigationStatus.PAUSED_UNCERTAIN_STATE
     )
-    tool_call = harness.investigations.get_tool_call("call-1")
+    tool_call = harness.investigations.get_tool_call_by_provider_id("run-1", "call-1")
     assert tool_call.status is ToolCallStatus.UNCERTAIN
     assert "never replayed" in tool_call.error_redacted
     # UNCERTAIN_STATE evidence was recorded for the audit trail.
@@ -472,7 +472,7 @@ async def test_startup_marks_safe_in_flight_call_failed_and_keeps_run_resumable(
     assert summary.dangerous_parked == 0
     # A read-only in-flight call is retryable: the run stays RUNNING.
     assert service.get_run("run-1").status is AgentRunStatus.RUNNING
-    tool_call = harness.investigations.get_tool_call("call-1")
+    tool_call = harness.investigations.get_tool_call_by_provider_id("run-1", "call-1")
     assert tool_call.status is ToolCallStatus.FAILED
     assert "retryable" in tool_call.error_redacted
 
@@ -624,7 +624,7 @@ async def test_shutdown_drains_active_loop_and_marks_interrupted_tool_uncertain(
     assert not loop_task.done()
     # C1: the executing call is persisted RUNNING, not PLANNED.
     assert (
-        harness.investigations.get_tool_call("call-1").status
+        harness.investigations.get_tool_call_by_provider_id("run-1", "call-1").status
         is ToolCallStatus.RUNNING
     )
 
@@ -636,7 +636,7 @@ async def test_shutdown_drains_active_loop_and_marks_interrupted_tool_uncertain(
     assert service.get_investigation("inv-1").status is InvestigationStatus.CANCELLED
     # The interrupted shell call could not be confirmed -> UNCERTAIN, never left
     # as a dangling RUNNING row.
-    tool_call = harness.investigations.get_tool_call("call-1")
+    tool_call = harness.investigations.get_tool_call_by_provider_id("run-1", "call-1")
     assert tool_call.status is ToolCallStatus.UNCERTAIN
     assert "never replayed" in tool_call.error_redacted
 
@@ -707,7 +707,7 @@ async def test_real_execution_crash_marks_dangerous_in_flight_uncertain(
     await asyncio.gather(loop_task, return_exceptions=True)
     # C1: the dangerous call is persisted RUNNING after the crash.
     assert (
-        harness.investigations.get_tool_call("call-1").status
+        harness.investigations.get_tool_call_by_provider_id("run-1", "call-1").status
         is ToolCallStatus.RUNNING
     )
 
@@ -719,7 +719,7 @@ async def test_real_execution_crash_marks_dangerous_in_flight_uncertain(
         service.get_investigation("inv-1").status
         is InvestigationStatus.PAUSED_UNCERTAIN_STATE
     )
-    tool_call = harness.investigations.get_tool_call("call-1")
+    tool_call = harness.investigations.get_tool_call_by_provider_id("run-1", "call-1")
     assert tool_call.status is ToolCallStatus.UNCERTAIN
     assert "never replayed" in tool_call.error_redacted
 
@@ -769,7 +769,7 @@ async def test_approval_after_cancel_does_not_execute_tool(tmp_path: Any) -> Non
     # No transport contact: the dangerous tool was never re-executed.
     assert harness.factory.transports == []
     assert (
-        harness.investigations.get_tool_call("call-1").status
+        harness.investigations.get_tool_call_by_provider_id("run-1", "call-1").status
         is ToolCallStatus.CANCELLED
     )
 
@@ -815,7 +815,7 @@ async def test_approval_on_waiting_approval_run_under_cancelled_investigation_sk
     assert outcome.applied is False
     assert harness.factory.transports == []
     assert (
-        harness.investigations.get_tool_call("call-1").status
+        harness.investigations.get_tool_call_by_provider_id("run-1", "call-1").status
         is ToolCallStatus.CANCELLED
     )
 
@@ -857,7 +857,7 @@ async def test_startup_cancelled_investigation_sweeps_waiting_approval_run(
     assert service.get_investigation("inv-1").status is InvestigationStatus.CANCELLED
     assert service.get_run("run-1").status is AgentRunStatus.CANCELLED
     assert (
-        harness.investigations.get_tool_call("call-1").status
+        harness.investigations.get_tool_call_by_provider_id("run-1", "call-1").status
         is ToolCallStatus.CANCELLED
     )
     assert harness.factory.transports == []
@@ -901,7 +901,7 @@ async def test_startup_does_not_reexecute_approved_tool_on_cancelled_run(
     assert service.get_investigation("inv-1").status is InvestigationStatus.CANCELLED
     # The tool was swept to CANCELLED (M1), never re-executed.
     assert (
-        harness.investigations.get_tool_call("call-1").status
+        harness.investigations.get_tool_call_by_provider_id("run-1", "call-1").status
         is ToolCallStatus.CANCELLED
     )
     assert harness.factory.transports == []

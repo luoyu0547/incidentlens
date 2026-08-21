@@ -240,6 +240,56 @@ def _recorded_child_report(
     return refs[0], stored
 
 
+async def test_provider_tool_call_ids_are_namespaced_across_runs(tmp_path: Any) -> None:
+    """The same provider correlation may execute independently in two runs."""
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    for investigation_id, run_id in (("inv-1", "run-1"), ("inv-2", "run-2")):
+        _make_investigation(
+            harness,
+            investigation_id=investigation_id,
+            status=InvestigationStatus.RUNNING,
+        )
+        _make_parent_run(
+            harness,
+            run_id=run_id,
+            investigation_id=investigation_id,
+        )
+        registry.set_script(
+            run_id,
+            [
+                RequestToolsStep(
+                    tool_requests=(
+                        ToolRequest(
+                            tool_call_id="tq1",
+                            tool_name="registry_info",
+                            arguments={},
+                        ),
+                    )
+                ),
+                StopStep(
+                    stop_signal=StopSignal(
+                        stop_reason=StopReason.COMPLETED,
+                        summary="complete",
+                    )
+                ),
+            ],
+        )
+    orchestrator, _, _ = build_orchestrator(harness, registry)
+
+    first = await orchestrator.run("run-1")
+    second = await orchestrator.run("run-2")
+
+    assert first.status is AgentRunStatus.COMPLETED
+    assert second.status is AgentRunStatus.COMPLETED
+    first_call = harness.investigations.get_tool_call_by_provider_id("run-1", "tq1")
+    second_call = harness.investigations.get_tool_call_by_provider_id("run-2", "tq1")
+    assert first_call.status is ToolCallStatus.SUCCEEDED
+    assert second_call.status is ToolCallStatus.SUCCEEDED
+    assert first_call.tool_call_id != second_call.tool_call_id
+    assert first_call.provider_tool_call_id == second_call.provider_tool_call_id == "tq1"
+
+
 # ---------------------------------------------------------------------------
 # Parent completion / safe stops
 # ---------------------------------------------------------------------------
@@ -1622,7 +1672,7 @@ async def test_tool_result_is_in_next_model_conversation(runtime: SimpleNamespac
     await runtime.orchestrator.run("run-1")
     second = runtime.fake.requests("run-1")[1]
     assert any(
-        isinstance(block, ToolResultBlock) and block.tool_call_id == "registry-call"
+        isinstance(block, ToolResultBlock) and block.tool_call_id.startswith("tool-run-1-")
         for message in second.messages
         for block in message.blocks
     )
@@ -1795,10 +1845,11 @@ async def test_concurrent_safe_batch_emits_results_in_order(runtime: SimpleNames
         for block in message.blocks
         if isinstance(block, ToolResultBlock)
     ]
-    assert [b.tool_call_id for b in result_blocks] == ["safe-call-1", "safe-call-2"]
+    assert len(result_blocks) == 2
+    assert all(block.tool_call_id.startswith("tool-run-1-") for block in result_blocks)
     assert all(b.status is ToolCallStatus.SUCCEEDED for b in result_blocks)
     calls = runtime.store.list_tool_calls(agent_run_id="run-1")
-    assert {c.tool_call_id for c in calls} == {"safe-call-1", "safe-call-2"}
+    assert {c.provider_tool_call_id for c in calls} == {"safe-call-1", "safe-call-2"}
     assert all(c.status is ToolCallStatus.SUCCEEDED for c in calls)
 
 
@@ -1817,7 +1868,7 @@ async def test_batch_folds_all_outcomes_when_one_pauses(runtime: SimpleNamespace
     final = await runtime.orchestrator.run("run-1")
     assert final.status is AgentRunStatus.PAUSED_BUDGET
     calls = runtime.store.list_tool_calls(agent_run_id="run-1")
-    assert {c.tool_call_id for c in calls} == {"safe-call-1", "safe-call-2"}
+    assert {c.provider_tool_call_id for c in calls} == {"safe-call-1", "safe-call-2"}
     assert all(c.status is ToolCallStatus.SUCCEEDED for c in calls)
     result_blocks = [
         block
@@ -1825,6 +1876,7 @@ async def test_batch_folds_all_outcomes_when_one_pauses(runtime: SimpleNamespace
         for block in message.blocks
         if isinstance(block, ToolResultBlock)
     ]
-    assert [b.tool_call_id for b in result_blocks] == ["safe-call-1", "safe-call-2"]
+    assert len(result_blocks) == 2
+    assert all(block.tool_call_id.startswith("tool-run-1-") for block in result_blocks)
     assert all(b.status is ToolCallStatus.SUCCEEDED for b in result_blocks)
     assert all("not executed" not in b.content for b in result_blocks)

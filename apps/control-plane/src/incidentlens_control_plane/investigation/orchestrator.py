@@ -66,6 +66,7 @@ from incidentlens_control_plane.investigation.provider import (
     ProviderOutputRejected,
     ProviderOutputValidator,
     RunCheckpoint,
+    ToolRequest,
     ToolSchema,
 )
 from incidentlens_control_plane.investigation.state_machine import (
@@ -502,6 +503,10 @@ class AgentOrchestrator:
             )
             return self._fail(run, investigation, now, reason=str(exc))
 
+        # Provider IDs only correlate blocks inside this turn. Persist and execute
+        # harness-allocated IDs so two runs may safely receive the same provider ID.
+        result = self._namespace_tool_requests(run, result)
+
         # Step 4: append the assistant message BEFORE executing any tool or
         # spawning any child (append-before-act).  On an append failure the
         # run pauses UNCERTAIN and nothing is executed.
@@ -750,6 +755,31 @@ class AgentOrchestrator:
             created_at=now,
         )
         self._transcript.append_message(message)
+
+    def _namespace_tool_requests(
+        self, run: AgentRun, result: AgentTurnResult
+    ) -> AgentTurnResult:
+        """Replace provider-local tool IDs with harness-allocated identities."""
+        if not result.tool_requests:
+            return result
+        requests = tuple(
+            ToolRequest(
+                tool_call_id=self.allocate_tool_call_id(
+                    run.agent_run_id, request.tool_call_id
+                ),
+                provider_tool_call_id=request.tool_call_id,
+                tool_name=request.tool_name,
+                arguments=request.arguments,
+            )
+            for request in result.tool_requests
+        )
+        return result.model_copy(update={"tool_requests": requests})
+
+    @staticmethod
+    def allocate_tool_call_id(run_id: str, provider_id: str) -> str:
+        """Allocate an opaque, globally unique internal ID for one proposal."""
+        suffix = uuid.uuid4().hex[:16]
+        return f"tool-{run_id[:40]}-{suffix}"[:120]
 
     def _assistant_message(
         self, run: AgentRun, result: AgentTurnResult, now: datetime
@@ -1461,6 +1491,9 @@ class AgentOrchestrator:
         tool_call = ToolCall(
             tool_call_id=request.tool_call_id,
             agent_run_id=run.agent_run_id,
+            provider_tool_call_id=(
+                request.provider_tool_call_id or request.tool_call_id
+            ),
             tool_name=request.tool_name,
             status=ToolCallStatus.PLANNED,
             idempotency_key=request.tool_call_id,

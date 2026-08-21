@@ -463,6 +463,7 @@ class InvestigationService:
             )
         request = ToolRequest(
             tool_call_id=tool_call.tool_call_id,
+            provider_tool_call_id=tool_call.provider_tool_call_id,
             tool_name=tool_call.tool_name,
             arguments=tool_call.arguments,
         )

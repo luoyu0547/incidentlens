@@ -313,6 +313,13 @@ class ToolRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     tool_call_id: str = Field(min_length=1, max_length=120)
+    provider_tool_call_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=120,
+        exclude=True,
+        description="Harness-only correlation; providers must leave this unset.",
+    )
     tool_name: str = Field(min_length=1, max_length=120)
     arguments: dict[str, Any] = Field(default_factory=dict)
 
