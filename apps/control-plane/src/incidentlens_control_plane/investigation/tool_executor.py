@@ -698,7 +698,7 @@ class ToolExecutor:
         preview = ref.content_redacted[:300] or "(empty content)"
         summary = (
             f"read {result.path} ({result.metadata.size} bytes, "
-            f"truncated={result.truncated}); sha256={result.sha256[:16]}; {preview}"
+            f"truncated={result.truncated}); sha256={result.sha256}; {preview}"
         )
         return ToolResult(
             evidence=(self._evidence_ref(ctx, ref, summary),),
@@ -973,10 +973,15 @@ class ToolExecutor:
         )
         preview = ref.content_redacted[:300] or "(no output)"
         summary = f"command exited {shell_result.exit_status}: {preview}"
+        failed = shell_result.exit_status != 0
         return ToolResult(
+            status=ToolCallStatus.FAILED if failed else ToolCallStatus.SUCCEEDED,
             evidence=(self._evidence_ref(ctx, ref, summary),),
             summary=summary,
             output_bytes=len(bound),
+            error_redacted=(
+                f"command exited {shell_result.exit_status}" if failed else None
+            ),
         )
 
     async def _handle_file_edit(self, ctx: ToolContext) -> ToolResult:
@@ -1292,8 +1297,16 @@ class ToolExecutor:
         approval_id: str | None,
     ) -> ToolResult | None:
         """Request an exact approval for protected paths, or return None to run."""
+        project = self._projects.get(ctx.run.scope.project_id)
+        project_protected = tuple(
+            dict.fromkeys(
+                path
+                for registered_service in project.services
+                for path in registered_service.protected_remote_paths
+            )
+        )
         protected = tuple(
-            path for path in paths if is_protected_path(path, svc.protected_remote_paths)
+            path for path in paths if is_protected_path(path, project_protected)
         )
         if not protected or approval_id is not None:
             return None

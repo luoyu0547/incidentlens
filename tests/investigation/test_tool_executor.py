@@ -857,6 +857,49 @@ async def test_container_run_mutation_requires_explicit_container_scope(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_protected_path_cannot_be_bypassed_with_another_service_name(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path)
+    record = harness.projects.get(PROJECT_ID)
+    primary = record.services[0].model_copy(update={"protected_remote_paths": ()})
+    protected_path = HOST_ROOT / "shared.env"
+    registration = ProjectRegistration(
+        project_id=record.project_id,
+        display_name=record.display_name,
+        local_source_paths=record.local_source_paths,
+        targets=record.targets,
+        services=(
+            primary,
+            ServiceRegistration(
+                compose_service="other-service",
+                allowed_host_paths=(HOST_ROOT,),
+                protected_remote_paths=(protected_path,),
+            ),
+        ),
+    )
+    harness.projects.replace(registration, now=NOW)
+    await seed_host_file(harness, protected_path, b"VALUE=old\n")
+    run = _new_run(harness.investigations)
+
+    outcome = await harness.executor.execute(
+        tool_request(
+            TOOL_FILE_EDIT,
+            service_name=SERVICE,
+            path=str(protected_path),
+            expected_sha256=_sha256(b"VALUE=old\n"),
+            replacements=[{"old_text": "old", "new_text": "new"}],
+        ),
+        run,
+        now=NOW,
+    )
+
+    assert outcome.status is ToolCallStatus.WAITING_APPROVAL
+    assert outcome.approval_id is not None
+    assert str(protected_path) in outcome.summary
+
+
+@pytest.mark.asyncio
 async def test_container_run_host_read_is_rejected(tmp_path: Path) -> None:
     """A container-pinned run may not read host files through host tools."""
     harness = build_harness(tmp_path)
@@ -1189,6 +1232,7 @@ async def test_host_read_creates_redacted_file_snapshot_evidence(tmp_path: Path)
     assert "hunter2" not in stored.content_redacted
     assert "10.1.2.3" not in stored.content_redacted
     assert "hunter2" not in outcome.summary
+    assert _sha256(b"api_key=hunter2\nlistening on 10.1.2.3\n") in outcome.summary
 
 
 @pytest.mark.asyncio
@@ -1311,6 +1355,30 @@ async def test_shell_read_only_command_executes_and_records_evidence(tmp_path: P
     assert stored.evidence_kind is EvidenceKind.COMMAND_OUTPUT
     assert "payments-api-1 running" in stored.content_redacted
     assert ref.evidence_id.startswith("ev-")
+
+
+@pytest.mark.asyncio
+async def test_shell_nonzero_exit_records_evidence_and_fails_tool(tmp_path: Path) -> None:
+    harness = build_harness(
+        tmp_path,
+        transport_factory=HarnessTransportFactory(
+            shell_output=b"usage: probe --expected VALUE", shell_status=2
+        ),
+    )
+    run = _new_run(harness.investigations)
+
+    outcome = await harness.executor.execute(
+        tool_request(TOOL_SHELL_EXEC, service_name=SERVICE, command="docker ps"),
+        run,
+        now=NOW,
+    )
+
+    assert outcome.status is ToolCallStatus.FAILED
+    assert outcome.error_redacted == "command exited 2"
+    assert len(outcome.evidence) == 1
+    stored = harness.evidence_store.get(outcome.evidence[0].evidence_id)
+    assert stored.metadata["exit_code"] == "2"
+    assert "usage: probe" in stored.content_redacted
 
 
 @pytest.mark.asyncio
