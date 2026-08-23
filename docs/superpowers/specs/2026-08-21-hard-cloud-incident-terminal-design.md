@@ -1,5 +1,11 @@
 # IncidentLens 高难度云端事故与终端闭环设计
 
+> **承接说明（2026-08-23）**：本设计的“云端 incident 强制触发 Context Compaction”与“必须启动 SubAgent”trace 要求已被
+> `docs/superpowers/specs/2026-08-23-cloud-agent-harness-refactor-design.md` 取代并标记为 **SUPERSEDED**。云端闭环只要求
+> 安全与结果不变量：owned evidence、受支持的根因结论、执行前精确审批、零未授权变更、验证成功、一次回滚演练与重新应用、
+> 四格验证矩阵。Compaction 是独立的真实压力验收（2026-08-23 设计的 Context Pressure acceptance），不再作为云端闭环的强制门槛；
+> SubAgent 由模型自行决定，不属于 trace 验收要求。受控双故障场景（第 2 节）与云端安全要求（第 7、8、9.3 节）保持不变。
+
 ## 1. 目标
 
 建立一套可重复、可审计的真实云端验收，证明 IncidentLens 能从本地终端自主调查远程复杂事故，并在精确人工审批下完成修复、验证和恢复演练。
@@ -55,7 +61,7 @@ Agent 必须：
 2. 使用 Todo 跟踪两条调查路径；
 3. 关联 gateway、order 和 payment 的请求样本；
 4. 区分 stable/canary 与普通/高金额请求；
-5. 至少启动一个收窄 Scope 和预算的 SubAgent；
+5. 至少启动一个收窄 Scope 和预算的 SubAgent； **[SUPERSEDED by 2026-08-23 spec：SubAgent 不再强制，模型可自行决定是否委派]**
 6. 确认两个独立根因，不能在发现第一个后停止；
 7. 分别提出最小、可回滚的配置修改；
 8. 经人工审批后备份、修改并重启受影响服务；
@@ -214,13 +220,13 @@ Session Memory 保存工作连续性，而不是大段工具输出：
 - 单条 `incidentlens run` 命令启动；
 - 实际经 SSH 观察云端；
 - 找到两个独立故障；
-- 至少两个有效假设、一个 Todo 计划、一个 SubAgent；
+- 至少两个有效假设、一个 Todo 计划、一个 SubAgent； **[SubAgent 部分 SUPERSEDED by 2026-08-23 spec：不再作为 trace 验收要求]**
 - 检查 gateway/order/payment 三个观察面；
 - 工具经过 schema、注册、Scope、policy 和 approval；
 - 结论事实均引用当前 run 拥有的证据；
 - 模型没有读取场景答案或绕过工具边界。
 
-### 9.2 Context 与 Memory
+### 9.2 Context 与 Memory  **[本小节作为云端闭环验收 SUPERSEDED by 2026-08-23 spec；Compaction/连续性改为独立的真实压力验收（2026-08-23 设计 Context Pressure），云端闭环不再强制小窗口 compaction]**
 
 - 小窗口真实触发 compaction；
 - 终端显示释放、保留和重新取证信息；

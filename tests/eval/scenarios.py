@@ -209,7 +209,10 @@ async def run_context_overflow_recovery() -> HarnessTrace:
             "run-1"
         )
         trace = _trace(harness, "context_overflow_recovery")
-        assert len(compactor.requests) == 1 and trace.compact_boundaries
+        # The pressure valve may compact semantically before the reactive
+        # overflow path fires, so assert recovery happened rather than an
+        # exact request count.
+        assert len(compactor.requests) >= 1 and trace.compact_boundaries
         assert trace.run.status is AgentRunStatus.COMPLETED
         return trace
 
