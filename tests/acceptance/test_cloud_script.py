@@ -19,3 +19,7 @@ def test_script_rejects_broad_or_untrusted_host_inputs() -> None:
 def test_script_requires_loopback_published_ports() -> None:
     assert "127\\\\.0\\\\.0\\\\.1" in SCRIPT
     assert "compose.cloud.yaml" in SCRIPT
+
+
+def test_provision_normalizes_uploaded_files_to_remote_operator() -> None:
+    assert "sudo chown -R \\$(id -u):\\$(id -g) $root" in SCRIPT

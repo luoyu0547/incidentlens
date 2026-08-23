@@ -29,6 +29,7 @@ case "$command_name" in
     "$0" verify-precondition --host "$host"
     remote "sudo install -d -m 0755 $root"
     tar -C infra -czf - acceptance | remote "sudo tar -xzf - -C $root --strip-components=1"
+    remote "sudo chown -R \$(id -u):\$(id -g) $root"
     remote "cd $root && sudo docker compose -f docker-compose.yml -f compose.cloud.yaml up -d --build"
     remote "docker ps --format '{{.Ports}}' | grep -Ev '(^|,)127\\.0\\.0\\.1:' && exit 1 || true"
     ;;
