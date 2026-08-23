@@ -39,6 +39,7 @@ from typing import Any
 
 from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
+from incidentlens_control_plane.events.types import RuntimeEventType
 from incidentlens_control_plane.evidence.service import EvidenceService
 from incidentlens_control_plane.investigation.compactor import (
     CompactionCircuitOpen,
@@ -113,6 +114,7 @@ from incidentlens_control_plane.investigation.types import (
 )
 from incidentlens_control_plane.logs.redaction import redact_message
 from incidentlens_control_plane.logs.types import LogScope
+from incidentlens_control_plane.project_memory.types import ProjectMemoryExtractionRequest
 from incidentlens_control_plane.project_registry.store import ProjectRegistryStore
 from incidentlens_control_plane.project_registry.types import TargetRegistration
 from incidentlens_control_plane.remote_ops.sessions import SessionManager
@@ -156,6 +158,7 @@ class AgentOrchestrator:
         context_manager: AgentContextManager | None = None,
         transcript: TranscriptService | None = None,
         hooks: HookRunner | None = None,
+        memory_collector: Callable[[ProjectMemoryExtractionRequest], None] | None = None,
     ) -> None:
         if global_child_limit < 1:
             raise ValueError("global_child_limit must be >= 1")
@@ -174,6 +177,7 @@ class AgentOrchestrator:
         self._context = context_manager or AgentContextManager(store, now=self._now)
         self._transcript = transcript or TranscriptService(store)
         self._hooks = hooks or HookRunner()
+        self._memory_collector = memory_collector
         self._events_pub = (
             InvestigationEventPublisher(events, broker)
             if events is not None and broker is not None
@@ -965,6 +969,10 @@ class AgentOrchestrator:
                     investigation, InvestigationStatus.COMPLETED, now=now,
                     stop_reason=StopReason.COMPLETED,
                 )
+                # Verified parent completion is durable now; extraction is
+                # scheduled without waiting so it can never hold the loop or
+                # alter the completion state already persisted above.
+                self._collect_memory_after_completion(run, investigation, stop_signal, now)
             return self._store.get_agent_run(run.agent_run_id)
         if reason is StopReason.MISSING_EVIDENCE:
             self._pause(run, investigation, AgentRunStatus.PAUSED_MISSING_EVIDENCE, now=now,
@@ -998,6 +1006,71 @@ class AgentOrchestrator:
         if reason is StopReason.FAILED:
             return self._fail(run, investigation, now, reason=stop_signal.summary)
         return self._fail(run, investigation, now, reason=f"unhandled stop reason {reason.value}")
+
+    # -- project memory extraction scheduling ---------------------------------
+
+    def _collect_memory_after_completion(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        stop_signal: Any,
+        now: datetime,
+    ) -> None:
+        """Schedule automatic extraction right after a persisted parent completion.
+
+        The notifier is optional and best-effort: an absent collector, a build
+        failure, or an enqueue failure never alters the completion already
+        persisted and never raises into the loop.  Any failure is surfaced as a
+        redacted ``agent_hook`` event.
+        """
+        if self._memory_collector is None:
+            return
+        try:
+            request = self._build_memory_extraction_request(run, investigation, stop_signal)
+            self._memory_collector(request)
+        except Exception as exc:  # noqa: BLE001 - memory never blocks completion
+            self._emit_memory_schedule_failure(run, investigation, exc, now)
+
+    def _build_memory_extraction_request(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        stop_signal: Any,
+    ) -> ProjectMemoryExtractionRequest:
+        conclusions = self._store.list_conclusions(agent_run_id=run.agent_run_id)
+        session = self._store.get_latest_session_memory(run.agent_run_id)
+        summary = getattr(stop_signal, "summary", "") or ""
+        return ProjectMemoryExtractionRequest(
+            investigation=investigation,
+            agent_run_id=run.agent_run_id,
+            owned_evidence_ids=tuple(
+                reference.evidence_id for reference in run.evidence
+            ),
+            conclusion_summaries=tuple(item.summary for item in conclusions),
+            session_memory_snapshot=session.model_dump_json() if session is not None else "",
+            verification_summary=summary,
+        )
+
+    def _emit_memory_schedule_failure(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        exc: BaseException,
+        now: datetime,
+    ) -> None:
+        if self._events_pub is None:
+            return
+        message = str(exc) or type(exc).__name__
+        self._events_pub.emit(
+            RuntimeEventType.AGENT_HOOK,
+            occurred_at=now,
+            hook_type="project_memory",
+            agent_run_id=run.agent_run_id,
+            investigation_id=investigation.investigation_id,
+            action_name="schedule_extraction",
+            status="failed",
+            metadata={"reason": message[:240]},
+        )
 
     def _finish_round_counters(
         self,

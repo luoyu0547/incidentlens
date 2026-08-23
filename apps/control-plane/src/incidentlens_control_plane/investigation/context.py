@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
@@ -66,6 +66,7 @@ from incidentlens_control_plane.investigation.transcript import (
 )
 from incidentlens_control_plane.investigation.types import (
     AgentRun,
+    AgentRunKind,
     ChildReport,
     CompactBoundary,
     CompactionState,
@@ -446,14 +447,17 @@ def restore_context_header(
     task_prompt: str | None = None,
     evidence_refs: tuple[EvidenceReference, ...] = (),
     child_reports: tuple[ChildReport, ...] = (),
+    project_memory_text: str = "",
 ) -> tuple[TranscriptMessage, ...]:
     """Build the fixed leading user message for a provider context.
 
     The header carries the investigation/run context, the optional delegated
-    child task, the restoration attachments (current work plan, recently owned
-    evidence references and latest bounded child reports), the plan-keeping
-    instruction, and the latest session memory.  It is synthesized per build
-    (never persisted) and is therefore immune to snip and micro-compaction.
+    child task, the optional bounded Project Memory advisory attachment (only
+    ever injected into the very first parent request), the restoration
+    attachments (current work plan, recently owned evidence references and
+    latest bounded child reports), the plan-keeping instruction, and the latest
+    session memory.  It is synthesized per build (never persisted) and is
+    therefore immune to snip and micro-compaction.
     """
     parts: list[str] = [
         f"Investigation {investigation.investigation_id} | incident "
@@ -480,6 +484,8 @@ def restore_context_header(
             parts.append(
                 f"- {report.agent_run_id}: {report.summary[:_HEADER_CHILD_REPORT_WIDTH]}"
             )
+    if project_memory_text:
+        parts.append(project_memory_text)
     parts.append(
         "For complex investigations, create or update the work plan before "
         "running unrelated tools."
@@ -521,6 +527,7 @@ class AgentContextManager:
         now: Callable[[], datetime] | None = None,
         compactor: ContextCompactor | None = None,
         validator: CompactionValidator | None = None,
+        memory_renderer: Callable[[str, str, Iterable[str]], str] | None = None,
     ) -> None:
         self._store = store
         self._policy = policy or ContextBudgetPolicy()
@@ -529,6 +536,7 @@ class AgentContextManager:
         self._compactor = compactor
         self._validator = validator or CompactionValidator()
         self._transcript = TranscriptService(store)
+        self._memory_renderer = memory_renderer
 
     # -- public ---------------------------------------------------------------
 
@@ -969,6 +977,7 @@ class AgentContextManager:
             todos,
             task_prompt=self._task_prompt(run),
             evidence_refs=self._header_evidence_refs(run),
+            project_memory_text=self._project_memory_attachment(run, investigation),
         ) + flatten(groups)
         budget = self._estimate_budget(run, investigation, messages, ())
         return ActiveContext(
@@ -1014,6 +1023,7 @@ class AgentContextManager:
             task_prompt=self._task_prompt(run),
             evidence_refs=self._header_evidence_refs(run),
             child_reports=child_reports,
+            project_memory_text=self._project_memory_attachment(run, investigation),
         ) + flatten(groups)
         budget = self._estimate_budget(run, investigation, messages, tool_schemas)
         return ActiveContext(
@@ -1042,6 +1052,7 @@ class AgentContextManager:
         )
         groups = tool_result_budget(groups, max_chars=self._policy.tool_result_budget_chars)
         groups = micro_compact(groups, keep_recent=self._policy.keep_recent_tool_results)
+        project_memory_text = self._project_memory_attachment(run, investigation)
         while True:
             messages = restore_context_header(
                 run,
@@ -1051,6 +1062,7 @@ class AgentContextManager:
                 task_prompt=self._task_prompt(run),
                 evidence_refs=self._header_evidence_refs(run),
                 child_reports=child_reports,
+                project_memory_text=project_memory_text,
             ) + flatten(groups)
             budget = self._estimate_budget(run, investigation, messages, tool_schemas)
             if budget.input_tokens <= budget.max_input_tokens or len(groups) <= 1:
@@ -1066,6 +1078,34 @@ class AgentContextManager:
         return ActiveContext(
             messages=messages, budget=budget, memory=memory, todos=todos
         )
+
+    # -- bounded Project Memory attachment -------------------------------------
+
+    def _project_memory_attachment(
+        self, run: AgentRun, investigation: Investigation
+    ) -> str:
+        """Render the advisory Project Memory attachment for the first parent turn.
+
+        Only the very first request of a parent run carries the attachment; a
+        child run, a resumed run, or any later turn returns no attachment (the
+        selection is bounded and revalidated against the current environment, so
+        re-attaching on a later turn would be stale).  Any rendering or model
+        failure degrades to no attachment.
+        """
+        if self._memory_renderer is None:
+            return ""
+        if run.kind is not AgentRunKind.PARENT:
+            return ""
+        if run.usage.rounds != 0:
+            return ""
+        try:
+            return self._memory_renderer(
+                investigation.project_id,
+                investigation.symptom,
+                (investigation.service,),
+            )
+        except Exception:  # noqa: BLE001 - a failed render never blocks the request
+            return ""
 
     # -- deterministic compaction ---------------------------------------------
 

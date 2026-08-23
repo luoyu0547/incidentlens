@@ -20,13 +20,16 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from datetime import UTC, datetime
 
 from incidentlens_control_plane.investigation.types import Investigation
 from incidentlens_control_plane.project_memory.store import ProjectMemoryStore
 from incidentlens_control_plane.project_memory.types import (
+    ProjectMemoryCandidate,
     ProjectMemoryEntry,
     ProjectMemoryKind,
     ProjectMemoryRejected,
+    ProjectMemoryStatus,
 )
 
 MAX_FACT_LENGTH = 2_000
@@ -63,6 +66,34 @@ def _tokenize(text: str) -> frozenset[str]:
 
 def _contains_secret(text: str) -> bool:
     return any(pattern.search(text) is not None for pattern in _SECRET_PATTERNS)
+
+
+def candidate_rejection(
+    candidate: ProjectMemoryCandidate,
+    *,
+    owned_evidence_ids: Iterable[str] = (),
+) -> str | None:
+    """Return a stable rejection reason for a candidate that must not persist.
+
+    This runs the same safety rules as :meth:`ProjectMemoryService._validate`
+    against the pre-admission candidate shape so a single model batch can be
+    reduced to its surviving candidates *before* per-candidate admission.  A
+    blank ``source_investigation_id`` is fillable from the investigation and is
+    therefore not rejected here; empty evidence is unfillable provenance and is
+    rejected.  ``None`` means the candidate may proceed to admission.
+    """
+    if candidate.kind is ProjectMemoryKind.UNVERIFIED_HYPOTHESIS:
+        return "unverified hypothesis"
+    if not candidate.evidence_ids:
+        return "empty provenance"
+    if _contains_secret(candidate.fact):
+        return "secret-like value"
+    if len(candidate.fact) > MAX_FACT_LENGTH:
+        return "oversized fact"
+    foreign = sorted(set(candidate.evidence_ids) - set(owned_evidence_ids))
+    if foreign:
+        return "foreign evidence"
+    return None
 
 
 class ProjectMemoryService:
@@ -175,6 +206,34 @@ class ProjectMemoryService:
                 return candidate
         return None
 
+    def materialize_candidate(
+        self,
+        candidate: ProjectMemoryCandidate,
+        investigation: Investigation,
+        *,
+        now: datetime | None = None,
+    ) -> ProjectMemoryEntry:
+        """Turn a surviving extraction candidate into a new ACTIVE entry.
+
+        Project identity always comes from the source investigation (never the
+        model); provenance is filled from the investigation when the model left
+        it blank so the deterministic admission rules apply uniformly.
+        """
+        moment = now or datetime.now(UTC)
+        return ProjectMemoryEntry(
+            memory_id=candidate.memory_id,
+            project_id=investigation.project_id,
+            service_names=candidate.service_names,
+            fact=candidate.fact,
+            kind=candidate.kind,
+            source_investigation_id=candidate.source_investigation_id
+            or investigation.investigation_id,
+            evidence_ids=candidate.evidence_ids,
+            status=ProjectMemoryStatus.ACTIVE,
+            created_at=moment,
+            last_confirmed_at=moment,
+        )
+
     # -- bounded deterministic fallback selection ----------------------------
 
     def select_relevant(
@@ -224,7 +283,20 @@ class ProjectMemoryService:
         The text keeps explicit provenance (source investigation, evidence)
         and the literal advisory marker; empty when nothing is selected.
         """
-        selected = self.select_relevant(project_id, symptom, services, limit=limit)
+        return self.render_entries(
+            self.select_relevant(project_id, symptom, services, limit=limit)
+        )
+
+    def render_entries(
+        self, entries: Iterable[ProjectMemoryEntry]
+    ) -> str:
+        """Render a bounded set of entries as an advisory attachment.
+
+        Shared by deterministic selection and model-selected subsets; the text
+        always carries provenance and the literal advisory marker, and is empty
+        when no entries are given.
+        """
+        selected = tuple(entries)
         if not selected:
             return ""
         lines = ["Project memory (advisory; revalidate current environment.)", ""]

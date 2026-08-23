@@ -54,6 +54,12 @@ from incidentlens_control_plane.investigation.tool_executor import ToolExecutor
 from incidentlens_control_plane.logs.service import LogService
 from incidentlens_control_plane.logs.store import LogStore
 from incidentlens_control_plane.logs.subscriptions import LogSubscriptionManager
+from incidentlens_control_plane.project_memory.openai_adapter import (
+    OpenAIProjectMemoryAdapter,
+    ProjectMemoryCoordinator,
+)
+from incidentlens_control_plane.project_memory.service import ProjectMemoryService
+from incidentlens_control_plane.project_memory.store import ProjectMemoryStore
 from incidentlens_control_plane.project_registry.store import ProjectRegistryStore
 from incidentlens_control_plane.remote_ops.asyncssh_adapter import (
     AsyncSshTransportFactory,
@@ -89,6 +95,8 @@ class RuntimeServices:
     context_manager: AgentContextManager
     recovery: RecoveryService
     reports: object  # ReportService — 前向引用避免循环导入
+    project_memory_store: ProjectMemoryStore
+    project_memory: ProjectMemoryCoordinator
 
 
 def build_runtime(
@@ -96,6 +104,7 @@ def build_runtime(
     *,
     transport_factory: RemoteTransportFactory | None = None,
     fake_provider_registry: FakeProviderRegistry | None = None,
+    model_transport: OpenAICompatibleTransport | None = None,
 ) -> RuntimeServices:
     """Build and initialize the local runtime services.
 
@@ -122,6 +131,7 @@ def build_runtime(
     log_store = LogStore(connect)
     evidence = EvidenceStore(connect)
     investigation_store = InvestigationStore(connect)
+    project_memory_store = ProjectMemoryStore(connect)
     projects.migrate()
     events.migrate()
     approval_store.migrate()
@@ -129,6 +139,7 @@ def build_runtime(
     log_store.migrate()
     evidence.migrate()
     investigation_store.migrate()
+    project_memory_store.migrate()
 
     broker = RuntimeEventBroker()
     approvals = ApprovalService(
@@ -206,6 +217,7 @@ def build_runtime(
     fake_provider = fake_provider_registry or FakeProviderRegistry()
     provider = FakeProvider(fake_provider)
     compactor = None
+    transport = model_transport
     if settings.agent_mode == "llm_agent":
         if (
             not settings.llm_api_key
@@ -224,6 +236,28 @@ def build_runtime(
         transport = OpenAICompatibleTransport(provider_config)
         provider = OpenAICompatibleProvider(provider_config, transport=transport)
         compactor = OpenAICompatibleCompactor(provider_config, transport=transport)
+
+    # Project Memory: durable store + deterministic admission service + the
+    # shared-transport adapter, coordinated so extraction never blocks the
+    # orchestrator and rendering always degrades to the deterministic path.
+    project_memory_service = ProjectMemoryService(project_memory_store)
+    memory_adapter = None
+    if transport is not None:
+        memory_config = OpenAICompatibleConfig(
+            api_key=getattr(settings, "llm_api_key", None) or "local",
+            base_url=getattr(settings, "llm_base_url", None) or "http://local.invalid",
+            model=getattr(settings, "llm_active_model", None) or "project-memory",
+        )
+        memory_adapter = OpenAIProjectMemoryAdapter(
+            memory_config, transport=transport, service=project_memory_service
+        )
+    project_memory = ProjectMemoryCoordinator(
+        store=project_memory_store,
+        service=project_memory_service,
+        adapter=memory_adapter,
+        events=events,
+        broker=broker,
+    )
     context_manager = AgentContextManager(
         investigation_store,
         policy=ContextBudgetPolicy(
@@ -238,6 +272,7 @@ def build_runtime(
             semantic_compact_at_fraction=settings.agent_context_semantic_compact_at_fraction,
         ),
         compactor=compactor,
+        memory_renderer=project_memory.render_relevant,
     )
     orchestrator = AgentOrchestrator(
         store=investigation_store,
@@ -254,6 +289,7 @@ def build_runtime(
         context_manager=context_manager,
         hooks=hooks,
         delegation=delegation,
+        memory_collector=project_memory.enqueue,
     )
     source_discovery = SourceDiscoveryService(
         projects=projects,
@@ -326,4 +362,6 @@ def build_runtime(
         context_manager=context_manager,
         recovery=recovery,
         reports=reports,
+        project_memory_store=project_memory_store,
+        project_memory=project_memory,
     )

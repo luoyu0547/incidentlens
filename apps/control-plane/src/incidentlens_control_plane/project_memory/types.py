@@ -15,10 +15,13 @@ store, service and callers all reject Project Memory the same way.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from incidentlens_control_plane.investigation.types import Investigation
 
 
 class ProjectMemoryKind(StrEnum):
@@ -105,3 +108,50 @@ class ProjectMemoryRejected(Exception):
     Instances carry a stable, specific message naming the violated rule so
     callers and tests can distinguish rejections deterministically.
     """
+
+
+class ProjectMemoryCandidate(BaseModel):
+    """One non-persisted extraction candidate parsed from model output.
+
+    This is the parse shape produced by :class:`OpenAIProjectMemoryAdapter`:
+    it carries the model-facing fields only (no status or timestamps) and is
+    never written to the store on its own.  Parsing drops unknown fields so a
+    model can never smuggle raw tool output, and candidates whose kind is not
+    recognized here fail validation and are dropped before they reach the
+    admission service.  ``project_id`` and ``source_investigation_id`` default
+    to blank because the orchestrator's investigation is the authority for both
+    when the candidate is materialized.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    memory_id: str = Field(min_length=1, max_length=120)
+    project_id: str = Field(default="", max_length=80)
+    service_names: tuple[str, ...] = Field(default=(), max_length=32)
+    fact: str = Field(min_length=1, max_length=8_000)
+    kind: ProjectMemoryKind
+    source_investigation_id: str = Field(default="", max_length=120)
+    evidence_ids: tuple[str, ...] = Field(default=(), max_length=24)
+
+    _validate_evidence_ids = field_validator("evidence_ids")(
+        _validate_unique_citations
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectMemoryExtractionRequest:
+    """Bounded inputs for one automatic extraction call.
+
+    A completed parent investigation carries exactly these inputs into the
+    extractor: the durable ``investigation`` record, the owning run id, the set
+    of evidence ref ids the run owns, bounded conclusion summaries, a bounded
+    Session Memory snapshot (already redacted and bounded), and the stop
+    summary.  Raw tool output or log bodies never appear on this request.
+    """
+
+    investigation: Investigation
+    agent_run_id: str
+    owned_evidence_ids: tuple[str, ...]
+    conclusion_summaries: tuple[str, ...]
+    session_memory_snapshot: str
+    verification_summary: str

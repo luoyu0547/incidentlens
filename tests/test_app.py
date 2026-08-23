@@ -22,6 +22,9 @@ def test_runtime_shares_hook_runner_and_delegation_validator(tmp_path: Path) -> 
     assert orchestrator._context is runtime.context_manager
     assert orchestrator._hooks is executor._hooks
     assert orchestrator._delegation is executor._delegation
+    assert orchestrator._memory_collector.__self__ is runtime.project_memory
+    assert runtime.project_memory_store is not None
+    assert runtime.project_memory is not None
 
 
     from incidentlens_control_plane.config import RuntimeSettings
@@ -68,6 +71,7 @@ def test_llm_runtime_injects_openai_compatible_compactor(tmp_path: Path) -> None
     settings = _llm_settings(tmp_path)
     runtime = build_runtime(settings, transport_factory=FakeTransportFactory())
     assert isinstance(runtime.context_manager._compactor, OpenAICompatibleCompactor)
+    assert runtime.project_memory._adapter is not None
 
 
 def test_fake_runtime_does_not_inject_network_compactor(tmp_path: Path) -> None:
@@ -77,3 +81,4 @@ def test_fake_runtime_does_not_inject_network_compactor(tmp_path: Path) -> None:
     settings = _fake_settings(tmp_path)
     runtime = build_runtime(settings, transport_factory=FakeTransportFactory())
     assert runtime.context_manager._compactor is None
+    assert runtime.project_memory._adapter is None
