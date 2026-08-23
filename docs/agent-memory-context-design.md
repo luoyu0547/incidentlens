@@ -75,8 +75,8 @@ Memory 只帮助模型恢复工作状态，不替代 Evidence。Memory 中的摘
   - 最新子任务报告；
   - 创建/更新计划的指令。
 - **Session Memory**（最近的版本化压缩记忆）；
-- **最近 transcript 增量**（通过 `group_messages(after=boundary)` 重建，经过
-  `tool_result_budget` → `snip_groups` → `micro_compact` 变换）。
+- **boundary 之后的完整 transcript 增量**（通过 `group_messages(after=boundary)` 重建）。
+  系统先只对单个超大结果执行 `tool_result_budget`，完整计量后仅在真实压力下才进入后续变换。
 
 完整工具输出留在 EvidenceStore，通过 evidence 工具按需回读。
 
@@ -93,9 +93,11 @@ ToolExecutor 对输出设硬上限，并先将完整的脱敏结果写入 Eviden
 
 ### L1：结构化窗口（snip + micro-compact）
 
-`snip_groups` 按组原子性裁剪最旧的 transcript 增量（保护待审批、失败、不确定结果和
-子任务通知）；`micro_compact` 对已成功的工具对用截断占位文本替换详细输出，只保留最近
-`keep_recent` 个工具结果完整展示。两者都保证不拆分 tool_use/tool_result 对。
+正常预算内不按消息数量裁剪，也不存在“压缩后只保留最近 3 个结果”或任何固定 recent-N
+窗口。完整 transcript 先被 materialize 和计量。只有超过预算后的 fit 路径才可按组处理历史；
+`micro_compact` 也只处理超过时间阈值、已成功且可重新获取的工具结果，用带 evidence/重读
+方法的占位替换详情。短配置快照、失败/不确定结果、待审批操作、子任务通知和 boundary 之后
+尚未被 memory 覆盖的组不会被静默删除。所有变换都保持 tool_use/tool_result 原子配对。
 
 ### L2：Session Memory Compaction（确定性）
 
@@ -119,9 +121,10 @@ breaker，第 N 次尝试抛出 `CompactionCircuitOpen`，阻塞后续自动语�
 
 ### L4：Reactive Compaction
 
-模型接口返回 prompt-too-long 时，立即触发 `reactive_compact`：保留最近 `keep_recent_groups`
-个完整 transcript 组，对剩余头部执行语义压缩，然后从新边界重建上下文。每轮只允许一次响应式
-重试（通过 `CompactionState.reactive_round` 防重入）；再次失败暂停调查为 `PAUSED_BUDGET`。
+只有模型接口真实返回 prompt-too-long 时才触发 `reactive_compact`。此时
+`keep_recent_groups` 是溢出恢复时保留完整尾部的下限，不是日常上下文窗口；更老的连续前缀
+进入语义摘要并推进 boundary。每轮只允许一次响应式重试（通过
+`CompactionState.reactive_round` 防重入）；再次失败暂停调查为 `PAUSED_BUDGET`。
 
 ### L5：Todo 和 Manual Compact 工具
 
@@ -163,7 +166,8 @@ plugins or scripts and no separate action pipeline.
 - `TranscriptMessage` 持久化模型可见对话（append-only，SQLite）；
 - 工具调用/结果配对验证（`group_messages` / `UnpairedToolMessage`）；
 - Token 预算 Active Context（`ContextBudget` / `ConservativeTokenEstimator` / `AgentContextManager.build`）；
-- 确定性 compaction 管道：`tool_result_budget` → `snip_groups` → `micro_compact` → header + flatten；
+- 完整 transcript 优先的压力管道：预算内不裁剪；压力下才执行 group-aware memory boundary 与
+  基于年龄/可重获性的工具结果 stubbing；
 - Session Memory 确定性构建与 `CompactBoundary` / `CompactionState` 原子持久化；
 - Semantic Compaction 无工具 Protocol + schema 校验 + 配置驱动的 breaker（默认 3 次失败熔断）；
 - Reactive Compaction（每轮一次，保留最近 transcript 组）；
@@ -179,8 +183,8 @@ plugins or scripts and no separate action pipeline.
 ### 下一阶段
 
 1. 增加真实 tokenizer 或 Provider usage 校准，替换字符数估算；
-3. 引入带 provenance、版本和 TTL 的 Project Memory，默认仅作为调查线索；
-4. 增加长程评测：上下文压力、压缩前后事实保留、重启续跑、旧记忆污染和 Token 降幅。
+2. 继续扩展 Project Memory 的冲突失效和版本适用性评测；
+3. 增加更长程的真实 Provider 压力评测，但不缩小正常窗口或伪造日志来强制压缩。
 
 ## 6. 验收指标
 

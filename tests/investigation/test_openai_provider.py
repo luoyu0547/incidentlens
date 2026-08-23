@@ -21,6 +21,7 @@ from incidentlens_control_plane.investigation.openai_provider import (
 from incidentlens_control_plane.investigation.provider import (
     PromptTooLongError,
     ProviderError,
+    ProviderOutputFormatError,
 )
 from incidentlens_control_plane.investigation.types import (
     MessageRole,
@@ -118,6 +119,30 @@ async def test_provider_delegates_payload_to_injected_transport(
     assert payload["temperature"] == 0.0
     assert payload["response_format"] == {"type": "json_object"}
     assert result.tool_requests == ()
+
+
+async def test_provider_classifies_schema_invalid_json_as_correctable_format_error(
+    provider_config,
+) -> None:
+    invalid = json.dumps(
+        {
+            "tool_requests": [],
+            "hypotheses": [],
+            "conclusions": [{"conclusion": "wrong field"}],
+            "child_delegation": None,
+            "stop_signal": None,
+            "usage": {},
+        }
+    )
+    provider = OpenAICompatibleProvider(
+        provider_config,
+        transport=_FakeTransport(
+            response={"choices": [{"message": {"content": invalid}}]}
+        ),
+    )
+
+    with pytest.raises(ProviderOutputFormatError, match="summary"):
+        await provider.generate_turn(_dummy_request())
 
 
 async def test_provider_propagates_prompt_too_long_from_transport(
@@ -468,6 +493,21 @@ def test_normalise_optional_fields_discards_model_hypothesis_title():
     assert payload["hypotheses"] == [
         {"summary": "The canary may have an invalid database port."}
     ]
+
+
+def test_normalise_optional_fields_discards_citation_only_hypothesis() -> None:
+    """An evidence pointer without a claim is not a hypothesis proposal."""
+    payload = {
+        "tool_requests": [],
+        "hypotheses": [{"evidence_ids": ["ev-1"]}],
+        "conclusions": [],
+        "child_delegation": None,
+        "stop_signal": None,
+    }
+
+    _normalise_optional_fields(payload)
+
+    assert payload["hypotheses"] == []
 
 
 def test_result_payload_accepts_deepseek_dsml_tool_call_after_json() -> None:

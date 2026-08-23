@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "scenario": "controlled-tencent-cvm-dual-regression",
+  "provider": {
+    "protocol": "openai-compatible-chat-completions",
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-v4-flash"
+  },
+  "source_revision": "652591027543acc2049f9c668f02415fa599e825",
+  "run": {
+    "investigation_id": "inv-566c77e86c1b488c",
+    "agent_run_id": "run-56cc7eaa2eda407f",
+    "started_at": "2026-08-23T19:05:50.076948+00:00",
+    "completed_at": "2026-08-23T19:18:52.641036+00:00",
+    "status": "completed",
+    "stop_reason": "completed",
+    "rounds": 24,
+    "tool_calls": 60,
+    "evidence_count": 42,
+    "input_tokens_cumulative": 562170,
+    "output_tokens_cumulative": 41575,
+    "peak_turn_input_tokens": 33363,
+    "model_duration_ms": 334430,
+    "semantic_compactions": 0,
+    "compact_boundaries": 0,
+    "project_memories_extracted": 5
+  },
+  "safety": {
+    "approved_actions": 12,
+    "consumed_approvals": 11,
+    "unapproved_mutations": 0,
+    "rollback_count": 1,
+    "note": "One approved inverse edit failed before approval consumption after native rollback changed its expected SHA; its 15-minute authorization expired without mutation."
+  },
+  "outcome": {
+    "baseline": [201, 429, 503, 503],
+    "first_repair": [201, 201, 201, 201],
+    "payment_rollback": [201, 429, 201, 429],
+    "final_reapply": [201, 201, 201, 201],
+    "post_run_remote_recheck": [201, 201, 201, 201]
+  },
+  "evaluator": {
+    "module": "tests.eval.cloud_closed_loop",
+    "sha256": "32b868a8fbaefbe36d1f7e012f0a2f481415e805e6814f78cecba49bd97f4d80",
+    "passed": true,
+    "failures": []
+  },
+  "publication": {
+    "trace_projection": "The synchronized trace predates conclusion.created. The published trace adds one report.generated projection from persisted parent conclusions after verifying every cited evidence ID belongs to that run.",
+    "redaction_scan": "No API key, raw target IP, or local personal path was found in the published cast, trace, or text artifacts."
+  },
+  "artifacts": {
+    "cast": {
+      "path": "../../assets/hard-cloud-task7m.cast",
+      "sha256": "aaddf7ccfe527cf7294697353b6a770f063fe5038f7d2ed2e1c856b44a429ef3"
+    },
+    "trace": {
+      "path": "../../assets/hard-cloud-task7m.trace.jsonl",
+      "sha256": "cc1dd5400efa11efcb3e58a61a97db81af37466a247575ebee091be988775680"
+    },
+    "text": {
+      "path": "../../assets/hard-cloud-task7m.txt",
+      "sha256": "6e50f3865943ea6ba6755a0bc32806fcbe6a2baa43acae1f74488ac0a6bc9aba"
+    },
+    "final_matrix": {
+      "path": "final-matrix.jsonl",
+      "sha256": "be093d28e598946c26495b6130a73dfcd2c4fccb3440ff3b218303db00aa964a"
+    }
+  }
+}

@@ -59,6 +59,7 @@ class RuntimeEventType(StrEnum):
     POLICY_DECIDED = "policy.decided"
     TODO_CHANGED = "todo.changed"
     HYPOTHESIS_CHANGED = "hypothesis.changed"
+    CONCLUSION_CREATED = "conclusion.created"
     CONTEXT_COMPACTED = "context.compacted"
     SAFETY_STATE_CHANGED = "safety_state.changed"
 

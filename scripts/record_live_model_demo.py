@@ -80,8 +80,7 @@ _CONTEXT_OVERRIDE_FIELDS = frozenset(
         "agent_context_max_output_tokens",
         "agent_context_reserve_tokens",
         "agent_tool_result_budget_chars",
-        "agent_context_max_message_groups",
-        "agent_context_keep_recent_tool_results",
+        "agent_micro_compact_after_seconds",
         "agent_compact_max_failures",
         "agent_reactive_keep_recent_groups",
     }

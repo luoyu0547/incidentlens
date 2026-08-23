@@ -22,6 +22,7 @@ from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.events.types import RuntimeEvent, RuntimeEventType
 from incidentlens_control_plane.investigation.types import (
     AgentRun,
+    Conclusion,
     Hypothesis,
     Investigation,
     RegistryUpdateProposal,
@@ -480,6 +481,23 @@ class InvestigationEventPublisher:
             investigation_id=run.investigation_id,
             added=added,
             total=len(run.evidence),
+        )
+
+    def conclusion_created(
+        self,
+        run: AgentRun,
+        conclusion: Conclusion,
+        *,
+        occurred_at: datetime | None = None,
+    ) -> RuntimeEvent:
+        """Publish one grounded conclusion without raw tool or log content."""
+        return self.emit(
+            RuntimeEventType.CONCLUSION_CREATED,
+            occurred_at=occurred_at,
+            run_id=run.agent_run_id,
+            investigation_id=run.investigation_id,
+            evidence_ids=list(conclusion.evidence_ids),
+            conclusion=conclusion.model_dump(mode="json"),
         )
 
     # -- registry proposals ---------------------------------------------------

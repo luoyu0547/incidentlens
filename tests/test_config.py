@@ -28,8 +28,7 @@ def test_context_budget_environment_overrides_are_opt_in(monkeypatch, tmp_path) 
     monkeypatch.setenv("INCIDENTLENS_AGENT_CONTEXT_MAX_OUTPUT_TOKENS", "1000")
     monkeypatch.setenv("INCIDENTLENS_AGENT_CONTEXT_RESERVE_TOKENS", "1000")
     monkeypatch.setenv("INCIDENTLENS_AGENT_TOOL_RESULT_BUDGET_CHARS", "10000")
-    monkeypatch.setenv("INCIDENTLENS_AGENT_CONTEXT_MAX_MESSAGE_GROUPS", "10")
-    monkeypatch.setenv("INCIDENTLENS_AGENT_CONTEXT_KEEP_RECENT_TOOL_RESULTS", "1")
+    monkeypatch.setenv("INCIDENTLENS_AGENT_MICRO_COMPACT_AFTER_SECONDS", "7200")
     monkeypatch.setenv(
         "INCIDENTLENS_AGENT_CONTEXT_SEMANTIC_COMPACT_AT_FRACTION", "0.85"
     )
@@ -46,8 +45,7 @@ def test_context_budget_environment_overrides_are_opt_in(monkeypatch, tmp_path) 
     assert settings.agent_context_max_output_tokens == 1000
     assert settings.agent_context_reserve_tokens == 1000
     assert settings.agent_tool_result_budget_chars == 10000
-    assert settings.agent_context_max_message_groups == 10
-    assert settings.agent_context_keep_recent_tool_results == 1
+    assert settings.agent_micro_compact_after_seconds == 7200
     assert settings.agent_context_semantic_compact_at_fraction == 0.85
     assert settings.max_rounds_per_run == 24
     assert settings.max_tool_calls_per_run == 64

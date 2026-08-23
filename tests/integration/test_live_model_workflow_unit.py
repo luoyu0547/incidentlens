@@ -304,7 +304,7 @@ async def test_context_overrides_prefill_complete_groups_and_whitelists_keys(tmp
         _target(),
         _service(),
         context_overrides={
-            "agent_context_max_message_groups": 12,
+            "agent_micro_compact_after_seconds": 7_200,
             "prefill_complete_groups": 2,
         },
         fake_provider_registry=registry,
@@ -404,15 +404,15 @@ def test_main_serializes_callable_result_and_copies_artifacts(tmp_path, monkeypa
 def test_effective_settings_validates_context_override_values(tmp_path) -> None:
     settings = _settings(tmp_path)
     effective, prefill = record_live_model_demo._effective_settings(
-        settings, {"agent_context_max_message_groups": 12}
+        settings, {"agent_micro_compact_after_seconds": 7_200}
     )
-    assert effective.agent_context_max_message_groups == 12
+    assert effective.agent_micro_compact_after_seconds == 7_200
     assert prefill == 0
     with pytest.raises(ValueError):
         record_live_model_demo._effective_settings(
-            settings, {"agent_context_max_message_groups": 1}
+            settings, {"agent_micro_compact_after_seconds": 1}
         )
     with pytest.raises(ValueError):
         record_live_model_demo._effective_settings(
-            settings, {"agent_context_max_message_groups": "12"}
+            settings, {"agent_micro_compact_after_seconds": "7200"}
         )

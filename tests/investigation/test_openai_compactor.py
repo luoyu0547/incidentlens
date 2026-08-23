@@ -256,6 +256,26 @@ async def test_compactor_requires_full_strict_memory_shape(
         await compactor.compact(compact_request)
 
 
+@pytest.mark.asyncio
+async def test_compactor_deterministically_bounds_overlong_text_items(
+    config: OpenAICompatibleConfig,
+    compact_request: CompactionRequest,
+    memory_payload: dict[str, object],
+) -> None:
+    """Provider prose is bounded before strict semantic preservation checks."""
+    memory_payload = {
+        **memory_payload,
+        "completed_actions": ["x" * 241],
+    }
+    compactor = OpenAICompatibleCompactor(
+        config, transport=_FakeTransport(response=_response(memory_payload))
+    )
+
+    memory = await compactor.compact(compact_request)
+
+    assert memory.completed_actions == ("x" * 240,)
+
+
 # ---------------------------------------------------------------------------
 # Brief Step 3: CompactionRequest self-containedness
 # ---------------------------------------------------------------------------
@@ -373,6 +393,59 @@ def test_expected_output_includes_identity_fields(
     assert expected["through_round"] == 1
     assert expected["through_transcript_sequence"] == 3
     assert expected["expected_revision"] == 1  # no prior memory
+
+
+def test_expected_output_supplies_exact_session_memory_schema(
+    compact_request: CompactionRequest,
+) -> None:
+    """Structured fields must not drift into objects DeepSeek cannot validate."""
+    from incidentlens_control_plane.investigation.openai_compactor import (
+        _serialize_expected_output,
+    )
+
+    expected = json.loads(_serialize_expected_output(compact_request))
+    schema = expected["session_memory_json_schema"]
+    properties = schema["properties"]
+
+    assert properties["safety_state"]["type"] == "array"
+    assert properties["safety_state"]["items"]["type"] == "string"
+    assert properties["todos"]["items"]["type"] == "string"
+    recipe = schema["$defs"]["ReacquisitionRecipe"]
+    assert "arguments" in recipe["properties"]
+    assert "redacted_arguments" not in recipe["properties"]
+    assert expected["max_chars_per_text_item"]["completed_actions"] == 240
+    assert expected["max_chars_per_text_item"]["todos"] == 1_000
+
+
+def test_expected_output_names_pending_call_ids_that_must_survive(
+    compact_request: CompactionRequest,
+) -> None:
+    """A summary must receive the literal IDs the preservation gate checks."""
+    from incidentlens_control_plane.investigation.openai_compactor import (
+        _serialize_expected_output,
+    )
+
+    failed = TranscriptMessage(
+        agent_run_id="run-1",
+        sequence=4,
+        role=MessageRole.USER,
+        blocks=[
+            ToolResultBlock(
+                tool_call_id="call-pending-7",
+                status=ToolCallStatus.UNCERTAIN,
+                content="execution state unknown",
+            )
+        ],
+        created_at=NOW,
+    )
+    request = compact_request.model_copy(
+        update={"messages": (*compact_request.messages, failed)}
+    )
+
+    expected = json.loads(_serialize_expected_output(request))
+    assert expected["must_preserve"]["pending_tool_call_ids"] == [
+        "call-pending-7"
+    ]
 
 
 @pytest.fixture

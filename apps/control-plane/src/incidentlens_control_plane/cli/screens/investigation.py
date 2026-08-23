@@ -48,7 +48,7 @@ class InvestigationScreen(Screen):
             yield RichLog(id="activity", wrap=True, markup=True, highlight=False)
         yield Input(placeholder="输入 :help 查看调查命令", id="command-bar")
         yield Static(
-            ":report 报告 · :cancel 取消 · :approve <ID> 批准 · "
+            ":report 报告 · :resume 继续 · :cancel 取消 · :approve <ID> 批准 · "
             ":reject <ID> 拒绝 · :rollback <变更集 ID> · Ctrl+R 刷新",
             id="command-hint",
         )
@@ -223,12 +223,24 @@ class InvestigationScreen(Screen):
         argument = parts[1] if len(parts) == 2 else ""
         if action == ":help":
             log.write(
-                "[bold]可用命令[/]  :report · :cancel · :approve <审批 ID> · "
+                "[bold]可用命令[/]  :report · :resume · :cancel · :approve <审批 ID> · "
                 ":reject <审批 ID> · :rollback <变更集 ID> · :refresh"
             )
         elif action == ":report":
             self.action_report()
         elif action == ":refresh":
+            self.refresh_workspace()
+        elif action == ":resume" and self.runtime is not None:
+            runs = self.runtime.investigations.list_runs(
+                investigation_id=self.investigation_id
+            )
+            paused = [run for run in runs if run.status.value.startswith("paused_")]
+            if not paused:
+                log.write("[yellow]当前没有可继续的暂停 Agent。[/]")
+            else:
+                await self.runtime.investigations.resume_run(
+                    paused[-1].agent_run_id
+                )
             self.refresh_workspace()
         elif action == ":cancel" and self.runtime is not None:
             await self.runtime.investigations.cancel(self.investigation_id)

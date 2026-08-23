@@ -199,7 +199,6 @@ async def run_context_overflow_recovery() -> HarnessTrace:
                 context_window=8_000,
                 max_output_tokens=1_000,
                 reserve_tokens=0,
-                max_message_groups=1,
                 reactive_keep_recent_groups=1,
             ),
             now=lambda: NOW,

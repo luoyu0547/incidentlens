@@ -68,7 +68,7 @@ class ContextCompactor(Protocol):
 # Per-field width bounds a compactor memory must respect.  These mirror the
 # deterministic ``_memory_fields`` widths in ``context.py`` so semantic memory
 # is bounded as tightly as deterministic memory.
-_TEXT_WIDTHS: dict[str, int] = {
+COMPACTION_TEXT_WIDTHS: dict[str, int] = {
     "objective": 4_000,
     "confirmed_facts": 400,
     "active_hypotheses": 400,
@@ -138,7 +138,7 @@ class CompactionValidator:
                 raise CompactionRejected(
                     f"compactor memory recipe {index} contains unredacted arguments"
                 )
-        for field, width in _TEXT_WIDTHS.items():
+        for field, width in COMPACTION_TEXT_WIDTHS.items():
             value = getattr(memory, field)
             if isinstance(value, str):
                 self._check_text(field, value, width)
@@ -159,6 +159,7 @@ class CompactionValidator:
 
 
 __all__ = [
+    "COMPACTION_TEXT_WIDTHS",
     "CompactionCircuitOpen",
     "CompactionRejected",
     "CompactionRequest",

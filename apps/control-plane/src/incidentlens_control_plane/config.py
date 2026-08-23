@@ -61,8 +61,9 @@ class RuntimeSettings(BaseModel):
     agent_tool_result_budget_chars: int = Field(
         default=200_000, ge=10_000, le=5_000_000
     )
-    agent_context_max_message_groups: int = Field(default=50, ge=10, le=500)
-    agent_context_keep_recent_tool_results: int = Field(default=3, ge=1, le=20)
+    # Production-style time-based micro-compaction.  It is not a positional
+    # "keep N recent tool results" rule.
+    agent_micro_compact_after_seconds: int = Field(default=3_600, ge=60, le=86_400)
     # Fraction of ``max_input_tokens`` at which the agent loop asks the semantic
     # compactor to run, before the deterministic over-budget path is forced.
     # Stays below 1.0 so pressure compaction triggers before the hard ceiling.
@@ -120,11 +121,8 @@ class RuntimeSettings(BaseModel):
             agent_tool_result_budget_chars=_environment_int(
                 "INCIDENTLENS_AGENT_TOOL_RESULT_BUDGET_CHARS", 200_000
             ),
-            agent_context_max_message_groups=_environment_int(
-                "INCIDENTLENS_AGENT_CONTEXT_MAX_MESSAGE_GROUPS", 50
-            ),
-            agent_context_keep_recent_tool_results=_environment_int(
-                "INCIDENTLENS_AGENT_CONTEXT_KEEP_RECENT_TOOL_RESULTS", 3
+            agent_micro_compact_after_seconds=_environment_int(
+                "INCIDENTLENS_AGENT_MICRO_COMPACT_AFTER_SECONDS", 3_600
             ),
             agent_context_semantic_compact_at_fraction=_environment_float(
                 "INCIDENTLENS_AGENT_CONTEXT_SEMANTIC_COMPACT_AT_FRACTION", 0.9

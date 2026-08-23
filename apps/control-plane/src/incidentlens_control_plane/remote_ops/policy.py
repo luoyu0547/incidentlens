@@ -6,6 +6,7 @@ import re
 import shlex
 from collections.abc import Mapping
 from pathlib import PurePosixPath
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict
 
@@ -369,6 +370,182 @@ def _is_path_authorized(
         return False
 
 
+def _docker_logs_target(arguments: list[str]) -> str | None:
+    """Return the container operand after bounded, read-only log options."""
+    return _docker_read_target(
+        arguments,
+        options_with_values={"--since", "--tail", "--until"},
+        flags={"--details", "--timestamps"},
+    )
+
+
+def _docker_read_target(
+    arguments: list[str],
+    *,
+    options_with_values: set[str],
+    flags: set[str],
+) -> str | None:
+    """Parse one target while allowing read-only options on either side."""
+    index = 0
+    target: str | None = None
+    while index < len(arguments):
+        token = arguments[index]
+        if token in options_with_values:
+            if index + 1 >= len(arguments):
+                return None
+            index += 2
+            continue
+        if any(token.startswith(f"{option}=") for option in options_with_values):
+            index += 1
+            continue
+        if token in flags:
+            index += 1
+            continue
+        if token.startswith("-"):
+            return None
+        if target is not None:
+            return None
+        target = token
+        index += 1
+    return target
+
+
+def _docker_compose_read_subcommand(
+    arguments: list[str], service: ServiceRegistration
+) -> str | None:
+    """Return a read-only Compose subcommand after authorized file options."""
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token in {"-f", "--file", "--project-directory"}:
+            if index + 1 >= len(arguments):
+                return None
+            if not _is_path_authorized(arguments[index + 1], service):
+                return None
+            index += 2
+            continue
+        if token.startswith("--file=") or token.startswith("--project-directory="):
+            if not _is_path_authorized(token.split("=", 1)[1], service):
+                return None
+            index += 1
+            continue
+        if token.startswith("-"):
+            return None
+        return token if token in {"ps", "logs", "config"} else None
+    return None
+
+
+def _is_read_only_find(
+    arguments: list[str], service: ServiceRegistration
+) -> bool:
+    """Accept a small, non-mutating ``find`` grammar under registered roots."""
+    index = 0
+    roots: list[str] = []
+    while index < len(arguments) and not arguments[index].startswith("-"):
+        roots.append(arguments[index])
+        index += 1
+    if not roots or not all(_is_path_authorized(root, service) for root in roots):
+        return False
+
+    while index < len(arguments):
+        token = arguments[index]
+        if token == "-maxdepth":
+            if index + 1 >= len(arguments) or not arguments[index + 1].isdigit():
+                return False
+            depth = int(arguments[index + 1])
+            if not 0 <= depth <= 10:
+                return False
+            index += 2
+            continue
+        if token == "-mindepth":
+            if index + 1 >= len(arguments) or not arguments[index + 1].isdigit():
+                return False
+            index += 2
+            continue
+        if token == "-type":
+            if index + 1 >= len(arguments) or arguments[index + 1] not in {"f", "d", "l"}:
+                return False
+            index += 2
+            continue
+        if token in {"-name", "-iname", "-path"}:
+            if index + 1 >= len(arguments):
+                return False
+            index += 2
+            continue
+        if token in {"-print", "-print0"}:
+            index += 1
+            continue
+        return False
+    return True
+
+
+def _is_loopback_http_url(value: str, *, health_only: bool) -> bool:
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if parsed.username or parsed.password or parsed.hostname not in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }:
+        return False
+    if parsed.query or parsed.fragment:
+        return False
+    if health_only:
+        return parsed.path in {"/health", "/healthz"}
+    return parsed.path in {"", "/"}
+
+
+def _is_read_only_health_curl(arguments: list[str]) -> bool:
+    index = 0
+    url: str | None = None
+    while index < len(arguments):
+        token = arguments[index]
+        if token in {"-s", "-S", "--silent", "--show-error"}:
+            index += 1
+            continue
+        if token in {"-o", "--output"}:
+            if index + 1 >= len(arguments) or arguments[index + 1] != "/dev/null":
+                return False
+            index += 2
+            continue
+        if token in {"-w", "--write-out"}:
+            if index + 1 >= len(arguments) or arguments[index + 1] != "%{http_code}":
+                return False
+            index += 2
+            continue
+        if token.startswith("-") or url is not None:
+            return False
+        url = token
+        index += 1
+    return url is not None and _is_loopback_http_url(url, health_only=True)
+
+
+def _is_registered_validation_script(
+    executable: str,
+    arguments: list[str],
+    service: ServiceRegistration,
+) -> bool:
+    if executable not in {"python", "python3"} or len(arguments) != 5:
+        return False
+    script, url_flag, url, expected_flag, expected = arguments
+    try:
+        script_path = PurePosixPath(script)
+    except ValueError:
+        return False
+    return (
+        script_path in service.allowed_validation_scripts
+        and url_flag == "--url"
+        and _is_loopback_http_url(url, health_only=False)
+        and expected_flag == "--expected"
+        and expected in {"pre-repair", "repaired"}
+    )
+
+
 class CommandPolicy:
     """Conservative command classifier for shell execution.
 
@@ -425,6 +602,22 @@ class CommandPolicy:
                 canonical_operation=command,
             )
 
+        if executable == "curl" and _is_read_only_health_curl(stripped[1:]):
+            return ShellPolicyDecision(
+                risk=OperationRisk.AUTO_READ,
+                reason="bounded loopback health request is a safe read",
+                approval_can_override=True,
+                canonical_operation=command,
+            )
+
+        if _is_registered_validation_script(executable, stripped[1:], service):
+            return ShellPolicyDecision(
+                risk=OperationRisk.AUTO_READ,
+                reason="registered loopback validation script",
+                approval_can_override=True,
+                canonical_operation=command,
+            )
+
         if executable == "docker" and len(stripped) > 1:
             docker_subcmd = stripped[1]
 
@@ -439,7 +632,11 @@ class CommandPolicy:
 
             # docker inspect is automatic for registered containers
             if docker_subcmd == "inspect" and len(stripped) > 2:
-                target_container = stripped[2]
+                target_container = _docker_read_target(
+                    stripped[2:],
+                    options_with_values={"--format", "-f", "--type"},
+                    flags={"--size", "-s"},
+                )
                 if target_container in service.container_names:
                     return ShellPolicyDecision(
                         risk=OperationRisk.AUTO_READ,
@@ -450,7 +647,7 @@ class CommandPolicy:
 
             # docker logs is automatic for registered containers
             if docker_subcmd == "logs" and len(stripped) > 2:
-                target_container = stripped[2]
+                target_container = _docker_logs_target(stripped[2:])
                 if target_container in service.container_names:
                     return ShellPolicyDecision(
                         risk=OperationRisk.AUTO_READ,
@@ -459,10 +656,20 @@ class CommandPolicy:
                         canonical_operation=command,
                     )
 
+            if docker_subcmd == "port" and len(stripped) == 3:
+                target_container = stripped[2]
+                if target_container in service.container_names:
+                    return ShellPolicyDecision(
+                        risk=OperationRisk.AUTO_READ,
+                        reason=f"docker port {target_container} is a registered container",
+                        approval_can_override=True,
+                        canonical_operation=command,
+                    )
+
             # docker compose ps/logs/config are automatic for registered services
             if docker_subcmd == "compose" and len(stripped) > 2:
-                compose_subcmd = stripped[2]
-                if compose_subcmd in ("ps", "logs", "config"):
+                compose_subcmd = _docker_compose_read_subcommand(stripped[2:], service)
+                if compose_subcmd is not None:
                     return ShellPolicyDecision(
                         risk=OperationRisk.AUTO_READ,
                         reason=f"docker compose {compose_subcmd} is a safe read-only command",
@@ -507,6 +714,14 @@ class CommandPolicy:
                         approval_can_override=True,
                         canonical_operation=command,
                     )
+
+        if executable == "find" and _is_read_only_find(stripped[1:], service):
+            return ShellPolicyDecision(
+                risk=OperationRisk.AUTO_READ,
+                reason="read-only find under authorized roots",
+                approval_can_override=True,
+                canonical_operation=command,
+            )
 
         # --- sed -i is forbidden (must use remote_edit) ---
         if executable == "sed" and "-i" in stripped:

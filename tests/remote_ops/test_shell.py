@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import PurePosixPath
 
 import pytest
 from incidentlens_control_plane.project_registry.types import ServiceRegistration
@@ -326,6 +327,64 @@ class TestCommandPolicy:
         )
         assert decision.risk is OperationRisk.AUTO_READ
 
+    def test_docker_logs_with_tail_option_is_automatic_for_registered_container(
+        self,
+        shell_request: ShellRequest,
+        service_registration: ServiceRegistration,
+    ) -> None:
+        decision = CommandPolicy().evaluate(
+            shell_request.model_copy(
+                update={"command": "docker logs --tail 60 payments-api-1"}
+            ),
+            service_registration,
+        )
+        assert decision.risk is OperationRisk.AUTO_READ
+
+    def test_docker_read_options_after_registered_container_are_automatic(
+        self,
+        shell_request: ShellRequest,
+        service_registration: ServiceRegistration,
+    ) -> None:
+        commands = [
+            "docker logs payments-api-1 --tail 25",
+            "docker inspect payments-api-1 --format '{{.Name}}'",
+            "docker port payments-api-1",
+        ]
+        for command in commands:
+            decision = CommandPolicy().evaluate(
+                shell_request.model_copy(update={"command": command}),
+                service_registration,
+            )
+            assert decision.risk is OperationRisk.AUTO_READ
+
+    def test_docker_compose_with_authorized_file_is_automatic_read(
+        self,
+        shell_request: ShellRequest,
+        service_registration: ServiceRegistration,
+    ) -> None:
+        decision = CommandPolicy().evaluate(
+            shell_request.model_copy(
+                update={
+                    "command": "docker compose -f /opt/payments/docker-compose.yml ps"
+                }
+            ),
+            service_registration,
+        )
+        assert decision.risk is OperationRisk.AUTO_READ
+
+    def test_docker_compose_with_unauthorized_file_requires_approval(
+        self,
+        shell_request: ShellRequest,
+        service_registration: ServiceRegistration,
+    ) -> None:
+        decision = CommandPolicy().evaluate(
+            shell_request.model_copy(
+                update={"command": "docker compose -f /etc/docker-compose.yml config"}
+            ),
+            service_registration,
+        )
+        assert decision.risk is OperationRisk.APPROVAL_REQUIRED
+
     def test_ls_cat_stat_automatic_when_paths_valid(
         self,
         shell_request: ShellRequest,
@@ -345,6 +404,42 @@ class TestCommandPolicy:
             assert decision.risk is OperationRisk.AUTO_READ, (
                 f"Expected AUTO_READ for {command!r}"
             )
+
+    def test_read_only_find_is_automatic_for_authorized_root(
+        self,
+        shell_request: ShellRequest,
+        service_registration: ServiceRegistration,
+    ) -> None:
+        commands = [
+            "find /opt/payments -type f",
+            "find /opt/payments -maxdepth 2 -type f",
+        ]
+
+        for command in commands:
+            decision = CommandPolicy().evaluate(
+                shell_request.model_copy(update={"command": command}),
+                service_registration,
+            )
+
+            assert decision.risk is OperationRisk.AUTO_READ
+
+    def test_find_with_unauthorized_root_or_action_is_not_automatic(
+        self,
+        shell_request: ShellRequest,
+        service_registration: ServiceRegistration,
+    ) -> None:
+        commands = [
+            "find /etc -maxdepth 2 -type f",
+            "find /opt/payments -exec cat {} +",
+            "find /opt/payments -fprint /tmp/leak",
+        ]
+
+        for command in commands:
+            decision = CommandPolicy().evaluate(
+                shell_request.model_copy(update={"command": command}),
+                service_registration,
+            )
+            assert decision.risk is not OperationRisk.AUTO_READ
 
     def test_ls_cat_stat_with_relative_parent_arg_requires_approval(
         self,
@@ -402,6 +497,93 @@ class TestCommandPolicy:
             assert decision.risk is OperationRisk.APPROVAL_REQUIRED, (
                 f"Expected APPROVAL_REQUIRED for {command!r}"
             )
+
+    def test_loopback_health_curl_is_an_automatic_read(
+        self,
+        shell_request: ShellRequest,
+        service_registration: ServiceRegistration,
+    ) -> None:
+        decision = CommandPolicy().evaluate(
+            shell_request.model_copy(
+                update={
+                    "command": (
+                        "curl -s -o /dev/null -w '%{http_code}' "
+                        "http://localhost:18080/health"
+                    )
+                }
+            ),
+            service_registration,
+        )
+        assert decision.risk is OperationRisk.AUTO_READ
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "curl -L http://localhost:18080/health",
+            "curl -X POST http://localhost:18080/health",
+            "curl http://example.com/health",
+            "curl http://127.0.0.1:18080/admin/delete",
+        ],
+    )
+    def test_non_health_or_stateful_curl_is_not_automatic(
+        self,
+        shell_request: ShellRequest,
+        service_registration: ServiceRegistration,
+        command: str,
+    ) -> None:
+        decision = CommandPolicy().evaluate(
+            shell_request.model_copy(update={"command": command}),
+            service_registration,
+        )
+        assert decision.risk is not OperationRisk.AUTO_READ
+
+    def test_registered_validation_script_is_automatic(
+        self,
+        shell_request: ShellRequest,
+        service_registration: ServiceRegistration,
+    ) -> None:
+        script = "/opt/payments/scripts/request_matrix.py"
+        registered = service_registration.model_copy(
+            update={"allowed_validation_scripts": (PurePosixPath(script),)}
+        )
+        decision = CommandPolicy().evaluate(
+            shell_request.model_copy(
+                update={
+                    "command": (
+                        f"python3 {script} --url http://localhost:18080 "
+                        "--expected repaired"
+                    )
+                }
+            ),
+            registered,
+        )
+        assert decision.risk is OperationRisk.AUTO_READ
+
+    @pytest.mark.parametrize(
+        "suffix",
+        [
+            "--url http://example.com --expected repaired",
+            "--url http://localhost:18080 --expected unknown",
+            "--url http://localhost:18080 --expected repaired --extra yes",
+        ],
+    )
+    def test_registered_validation_script_rejects_unbounded_arguments(
+        self,
+        shell_request: ShellRequest,
+        service_registration: ServiceRegistration,
+        suffix: str,
+    ) -> None:
+        script = "/opt/payments/scripts/request_matrix.py"
+        registered = service_registration.model_copy(
+            update={"allowed_validation_scripts": (PurePosixPath(script),)}
+        )
+        decision = CommandPolicy().evaluate(
+            shell_request.model_copy(
+                update={"command": f"python3 {script} {suffix}"}
+            ),
+            registered,
+        )
+        assert decision.risk is not OperationRisk.AUTO_READ
 
     def test_command_substitution_is_forbidden(
         self,

@@ -91,7 +91,11 @@ class IncidentLensApp(App):
         elif self.investigation_id and self.show_report:
             self.push_screen(ReportScreen(self.investigation_id, self.runtime))
         elif self.investigation_id:
-            self.push_screen(InvestigationScreen(self.investigation_id, self.runtime))
+            self.push_screen(
+                InvestigationScreen(
+                    self.investigation_id, self.runtime, recorder=self.recorder
+                )
+            )
         else:
             self.push_screen(DashboardScreen(self.runtime))
 

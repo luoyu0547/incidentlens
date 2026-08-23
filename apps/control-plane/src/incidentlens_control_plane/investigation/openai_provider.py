@@ -17,6 +17,7 @@ from incidentlens_control_plane.investigation.provider import (
     ConversationRequest,
     ModelProvider,
     ProviderError,
+    ProviderOutputFormatError,
     ToolSchema,
 )
 from incidentlens_control_plane.investigation.types import (
@@ -74,9 +75,8 @@ class OpenAICompatibleProvider(ModelProvider):
             # Keep the diagnostic bounded and free of request/response bodies:
             # callers need the schema reason to distinguish a provider-format
             # issue from a transport error, but raw model text may be sensitive.
-            raise ProviderError(
+            raise ProviderOutputFormatError(
                 f"OpenAI-compatible API 返回的结构化调查回合无效：{str(exc)[:500]}",
-                retryable=True,
             ) from exc
 
 def _message_payload(message: TranscriptMessage) -> dict[str, object]:
@@ -467,6 +467,22 @@ def _normalise_optional_fields(payload: object) -> None:
                         arguments["todos"] = decoded_todos
     hypotheses = payload.get("hypotheses")
     if isinstance(hypotheses, list):
+        hypotheses[:] = [
+            hypothesis
+            for hypothesis in hypotheses
+            if not isinstance(hypothesis, dict)
+            or any(
+                hypothesis.get(field)
+                for field in (
+                    "summary",
+                    "description",
+                    "title",
+                    "facts",
+                    "inferences",
+                    "unknowns",
+                )
+            )
+        ]
         for hypothesis in hypotheses:
             if not isinstance(hypothesis, dict):
                 continue
@@ -527,6 +543,11 @@ Todo 与复杂工作：
 观察与变更：
 - 只读观察与变更必须区分。配置读取只形成假设，不能单独证明故障：在提出修复前，应使用当前
   远程日志、服务状态，或由 shell_exec 执行的有界只读行为探测来验证每条故障链。
+- 当行为探测已经复现症状，且配置、运行时状态或日志已经给出与该症状一致的直接因果证据时，
+  应立即提出最小可逆修复；不要继续读取无关 Dockerfile、重复查看同一配置，或用多个等价命令
+  寻求冗余确认。审批使同一批后续工具未执行时，应在审批完成后的下一轮重新提出仍需要的操作。
+- registry_info 同时给出 validation_base_url 与 validation_scripts 时，优先用该注册脚本和
+  端点完成复现/验证，不要改写一次性 curl。
 - 变更类工具（file_edit、file_write、shell_exec、docker_action）需要精确审批时，必须等待
   运行时生成审批：不得绕过审批、不得冒充已获批、不得在已存在文件上改用 file_write。
 

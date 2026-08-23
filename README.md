@@ -53,6 +53,34 @@ uv run python scripts/record_live_model_demo.py \
   --report-dir docs/assets
 ```
 
+### Tencent CVM 真实 Agent 闭环
+
+2026-08-24 完成了一次受控 Tencent CVM 真实验收。配置的 `deepseek-v4-flash` 通过正常
+IncidentLens Agent Loop 和 SSH transport 自主调查两个并发回归：payment 拒付阈值导致 stable
+大额请求 429，canary 数据库端口漂移导致全部请求 503。操作员只批准精确显示的文件修改、容器
+读取与 Compose 重建；Agent 完成首次修复后，使用 IncidentLens 原生 changeset rollback 真实
+恢复 payment 故障，再基于新 SHA 重新应用修复。
+
+| 阶段 | stable/10 | stable/500 | canary/10 | canary/500 |
+| --- | ---: | ---: | ---: | ---: |
+| 故障基线 | 201 | 429 | 503 | 503 |
+| 首次修复 | 201 | 201 | 201 | 201 |
+| 回滚 payment | 201 | 429 | 201 | 429 |
+| 重新应用/最终复查 | 201 | 201 | 201 | 201 |
+
+该运行最终为 `completed`，共 24 轮、60 次工具调用、42 条持久 evidence、12 次精确批准、
+0 次未批准 mutation，并自动提取 5 条有 provenance 的 Project Memory。云端闭环 evaluator 返回
+`passed: true`。完整的 [验收说明](docs/cloud-acceptance/hard-incident/README.md)、
+[manifest](docs/cloud-acceptance/hard-incident/manifest.json)、
+[结构化 trace](docs/assets/hard-cloud-task7m.trace.jsonl)、
+[终端 cast](docs/assets/hard-cloud-task7m.cast) 和
+[纯文本记录](docs/assets/hard-cloud-task7m.txt) 均已保留并记录 SHA-256。
+
+这次真实运行的单轮峰值输入为 33,363 tokens，未达到压缩压力阈值，因此语义压缩次数为 0。
+这不是缺失演示，而是诚实结果：Runtime 不按轮次压缩，也不存在“压缩后只留最近 3 个结果”的
+固定窗口；预算内完整 transcript 保持可见。该记录不宣称验证了真实长上下文压缩质量，也不表示
+系统可以绕过注册 scope 或审批修改任意生产环境。
+
 ### 风险审批与资源范围
 
 | 审批中心 | 项目管理 |

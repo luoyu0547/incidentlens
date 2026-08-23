@@ -18,6 +18,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from incidentlens_control_plane.investigation.compactor import (
+    COMPACTION_TEXT_WIDTHS,
     CompactionRejected,
     CompactionRequest,
     ContextCompactor,
@@ -65,7 +66,8 @@ class OpenAICompatibleCompactor(ContextCompactor):
             raise CompactionRejected(exc.message) from exc
         try:
             content = response["choices"][0]["message"]["content"]
-            memory = SessionMemory.model_validate_json(_strip_fence(content))
+            memory_payload = json.loads(_strip_fence(content))
+            memory = SessionMemory.model_validate(_bound_text_items(memory_payload))
         except (KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
             raise CompactionRejected(
                 "model compaction response is invalid"
@@ -146,6 +148,9 @@ def _serialize_expected_output(request: CompactionRequest) -> str:
         {
             "instructions": (
                 "Summarize the transcript into a SessionMemory object. "
+                "The response must validate against session_memory_json_schema "
+                "exactly; do not replace string-array items with objects and "
+                "do not rename schema properties. "
                 "You must echo the following identity fields exactly: "
                 "agent_run_id, investigation_id, revision, "
                 "through_round, through_transcript_sequence. "
@@ -154,7 +159,8 @@ def _serialize_expected_output(request: CompactionRequest) -> str:
                 "safety_state and pending_actions. "
                 "Record the latest verification outcome (applied / verified / "
                 "failed / rolled back / reapplied) in completed_actions or "
-                "open_questions. "
+                "open_questions. Copy every literal value in must_preserve into "
+                "the corresponding memory fields. "
                 "Always end with concrete next_actions."
             ),
             "agent_run_id": request.agent_run_id,
@@ -163,6 +169,9 @@ def _serialize_expected_output(request: CompactionRequest) -> str:
             "through_round": request.through_round,
             "through_transcript_sequence": request.through_sequence,
             "allowed_evidence_ids": list(request.allowed_evidence_ids),
+            "must_preserve": _preservation_requirements(request),
+            "max_chars_per_text_item": COMPACTION_TEXT_WIDTHS,
+            "session_memory_json_schema": SessionMemory.model_json_schema(),
         },
         ensure_ascii=False,
     )
@@ -184,6 +193,22 @@ def _strip_fence(content: object) -> str:
     if text.startswith("```") and text.endswith("```"):
         return text.split("\n", 1)[1].rsplit("\n", 1)[0]
     return text
+
+
+def _bound_text_items(payload: object) -> object:
+    """Apply validator text widths without repairing semantic identities/state."""
+    if not isinstance(payload, dict):
+        return payload
+    bounded = dict(payload)
+    for field, width in COMPACTION_TEXT_WIDTHS.items():
+        value = bounded.get(field)
+        if isinstance(value, str):
+            bounded[field] = value[:width]
+        elif isinstance(value, list):
+            bounded[field] = [
+                item[:width] if isinstance(item, str) else item for item in value
+            ]
+    return bounded
 
 
 _COMPACTION_SYSTEM_PROMPT = """\
@@ -250,28 +275,10 @@ def _require_preserved_state(request: CompactionRequest, memory: SessionMemory) 
             "model compaction memory must preserve concrete next_actions"
         )
 
-    transcript_hashes: set[str] = set()
-    pending_calls: set[str] = set()
-    has_verification = False
-    for message in request.messages:
-        for block in message.blocks:
-            if isinstance(block, ToolResultBlock):
-                if block.status in {
-                    ToolCallStatus.WAITING_APPROVAL,
-                    ToolCallStatus.FAILED,
-                    ToolCallStatus.UNCERTAIN,
-                }:
-                    pending_calls.add(block.tool_call_id)
-                transcript_hashes.update(_SHA256_TOKEN_RE.findall(block.content))
-                if any(marker in block.content.lower() for marker in _VERIFICATION_MARKERS):
-                    has_verification = True
-            elif isinstance(block, ToolUseBlock):
-                if "verify" in block.tool_name.lower():
-                    has_verification = True
-            elif isinstance(block, TextBlock):
-                transcript_hashes.update(_SHA256_TOKEN_RE.findall(block.text))
-                if any(marker in block.text.lower() for marker in _VERIFICATION_MARKERS):
-                    has_verification = True
+    requirements = _preservation_requirements(request)
+    transcript_hashes = set(requirements["sha256_hashes"])
+    pending_calls = set(requirements["pending_tool_call_ids"])
+    has_verification = bool(requirements["has_verification_state"])
 
     carried = " ".join(_memory_text_fields(memory))
     dropped_hashes = sorted(
@@ -299,6 +306,37 @@ def _require_preserved_state(request: CompactionRequest, memory: SessionMemory) 
             raise CompactionRejected(
                 "model compaction memory drops the latest verification state"
             )
+
+
+def _preservation_requirements(request: CompactionRequest) -> dict[str, object]:
+    """Return literal state that both the model and validator must preserve."""
+    transcript_hashes: set[str] = set()
+    pending_calls: set[str] = set()
+    has_verification = False
+    for message in request.messages:
+        for block in message.blocks:
+            if isinstance(block, ToolResultBlock):
+                if block.status in {
+                    ToolCallStatus.WAITING_APPROVAL,
+                    ToolCallStatus.FAILED,
+                    ToolCallStatus.UNCERTAIN,
+                }:
+                    pending_calls.add(block.tool_call_id)
+                transcript_hashes.update(_SHA256_TOKEN_RE.findall(block.content))
+                if any(marker in block.content.lower() for marker in _VERIFICATION_MARKERS):
+                    has_verification = True
+            elif isinstance(block, ToolUseBlock):
+                if "verify" in block.tool_name.lower():
+                    has_verification = True
+            elif isinstance(block, TextBlock):
+                transcript_hashes.update(_SHA256_TOKEN_RE.findall(block.text))
+                if any(marker in block.text.lower() for marker in _VERIFICATION_MARKERS):
+                    has_verification = True
+    return {
+        "sha256_hashes": sorted(transcript_hashes),
+        "pending_tool_call_ids": sorted(pending_calls),
+        "has_verification_state": has_verification,
+    }
 
 
 def _memory_text_fields(memory: SessionMemory) -> list[str]:

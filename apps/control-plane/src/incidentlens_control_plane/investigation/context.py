@@ -6,22 +6,20 @@ table, the compact boundaries, the versioned ``SessionMemory`` revisions, the
 work plan (``agent_todos``) and the domain stores.  This module materializes
 one bounded provider context per turn from that state.
 
-The materialization pipeline is layered and every layer is deterministic:
+The materialization pipeline is layered and pressure-driven:
 
-1. ``tool_result_budget`` bounds each tool-result preview; the complete output
-   stays in the EvidenceStore and is referenced by ``evidence_ids``.
-2. ``snip_groups`` keeps the newest ``max_message_groups`` groups, never
-   splitting a tool request from its matching result and never dropping a
-   protected group (pending approval, failed/uncertain result, unmatched child
-   notification).
-3. ``micro_compact`` stubs old succeeded tool results whose full output was
-   persisted, keeping the most recent results verbatim.
-4. When the active context still exceeds ``max_input_tokens``, a deterministic
-   ``SessionMemory`` revision is built from current-run durable state and a
-   compact boundary advances the transcript coverage.
-5. Only after memory exists may the oldest eligible recent groups be dropped to
-   fit the budget; the context header, Todo plan, protected results and child
-   notifications are never dropped.
+1. ``tool_result_budget`` bounds only individually oversized previews; complete
+   redacted output stays in EvidenceStore behind ``evidence_ids``.
+2. The complete bounded transcript is materialized and measured before any
+   history transform. In-budget contexts retain every message group.
+3. At semantic pressure, a ``SessionMemory`` revision covers a contiguous
+   prefix and advances the compact boundary atomically.
+4. Only results older than the configured time threshold are eligible for
+   micro-compaction. There is no positional "keep the latest N" rule.
+5. Uncovered tail groups are never silently deleted. A real provider
+   prompt-too-long response uses group-aware reactive compaction instead.
+6. After compaction, recent file pages, Todo state, safety state and evidence
+   provenance are reattached from durable stores under explicit token budgets.
 
 Token estimation is deliberately conservative (``ConservativeTokenEstimator``)
 and can only be *calibrated down* -- never optimistically up -- from real
@@ -32,14 +30,16 @@ from __future__ import annotations
 
 import json
 import math
+import sqlite3
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
 from pydantic import BaseModel, ValidationError
 
+from incidentlens_control_plane.evidence.types import EvidenceKind, EvidenceRef
 from incidentlens_control_plane.investigation.compactor import (
     CompactionCircuitOpen,
     CompactionRejected,
@@ -106,6 +106,9 @@ _HEADER_EVIDENCE_REFS_LIMIT = 24
 _HEADER_EVIDENCE_SUMMARY_WIDTH = 240
 _HEADER_CHILD_REPORTS_LIMIT = 4
 _HEADER_CHILD_REPORT_WIDTH = 400
+_RESTORED_FILE_LIMIT = 5
+_RESTORED_FILE_TOKENS = 5_000
+_RESTORED_FILES_TOTAL_TOKENS = 50_000
 
 
 def _json_default(value: object) -> object:
@@ -193,8 +196,7 @@ class ContextBudgetPolicy:
     max_output_tokens: int = 8_000
     reserve_tokens: int = 13_000
     tool_result_budget_chars: int = 200_000
-    max_message_groups: int = 50
-    keep_recent_tool_results: int = 3
+    micro_compact_after_seconds: int = 3_600
     system_prompt: str = ""
     compact_max_failures: int = 3
     reactive_keep_recent_groups: int = 5
@@ -211,10 +213,8 @@ class ContextBudgetPolicy:
             raise ValueError("context_window must exceed max_output_tokens + reserve_tokens")
         if self.tool_result_budget_chars < 10_000:
             raise ValueError("tool_result_budget_chars must be >= 10000")
-        if self.max_message_groups < 1:
-            raise ValueError("max_message_groups must be >= 1")
-        if self.keep_recent_tool_results < 1:
-            raise ValueError("keep_recent_tool_results must be >= 1")
+        if self.micro_compact_after_seconds < 60:
+            raise ValueError("micro_compact_after_seconds must be >= 60")
         if self.compact_max_failures < 1:
             raise ValueError("compact_max_failures must be >= 1")
         if self.reactive_keep_recent_groups < 1:
@@ -334,23 +334,6 @@ def tool_result_budget(
     return tuple(rebuilt_groups)
 
 
-def snip_groups(
-    groups: tuple[MessageGroup, ...], *, max_groups: int
-) -> tuple[MessageGroup, ...]:
-    """Keep the newest ``max_groups`` groups plus any protected dropped ones.
-
-    The cut is group-atomic: a tool-use message and its matching result are
-    kept or dropped together.  A protected group (failed/uncertain/approval,
-    child notification) is re-appended even when it falls inside the dropped
-    prefix, so the active context never loses it.
-    """
-    if len(groups) <= max_groups:
-        return groups
-    dropped = groups[:-max_groups]
-    protected = tuple(group for group in dropped if _is_protected_group(group))
-    return protected + groups[-max_groups:]
-
-
 def _stub_succeeded_result(group: MessageGroup) -> MessageGroup:
     """Replace a succeeded tool result with a reacquisition or immutable stub."""
     tool_names = {
@@ -388,27 +371,38 @@ def _stub_succeeded_result(group: MessageGroup) -> MessageGroup:
 
 
 def micro_compact(
-    groups: tuple[MessageGroup, ...], *, keep_recent: int
+    groups: tuple[MessageGroup, ...], *, now: datetime, minimum_age_seconds: int
 ) -> tuple[MessageGroup, ...]:
-    """Stub old succeeded tool results whose output was persisted.
+    """Stub only succeeded tool results older than the time-based threshold.
 
-    The most recent ``keep_recent`` succeeded tool-result groups stay verbatim;
-    older succeeded results (whose complete content lives in the EvidenceStore)
-    are reduced to a bounded stub.  Protected groups are never stubbed and tool
-    pairs are never split.
+    This models the production time-based micro-compact path.  It deliberately
+    has no positional "keep the latest N results" rule: fresh groups remain
+    complete regardless of how many tool calls occurred.  Protected groups,
+    short exact values and tool pairing are preserved.
     """
-    succeeded_total = sum(1 for group in groups if _is_succeeded_tool_pair(group))
-    stub_until = succeeded_total - keep_recent
-    succeeded_seen = 0
+    if minimum_age_seconds < 60:
+        raise ValueError("minimum_age_seconds must be >= 60")
+    cutoff = now - timedelta(seconds=minimum_age_seconds)
     rebuilt: list[MessageGroup] = []
     for group in groups:
         if _is_protected_group(group):
             rebuilt.append(group)
             continue
         if _is_succeeded_tool_pair(group):
-            succeeded_seen += 1
-            if succeeded_seen <= stub_until:
-                rebuilt.append(_stub_succeeded_result(group))
+            is_old = max(message.created_at for message in group.messages) <= cutoff
+            if is_old:
+                # Tiny results (for example one-line env/config values) cost
+                # less than the reacquisition stub and often carry the exact
+                # fact the agent is comparing.  The teaching implementation
+                # also leaves results <=120 characters intact.
+                has_large_result = any(
+                    isinstance(block, ToolResultBlock) and len(block.content) > 120
+                    for message in group.messages
+                    for block in message.blocks
+                )
+                rebuilt.append(
+                    _stub_succeeded_result(group) if has_large_result else group
+                )
                 continue
         rebuilt.append(group)
     return tuple(rebuilt)
@@ -448,6 +442,7 @@ def restore_context_header(
     evidence_refs: tuple[EvidenceReference, ...] = (),
     child_reports: tuple[ChildReport, ...] = (),
     project_memory_text: str = "",
+    restored_file_text: str = "",
 ) -> tuple[TranscriptMessage, ...]:
     """Build the fixed leading user message for a provider context.
 
@@ -486,6 +481,8 @@ def restore_context_header(
             )
     if project_memory_text:
         parts.append(project_memory_text)
+    if restored_file_text:
+        parts.append(restored_file_text)
     parts.append(
         "For complex investigations, create or update the work plan before "
         "running unrelated tools."
@@ -511,11 +508,11 @@ def restore_context_header(
 class AgentContextManager:
     """Build bounded, token-budgeted provider contexts from durable state.
 
-    ``build`` runs the deterministic compaction pipeline in the fixed order
-    (tool-result budget -> snip -> micro-compact -> header + flatten), then, if
-    the materialized context still exceeds the input budget, appends a
-    deterministic ``SessionMemory`` revision and advances a ``CompactBoundary``
-    before re-materializing from the new boundary.
+    ``build`` first measures the complete bounded transcript. Only real token
+    pressure can create a deterministic ``SessionMemory`` revision and advance
+    a ``CompactBoundary``. Post-boundary groups remain intact unless an old,
+    reproducible result is time-eligible for a bounded stub; recent file pages
+    are restored from evidence after a compact.
     """
 
     def __init__(
@@ -600,9 +597,8 @@ class AgentContextManager:
     ) -> ActiveContext:
         """Materialize one provider context, compacting semantically on pressure.
 
-        The deterministic pipeline (tool-result budget, group-safe snip and
-        micro-compaction every turn) runs first; the semantic compactor is the
-        *pressure valve*.  When the estimated input has crossed
+        The complete bounded transcript is measured first; the semantic
+        compactor is the *pressure valve*. When the estimated input has crossed
         ``semantic_compact_at_tokens`` -- a configurable fraction below
         ``max_input_tokens`` -- one model-backed compaction summarizes the
         recent transcript and an atomic memory/boundary commit is made, after
@@ -956,8 +952,9 @@ class AgentContextManager:
 
         Groups the new memory already summarizes (``sequence <=
         through_sequence``) are never replayed; the preserved ``tail`` is
-        otherwise kept whole, budgeted and micro-compacted like any active
-        context, then replayed behind the header carrying the fresh memory.
+        otherwise kept whole and budgeted, then replayed behind the header
+        carrying the fresh memory. Reactive compaction already selected this
+        tail explicitly, so it must not immediately erase it again.
         Tool schemas are not available on this path, so the budget estimate
         counts no tool tokens.
         """
@@ -969,7 +966,6 @@ class AgentContextManager:
             if any(message.sequence > through_sequence for message in group.messages)
         )
         groups = tool_result_budget(tail, max_chars=self._policy.tool_result_budget_chars)
-        groups = micro_compact(groups, keep_recent=self._policy.keep_recent_tool_results)
         messages = restore_context_header(
             run,
             investigation,
@@ -978,6 +974,7 @@ class AgentContextManager:
             task_prompt=self._task_prompt(run),
             evidence_refs=self._header_evidence_refs(run),
             project_memory_text=self._project_memory_attachment(run, investigation),
+            restored_file_text=self._restored_file_context(memory),
         ) + flatten(groups)
         budget = self._estimate_budget(run, investigation, messages, ())
         return ActiveContext(
@@ -1013,8 +1010,10 @@ class AgentContextManager:
             run.agent_run_id, after=boundary.through_sequence if boundary else 0
         )
         groups = tool_result_budget(groups, max_chars=self._policy.tool_result_budget_chars)
-        groups = snip_groups(groups, max_groups=self._policy.max_message_groups)
-        groups = micro_compact(groups, keep_recent=self._policy.keep_recent_tool_results)
+        # First materialize the complete bounded transcript and measure it.
+        # Message-count snipping and micro-compaction are pressure tools, not a
+        # permanent three-result history window.  They are applied only by the
+        # post-memory fit path once the full context actually exceeds budget.
         messages = restore_context_header(
             run,
             investigation,
@@ -1024,6 +1023,7 @@ class AgentContextManager:
             evidence_refs=self._header_evidence_refs(run),
             child_reports=child_reports,
             project_memory_text=self._project_memory_attachment(run, investigation),
+            restored_file_text=self._restored_file_context(memory),
         ) + flatten(groups)
         budget = self._estimate_budget(run, investigation, messages, tool_schemas)
         return ActiveContext(
@@ -1040,44 +1040,130 @@ class AgentContextManager:
         todos: tuple[TodoItem, ...],
         child_reports: tuple[ChildReport, ...] = (),
     ) -> ActiveContext:
-        """Drop the oldest eligible recent groups until the context fits.
+        """Apply pressure-only stubbing without dropping uncovered tail groups.
 
-        Precondition: ``memory`` is not ``None`` — the dropped groups must be
-        summarized by a Session Memory revision, otherwise their history would
-        be lost from every future context.  The caller only invokes this after
-        a memory revision exists; protected groups are never dropped.
+        ``memory`` summarizes only messages at or before ``boundary``.  Its
+        mere existence must never authorize deleting newer groups.  If bounded
+        stubbing cannot fit the complete post-boundary tail, return the
+        over-budget context intact so the provider's one-shot reactive compact
+        can summarize that tail explicitly.
         """
         groups = self._transcript.group_messages(
             run.agent_run_id, after=boundary.through_sequence if boundary else 0
         )
         groups = tool_result_budget(groups, max_chars=self._policy.tool_result_budget_chars)
-        groups = micro_compact(groups, keep_recent=self._policy.keep_recent_tool_results)
+        groups = micro_compact(
+            groups,
+            now=self._now(),
+            minimum_age_seconds=self._policy.micro_compact_after_seconds,
+        )
         project_memory_text = self._project_memory_attachment(run, investigation)
-        while True:
-            messages = restore_context_header(
-                run,
-                investigation,
-                memory,
-                todos,
-                task_prompt=self._task_prompt(run),
-                evidence_refs=self._header_evidence_refs(run),
-                child_reports=child_reports,
-                project_memory_text=project_memory_text,
-            ) + flatten(groups)
-            budget = self._estimate_budget(run, investigation, messages, tool_schemas)
-            if budget.input_tokens <= budget.max_input_tokens or len(groups) <= 1:
-                break
-            dropped = False
-            for index, group in enumerate(groups):
-                if not _is_protected_group(group):
-                    groups = groups[:index] + groups[index + 1 :]
-                    dropped = True
-                    break
-            if not dropped:
-                break
+        messages = restore_context_header(
+            run,
+            investigation,
+            memory,
+            todos,
+            task_prompt=self._task_prompt(run),
+            evidence_refs=self._header_evidence_refs(run),
+            child_reports=child_reports,
+            project_memory_text=project_memory_text,
+            restored_file_text=self._restored_file_context(memory),
+        ) + flatten(groups)
+        budget = self._estimate_budget(run, investigation, messages, tool_schemas)
         return ActiveContext(
             messages=messages, budget=budget, memory=memory, todos=todos
         )
+
+    def _restored_file_context(self, memory: SessionMemory | None) -> str:
+        """Reattach recent read pages referenced by a compacted memory revision."""
+        if memory is None:
+            return ""
+        pages_by_source: dict[str, list[EvidenceRef]] = {}
+        source_order: list[str] = []
+        for evidence_id in reversed(memory.evidence_ids):
+            try:
+                ref = self._store.get_evidence(evidence_id)
+            except (KeyError, sqlite3.Error):
+                continue
+            if ref.evidence_kind is not EvidenceKind.FILE_SNAPSHOT:
+                continue
+            if ref.metadata.get("operation") not in {"host_read", "container_read"}:
+                continue
+            source = ref.source_ref or evidence_id
+            if source not in pages_by_source:
+                if len(source_order) >= _RESTORED_FILE_LIMIT:
+                    continue
+                pages_by_source[source] = []
+                source_order.append(source)
+            pages_by_source[source].append(ref)
+
+        restored: list[tuple[str, tuple[str, ...], str, int]] = []
+        used_tokens = 0
+        for source in source_order:
+            newest_pages = pages_by_source[source]
+            chosen_newest: list[tuple[EvidenceRef, str]] = []
+            file_tokens = 0
+            for ref in newest_pages:
+                page_label = self._restored_page_label(ref)
+                piece = (
+                    f"{page_label}\n{ref.content_redacted}"
+                    if page_label
+                    else ref.content_redacted
+                )
+                remaining = _RESTORED_FILE_TOKENS - file_tokens
+                if remaining <= 0:
+                    break
+                piece = self._truncate_text_to_tokens(piece, remaining)
+                piece_tokens = self._estimator.count_text(piece)
+                chosen_newest.append((ref, piece))
+                file_tokens += piece_tokens
+            if not chosen_newest:
+                continue
+            if used_tokens + file_tokens > _RESTORED_FILES_TOTAL_TOKENS:
+                continue
+            chronological = tuple(reversed(chosen_newest))
+            restored.append(
+                (
+                    source,
+                    tuple(ref.evidence_ref_id for ref, _ in chronological),
+                    "\n".join(piece for _, piece in chronological),
+                    file_tokens,
+                )
+            )
+            used_tokens += file_tokens
+        if not restored:
+            return ""
+        lines = ["Recent file contents restored after compaction:"]
+        for source, evidence_ids, content, _ in reversed(restored):
+            lines.append(f"--- {source} (evidence={','.join(evidence_ids)}) ---")
+            lines.append(content)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _restored_page_label(ref: EvidenceRef) -> str:
+        if ref.metadata.get("read_mode") == "lines":
+            start = ref.metadata.get("start_line", "1")
+            end = ref.metadata.get("end_line") or "end"
+            return f"[lines {start}-{end}; evidence={ref.evidence_ref_id}]"
+        if ref.metadata.get("read_mode") == "bytes":
+            offset = ref.metadata.get("offset", "0")
+            limit = ref.metadata.get("limit", "unknown")
+            return f"[bytes offset={offset} limit={limit}; evidence={ref.evidence_ref_id}]"
+        return ""
+
+    def _truncate_text_to_tokens(self, text: str, max_tokens: int) -> str:
+        """Return the longest prefix whose conservative estimate fits the cap."""
+        if self._estimator.count_text(text) <= max_tokens:
+            return text
+        marker = "\n...[restored file truncated]"
+        low, high = 0, len(text)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if self._estimator.count_text(text[:middle] + marker) <= max_tokens:
+                low = middle
+            else:
+                high = middle - 1
+        return text[:low] + marker
 
     # -- bounded Project Memory attachment -------------------------------------
 
@@ -1174,9 +1260,10 @@ class AgentContextManager:
         The boundary is a contiguous sequence threshold: every group whose
         messages are all ``<= boundary`` is summarized by the new memory, and
         the rest form the replayed tail.  The tail is sized against
-        ``max_input_tokens`` using the sizes the groups will actually have after
-        micro-compaction (old succeeded tool results are stubbed, recent ones
-        stay verbatim), and the largest boundary whose tail fits is chosen.  A
+        ``max_input_tokens`` using the complete bounded groups.  A pressure
+        transform must never be assumed before the coverage boundary actually
+        summarizes those groups.  The largest boundary whose full tail fits is
+        chosen.  A
         protected group is never covered: the boundary is capped below the first
         protected group so a failed/uncertain/approval result or a child
         notification is always replayed.
@@ -1229,11 +1316,7 @@ class AgentContextManager:
             )
             tail_tokens = sum(
                 self._estimator.count_json(message.model_dump())
-                for message in flatten(
-                    micro_compact(
-                        tail, keep_recent=self._policy.keep_recent_tool_results
-                    )
-                )
+                for message in flatten(tail)
             )
             if tail_tokens <= tail_budget:
                 # The smallest boundary whose tail fits keeps the most recent
@@ -1498,6 +1581,5 @@ __all__ = [
     "flatten",
     "micro_compact",
     "restore_context_header",
-    "snip_groups",
     "tool_result_budget",
 ]

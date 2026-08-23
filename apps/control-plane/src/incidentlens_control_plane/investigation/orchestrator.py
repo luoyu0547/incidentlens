@@ -65,6 +65,7 @@ from incidentlens_control_plane.investigation.provider import (
     ProviderContextMismatch,
     ProviderCrash,
     ProviderError,
+    ProviderOutputFormatError,
     ProviderOutputRejected,
     ProviderOutputValidator,
     RunCheckpoint,
@@ -365,10 +366,41 @@ class AgentOrchestrator:
             AgentRunStatus.PAUSED_UNCERTAIN_STATE,
         }:
             # Resume re-evaluates the pause condition under current budgets.
+            # A missing-evidence pause exhausted a *consecutive stagnation*
+            # window. An explicit operator resume grants a fresh window while
+            # preserving every cumulative round/tool/time/output counter.
+            if run.status is AgentRunStatus.PAUSED_MISSING_EVIDENCE:
+                run = self._bump_usage(
+                    run, consecutive_no_new_evidence_rounds=0
+                )
+                investigation = self._bump_investigation_usage(
+                    investigation, consecutive_no_new_evidence_rounds=0
+                )
+                self._store.update_agent_run(run)
+                self._store.update_investigation(investigation)
+            elif run.status is AgentRunStatus.PAUSED_BUDGET:
+                run = self._grant_remaining_investigation_capacity(
+                    run, investigation
+                )
+                self._store.update_agent_run(run)
             run = self._transition_run(run, AgentRunStatus.RUNNING, now=now)
             self._transition_investigation(
                 investigation, InvestigationStatus.RUNNING, now=now
             )
+            try:
+                self._append_resume_continuation(run.agent_run_id, now)
+            except Exception as exc:  # noqa: BLE001 - never send a corrupt tail
+                run = self._store.get_agent_run(agent_run_id)
+                investigation = self._store.get_investigation(run.investigation_id)
+                self._pause(
+                    run,
+                    investigation,
+                    AgentRunStatus.PAUSED_UNCERTAIN_STATE,
+                    now=now,
+                    reason=f"resume transcript append failed: {exc}",
+                    stop_reason=StopReason.UNCERTAIN_STATE,
+                )
+                return self._store.get_agent_run(agent_run_id)
             return None
         if run.status is AgentRunStatus.CREATED:
             run = self._transition_run(run, AgentRunStatus.RUNNING, now=now)
@@ -519,15 +551,6 @@ class AgentOrchestrator:
         )
         self._store.update_agent_run(run)
         run = self._store.get_agent_run(agent_run_id)
-
-        validator = ProviderOutputValidator(request, run)
-        try:
-            validator.validate(result)
-        except (ProviderOutputRejected, ProviderContextMismatch) as exc:
-            run, investigation = await self._drain_all_children(
-                run, investigation, pending_children, child_reports, now
-            )
-            return self._fail(run, investigation, now, reason=str(exc))
 
         # Provider IDs only correlate blocks inside this turn. Persist and execute
         # harness-allocated IDs so two runs may safely receive the same provider ID.
@@ -701,9 +724,50 @@ class AgentOrchestrator:
 
     async def _call_provider(self, request: ConversationRequest) -> AgentTurnResult:
         retries = 0
+        current_request = request
         while True:
             try:
-                return await self._provider.generate_turn(request)
+                result = await self._provider.generate_turn(current_request)
+                run = self._store.get_agent_run(
+                    current_request.checkpoint.agent_run_id
+                )
+                ProviderOutputValidator(current_request, run).validate(result)
+                return result
+            except ProviderOutputFormatError as exc:
+                if retries >= self._max_provider_retries:
+                    raise ProviderError(str(exc), retryable=False) from exc
+                retries += 1
+                run = self._store.get_agent_run(request.checkpoint.agent_run_id)
+                if (
+                    AGENT_RUN_STATE_MACHINE.is_terminal(run.status)
+                    or run.status is AgentRunStatus.CANCEL_REQUESTED
+                ):
+                    raise ProviderError(str(exc), retryable=False) from exc
+                correction = TranscriptMessage(
+                    agent_run_id=run.agent_run_id,
+                    sequence=(
+                        max(
+                            (message.sequence for message in current_request.messages),
+                            default=0,
+                        )
+                        + 1
+                    ),
+                    role=MessageRole.USER,
+                    blocks=(
+                        TextBlock(
+                            text=(
+                                "Your previous JSON did not match AgentTurnResult: "
+                                f"{str(exc)[:500]}. Re-emit the same intended turn as "
+                                "one valid JSON object. Use `summary` for each conclusion "
+                                "and do not add fields outside the supplied schema."
+                            )
+                        ),
+                    ),
+                    created_at=self._now(),
+                )
+                current_request = current_request.model_copy(
+                    update={"messages": (*current_request.messages, correction)}
+                )
             except ProviderError as exc:
                 if not exc.retryable or retries >= self._max_provider_retries:
                     raise
@@ -714,6 +778,46 @@ class AgentOrchestrator:
                     or run.status is AgentRunStatus.CANCEL_REQUESTED
                 ):
                     raise exc
+            except ProviderOutputRejected as exc:
+                if retries >= self._max_provider_retries:
+                    raise ProviderError(str(exc), retryable=False) from exc
+                retries += 1
+                run = self._store.get_agent_run(request.checkpoint.agent_run_id)
+                if (
+                    AGENT_RUN_STATE_MACHINE.is_terminal(run.status)
+                    or run.status is AgentRunStatus.CANCEL_REQUESTED
+                ):
+                    raise ProviderError(str(exc), retryable=False) from exc
+                next_sequence = (
+                    max(
+                        (message.sequence for message in current_request.messages),
+                        default=0,
+                    )
+                    + 1
+                )
+                correction = TranscriptMessage(
+                    agent_run_id=run.agent_run_id,
+                    sequence=next_sequence,
+                    role=MessageRole.USER,
+                    blocks=(
+                        TextBlock(
+                            text=(
+                                "Your previous structured turn was rejected by the "
+                                f"harness: {str(exc)[:500]}. Re-emit the intended "
+                                "action using only an explicitly provided tool name; "
+                                "never call protocol wrapper names such as tool_use."
+                            )
+                        ),
+                    ),
+                    created_at=self._now(),
+                )
+                current_request = current_request.model_copy(
+                    update={
+                        "messages": (*current_request.messages, correction)
+                    }
+                )
+            except ProviderContextMismatch:
+                raise
 
     async def _build_request(
         self,
@@ -805,6 +909,35 @@ class AgentOrchestrator:
             created_at=now,
         )
         self._transcript.append_message(message)
+
+    def _append_resume_continuation(self, agent_run_id: str, now: datetime) -> None:
+        """Append the explicit user action when a paused transcript ends assistant-side.
+
+        Hidden provider reasoning is intentionally not persisted. Some
+        thinking-mode APIs reject an assistant-ended resumed request unless
+        that hidden field is replayed. An operator resume is instead represented
+        as a normal, auditable user continuation. Approval resumes already end
+        with a user-side tool result and need no additional message.
+        """
+        messages = self._store.list_transcript_messages(agent_run_id)
+        if not messages or messages[-1].role is not MessageRole.ASSISTANT:
+            return
+        self._transcript.append_message(
+            TranscriptMessage(
+                agent_run_id=agent_run_id,
+                sequence=messages[-1].sequence + 1,
+                role=MessageRole.USER,
+                blocks=(
+                    TextBlock(
+                        text=(
+                            "Operator explicitly resumed this paused run. Continue from "
+                            "the durable checkpoint and current evidence."
+                        )
+                    ),
+                ),
+                created_at=now,
+            )
+        )
 
     def _namespace_tool_requests(
         self, run: AgentRun, result: AgentTurnResult
@@ -1163,6 +1296,42 @@ class AgentOrchestrator:
             if axis in reason:
                 return stop_reason
         return StopReason.BUDGET_OUTPUT
+
+    @staticmethod
+    def _grant_remaining_investigation_capacity(
+        run: AgentRun, investigation: Investigation
+    ) -> AgentRun:
+        """Let an explicitly resumed run consume the investigation's unused budget.
+
+        Per-run limits are checkpoints inside the harder investigation-wide
+        limits.  A resume may cross the former, but never grants one additional
+        investigation round or tool call.
+        """
+        budget_updates: dict[str, int] = {}
+        if run.stop_reason is StopReason.BUDGET_TOOL_CALLS:
+            remaining = max(
+                0,
+                investigation.budget.max_tool_calls
+                - investigation.usage.tool_calls,
+            )
+            budget_updates["max_tool_calls"] = min(
+                500,
+                max(run.budget.max_tool_calls, run.usage.tool_calls + remaining),
+            )
+        elif run.stop_reason is StopReason.BUDGET_ROUNDS:
+            remaining = max(
+                0,
+                investigation.budget.max_rounds - investigation.usage.rounds,
+            )
+            budget_updates["max_rounds"] = min(
+                200,
+                max(run.budget.max_rounds, run.usage.rounds + remaining),
+            )
+        if not budget_updates:
+            return run
+        return run.model_copy(
+            update={"budget": run.budget.model_copy(update=budget_updates)}
+        )
 
     @staticmethod
     def _investigation_pause(run_status: AgentRunStatus) -> InvestigationStatus:
@@ -2262,7 +2431,11 @@ class AgentOrchestrator:
         # missing-evidence stop and are surfaced by the pause logic instead.
         if not conclusion.evidence_ids:
             return
-        self._store.create_conclusion(run.agent_run_id, run.investigation_id, conclusion, now=now)
+        stored = self._store.create_conclusion(
+            run.agent_run_id, run.investigation_id, conclusion, now=now
+        )
+        if self._events_pub is not None:
+            self._events_pub.conclusion_created(run, stored, occurred_at=now)
 
     def _append_evidence(
         self,

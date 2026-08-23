@@ -713,10 +713,25 @@ class InvestigationService:
                 "evidence_count": run.usage.evidence_count + len(new_refs),
                 "tool_calls": run.usage.tool_calls + 1,
                 "total_output_bytes": run.usage.total_output_bytes + outcome.output_bytes,
+                "consecutive_no_new_evidence_rounds": 0,
             }
         )
         run = run.model_copy(update={"usage": usage})
         self._store.update_agent_run(run)
+        investigation = self._store.get_investigation(run.investigation_id)
+        investigation_usage = investigation.usage.model_copy(
+            update={
+                "evidence_count": investigation.usage.evidence_count + len(new_refs),
+                "tool_calls": investigation.usage.tool_calls + 1,
+                "total_output_bytes": (
+                    investigation.usage.total_output_bytes + outcome.output_bytes
+                ),
+                "consecutive_no_new_evidence_rounds": 0,
+            }
+        )
+        self._store.update_investigation(
+            investigation.model_copy(update={"usage": investigation_usage})
+        )
         if self._events_pub is not None:
             self._events_pub.evidence_appended(
                 run, added=len(new_refs), occurred_at=now

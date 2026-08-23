@@ -229,6 +229,8 @@ class SourceDiscoveryService:
             "--project-directory",
             str(target.compose_working_directory),
         ]
+        for compose_file in target.compose_files:
+            argv += ["--file", str(compose_file)]
         if target.compose_project_name:
             argv += ["--project-name", target.compose_project_name]
         argv += ["config"]

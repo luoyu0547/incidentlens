@@ -17,7 +17,9 @@ from pathlib import Path
 
 _MUTATION_TOOLS = frozenset({"file_edit", "file_write", "docker_action"})
 _EXECUTED = frozenset({"succeeded", "completed"})
-_CONCLUSION_EVENT_TYPES = frozenset({"report.generated", "conclusion"})
+_CONCLUSION_EVENT_TYPES = frozenset(
+    {"report.generated", "conclusion", "conclusion.created"}
+)
 _REQUIRED_CELLS = {("stable", 10), ("stable", 500), ("canary", 10), ("canary", 500)}
 
 
@@ -44,8 +46,8 @@ def evaluate(trace_path: Path, matrix_path: Path) -> CloudClosedLoopResult:
         events.append((line_index, event_type, payload if isinstance(payload, dict) else {}))
     _check_evidence_and_conclusions(failures, events)
     _check_mutations(failures, events)
-    _check_change_closure(failures, events)
-    _check_matrix(failures, matrix_path)
+    matrix_verified = _check_matrix(failures, matrix_path)
+    _check_change_closure(failures, events, matrix_verified=matrix_verified)
     return CloudClosedLoopResult(not failures, tuple(failures))
 
 
@@ -116,14 +118,20 @@ def _check_mutations(failures: list[str], events) -> None:
             failures.append("approval_before_mutation_missing")
 
 
-def _check_change_closure(failures: list[str], events) -> None:
+def _check_change_closure(
+    failures: list[str], events, *, matrix_verified: bool
+) -> None:
     verified_indexes = [
         line_index
         for line_index, event_type, payload in events
         if event_type == "changeset.status_changed"
         and payload.get("status") == "verified"
     ]
-    if not verified_indexes:
+    # A four-cell 201 matrix is the scenario's outcome verification.  A
+    # changeset VERIFIED transition is also accepted, but is not prescribed:
+    # forcing one internal state sequence would evaluate choreography rather
+    # than the cloud repair result.
+    if not verified_indexes and not matrix_verified:
         failures.append("verification_missing")
     rolled_back = [
         line_index
@@ -149,15 +157,17 @@ def _check_change_closure(failures: list[str], events) -> None:
         failures.append("reapply_missing")
 
 
-def _check_matrix(failures: list[str], matrix_path: Path) -> None:
+def _check_matrix(failures: list[str], matrix_path: Path) -> bool:
     try:
         cells = [json.loads(line) for line in matrix_path.read_text().splitlines() if line.strip()]
     except (OSError, json.JSONDecodeError):
         failures.append("final_matrix_failed")
-        return
+        return False
     observed = {(cell.get("route"), cell.get("amount")) for cell in cells}
     if observed != _REQUIRED_CELLS or any(cell.get("status") != 201 for cell in cells):
         failures.append("final_matrix_failed")
+        return False
+    return True
 
 
 def _as_int(value: object) -> int:

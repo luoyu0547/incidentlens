@@ -175,6 +175,7 @@ class EvidenceService:
         source_ref: str,
         content: str,
         size_bytes: int,
+        metadata: dict[str, str] | None = None,
         created_by: str,
         now: datetime,
     ) -> EvidenceRef:
@@ -187,6 +188,11 @@ class EvidenceService:
             service_name=service_name,
         )
         redacted = self._redact_content(content, EvidenceKind.FILE_SNAPSHOT)
+        snapshot_metadata = {
+            key: self._bounded_redacted(value)
+            for key, value in (metadata or {}).items()
+        }
+        snapshot_metadata["size_bytes"] = str(size_bytes)
         return self._persist(
             kind=EvidenceKind.FILE_SNAPSHOT,
             incident_id=incident_id,
@@ -196,7 +202,7 @@ class EvidenceService:
             service_name=service_name,
             source_ref=source_ref,
             redacted=redacted,
-            metadata={"size_bytes": str(size_bytes)},
+            metadata=snapshot_metadata,
             created_by=created_by,
             now=now,
         )

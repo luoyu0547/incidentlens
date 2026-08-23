@@ -33,6 +33,7 @@ from incidentlens_control_plane.investigation.provider import (
     HypothesisProposal,
     ModelProvider,
     PromptTooLongError,
+    ProviderOutputFormatError,
     StopSignal,
     ToolRequest,
 )
@@ -45,6 +46,7 @@ from incidentlens_control_plane.investigation.state_machine import (
     InvestigationStatus,
     ToolCallStatus,
 )
+from incidentlens_control_plane.investigation.tool_executor import ToolOutcome
 from incidentlens_control_plane.investigation.transcript import TranscriptService
 from incidentlens_control_plane.investigation.types import (
     AgentBudget,
@@ -214,6 +216,8 @@ def build_orchestrator(
         evidence=harness.evidence,
         projects=harness.projects,
         sessions=harness.sessions,
+        events=harness.events,
+        broker=harness.broker,
         now=now,
         **kwargs,
     )
@@ -342,6 +346,18 @@ async def test_parent_completes_with_grounded_conclusion(tmp_path: Any) -> None:
     conclusions = harness.investigations.list_conclusions(agent_run_id="run-1")
     assert len(conclusions) == 1
     assert conclusions[0].evidence_ids == (seed.evidence_ref_id,)
+    conclusion_events = [
+        event
+        for event in harness.events.list_after(0, limit=200)
+        if event.event_type.value == "conclusion.created"
+    ]
+    assert len(conclusion_events) == 1
+    assert conclusion_events[0].payload == {
+        "run_id": "run-1",
+        "investigation_id": "inv-1",
+        "evidence_ids": [seed.evidence_ref_id],
+        "conclusion": conclusions[0].model_dump(mode="json"),
+    }
     assert final.usage.rounds == 1
 
 
@@ -453,6 +469,96 @@ async def test_round_budget_exhaustion_pauses(tmp_path: Any) -> None:
     assert service.get_investigation("inv-1").status is InvestigationStatus.PAUSED_BUDGET
 
 
+async def test_invalid_provider_tool_name_gets_bounded_corrective_retry(
+    tmp_path: Any,
+) -> None:
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(harness, status=InvestigationStatus.RUNNING)
+    _make_parent_run(harness)
+    registry.set_script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=(tool_request("tool_use", "bad-wrapper"),)
+            ),
+            RequestToolsStep(
+                tool_requests=(tool_request("registry_info", "corrected"),)
+            ),
+            StopStep(
+                stop_signal=StopSignal(
+                    stop_reason=StopReason.COMPLETED,
+                    summary="corrected provider protocol",
+                )
+            ),
+        ],
+    )
+    _, service, provider = build_orchestrator(harness, registry)
+
+    final = await service.resume_run("run-1")
+
+    assert final.status is AgentRunStatus.COMPLETED
+    assert final.usage.rounds == 2
+    retry = provider.requests("run-1")[1]
+    assert retry.messages[-1].role is MessageRole.USER
+    assert "not allowlisted" in retry.messages[-1].blocks[0].text
+
+
+async def test_provider_schema_error_gets_bounded_corrective_retry(
+    tmp_path: Any,
+) -> None:
+    class FormatThenCompleteProvider(ModelProvider):
+        def __init__(self) -> None:
+            self.requests: list[ConversationRequest] = []
+
+        async def generate_turn(self, request: ConversationRequest) -> AgentTurnResult:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                raise ProviderOutputFormatError(
+                    "conclusions.0.summary Field required; conclusion is extra"
+                )
+            if len(self.requests) == 2:
+                return AgentTurnResult(
+                    tool_requests=(tool_request("registry_info", "collect-evidence"),)
+                )
+            evidence_id = _latest_owned_evidence_id(request)
+            assert evidence_id is not None
+            return AgentTurnResult(
+                conclusions=(
+                    Conclusion(
+                        summary="corrected structured conclusion",
+                        evidence_ids=(evidence_id,),
+                    ),
+                ),
+                stop_signal=StopSignal(
+                    stop_reason=StopReason.COMPLETED,
+                    summary="done",
+                ),
+            )
+
+    harness = build_harness(tmp_path)
+    _make_investigation(harness, status=InvestigationStatus.RUNNING)
+    _make_parent_run(harness)
+    provider = FormatThenCompleteProvider()
+    orchestrator = AgentOrchestrator(
+        store=harness.investigations,
+        provider=provider,
+        executor=harness.executor,
+        evidence=harness.evidence,
+        projects=harness.projects,
+        sessions=harness.sessions,
+        now=lambda: NOW,
+    )
+
+    final = await orchestrator.run("run-1")
+
+    assert final.status is AgentRunStatus.COMPLETED
+    assert len(provider.requests) == 3
+    correction = provider.requests[1].messages[-1]
+    assert correction.role is MessageRole.USER
+    assert "conclusions.0.summary" in correction.blocks[0].text
+
+
 async def test_no_new_evidence_pauses_missing_evidence(tmp_path: Any) -> None:
     harness = build_harness(tmp_path)
     registry = FakeProviderRegistry()
@@ -512,6 +618,55 @@ async def test_tool_approval_pauses_and_persists_approval_id(tmp_path: Any) -> N
     # Resuming a still-blocked approval keeps the run waiting.
     resumed = await orchestrator.run("run-1")
     assert resumed.status is AgentRunStatus.WAITING_APPROVAL
+
+
+def test_approved_tool_evidence_resets_run_and_investigation_stagnation(
+    tmp_path: Any,
+) -> None:
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    investigation = _make_investigation(harness, status=InvestigationStatus.RUNNING)
+    run = _make_parent_run(harness, status=AgentRunStatus.WAITING_APPROVAL)
+    investigation = investigation.model_copy(
+        update={
+            "usage": investigation.usage.model_copy(
+                update={"consecutive_no_new_evidence_rounds": 3}
+            )
+        }
+    )
+    run = run.model_copy(
+        update={
+            "usage": run.usage.model_copy(
+                update={"consecutive_no_new_evidence_rounds": 3}
+            )
+        }
+    )
+    harness.investigations.update_investigation(investigation)
+    harness.investigations.update_agent_run(run)
+    _, service, _ = build_orchestrator(harness, registry)
+    evidence = EvidenceReference(
+        evidence_id="ev-approved-change",
+        operation_id="approved-change",
+        summary="approved change applied and verified",
+    )
+
+    service._append_tool_outcome_evidence(
+        run,
+        ToolOutcome(
+            tool_call_id="call-approved",
+            tool_name="file_edit",
+            status=ToolCallStatus.SUCCEEDED,
+            evidence=(evidence,),
+            output_bytes=42,
+        ),
+        NOW,
+    )
+
+    updated_run = harness.investigations.get_agent_run("run-1")
+    updated_investigation = service.get_investigation("inv-1")
+    assert updated_run.usage.consecutive_no_new_evidence_rounds == 0
+    assert updated_investigation.usage.consecutive_no_new_evidence_rounds == 0
+    assert updated_investigation.usage.evidence_count == 1
 
 
 async def test_provider_declared_cancel_finalises_cancelled(tmp_path: Any) -> None:
@@ -1104,6 +1259,159 @@ async def test_resume_terminal_run_is_a_no_op(tmp_path: Any) -> None:
 
     final = await service.resume_run("run-1")
 
+    assert final.status is AgentRunStatus.COMPLETED
+
+
+async def test_resume_budget_pause_uses_remaining_investigation_capacity(
+    tmp_path: Any,
+) -> None:
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    investigation = _make_investigation(
+        harness,
+        status=InvestigationStatus.PAUSED_BUDGET,
+        budget=InvestigationBudget(max_tool_calls=3),
+    )
+    harness.investigations.update_investigation(
+        investigation.model_copy(update={"usage": UsageCounters(tool_calls=1)})
+    )
+    run = _make_parent_run(
+        harness,
+        status=AgentRunStatus.PAUSED_BUDGET,
+        budget=AgentBudget(max_tool_calls=1),
+    )
+    harness.investigations.update_agent_run(
+        run.model_copy(
+            update={
+                "usage": UsageCounters(tool_calls=1),
+                "stop_reason": StopReason.BUDGET_TOOL_CALLS,
+            }
+        )
+    )
+    registry.set_script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=(
+                    tool_request("registry_info", "call-resumed"),
+                )
+            ),
+            StopStep(
+                stop_signal=StopSignal(
+                    stop_reason=StopReason.COMPLETED,
+                    summary="continued within the global budget",
+                )
+            ),
+        ],
+    )
+    _, service, _ = build_orchestrator(harness, registry)
+
+    final = await service.resume_run("run-1")
+
+    assert final.status is AgentRunStatus.COMPLETED
+    assert final.budget.max_tool_calls == 3
+    assert final.usage.tool_calls == 2
+
+
+async def test_resume_after_assistant_stop_appends_user_continuation(
+    tmp_path: Any,
+) -> None:
+    """A resumed provider turn must not end its input on the old assistant turn.
+
+    DeepSeek thinking-mode responses require hidden ``reasoning_content`` when
+    an assistant message is sent back as the conversation tail.  IncidentLens
+    deliberately does not persist hidden reasoning, so an explicit resume is a
+    new user-side continuation instead.
+    """
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(
+        harness,
+        status=InvestigationStatus.PAUSED_MISSING_EVIDENCE,
+    )
+    seed = EvidenceReference(
+        evidence_id="ev-seed",
+        operation_id="seed",
+        summary="existing grounded evidence",
+    )
+    _make_parent_run(
+        harness,
+        status=AgentRunStatus.PAUSED_MISSING_EVIDENCE,
+        evidence=(seed,),
+    )
+    transcript = TranscriptService(harness.investigations)
+    transcript.append_message(
+        TranscriptMessage(
+            agent_run_id="run-1",
+            sequence=1,
+            role=MessageRole.USER,
+            blocks=(TextBlock(text="Investigate the incident"),),
+            created_at=NOW,
+        )
+    )
+    transcript.append_message(
+        TranscriptMessage(
+            agent_run_id="run-1",
+            sequence=2,
+            role=MessageRole.ASSISTANT,
+            blocks=(TextBlock(text='{"stop":{"stop_reason":"missing_evidence"}}'),),
+            created_at=NOW,
+        )
+    )
+    registry.set_script(
+        "run-1",
+        [StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="done"))],
+    )
+    _, service, provider = build_orchestrator(harness, registry)
+
+    final = await service.resume_run("run-1")
+
+    assert final.status is AgentRunStatus.COMPLETED
+    request = provider.requests("run-1")[0]
+    assert request.messages[-1].role is MessageRole.USER
+    assert request.messages[-1].blocks == (
+        TextBlock(
+            text="Operator explicitly resumed this paused run. Continue from the "
+            "durable checkpoint and current evidence."
+        ),
+    )
+
+
+async def test_resume_missing_evidence_starts_a_fresh_stagnation_window(
+    tmp_path: Any,
+) -> None:
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    investigation = _make_investigation(
+        harness,
+        status=InvestigationStatus.PAUSED_MISSING_EVIDENCE,
+        budget=InvestigationBudget(max_no_new_evidence_rounds=3),
+    )
+    seed = EvidenceReference(
+        evidence_id="ev-seed",
+        operation_id="seed",
+        summary="existing grounded evidence",
+    )
+    run = _make_parent_run(
+        harness,
+        status=AgentRunStatus.PAUSED_MISSING_EVIDENCE,
+        budget=AgentBudget(max_no_new_evidence_rounds=3),
+        evidence=(seed,),
+    )
+    exhausted = UsageCounters(consecutive_no_new_evidence_rounds=3)
+    harness.investigations.update_agent_run(run.model_copy(update={"usage": exhausted}))
+    harness.investigations.update_investigation(
+        investigation.model_copy(update={"usage": exhausted})
+    )
+    registry.set_script(
+        "run-1",
+        [StopStep(stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="done"))],
+    )
+    _, service, provider = build_orchestrator(harness, registry)
+
+    final = await service.resume_run("run-1")
+
+    assert provider.call_count("run-1") == 1
     assert final.status is AgentRunStatus.COMPLETED
 
 

@@ -843,6 +843,10 @@ def test_docker_action_compose_builds_fixed_argv(
         ssh_user="deploy",
         compose_working_directory=PurePosixPath("/srv/web"),
         compose_project_name="webapp",
+        compose_files=(
+            PurePosixPath("/srv/web/docker-compose.yml"),
+            PurePosixPath("/srv/web/compose.cloud.yaml"),
+        ),
     )
     record = ProjectRecord(
         project_id="myproj",
@@ -904,6 +908,10 @@ def test_docker_action_compose_builds_fixed_argv(
             "compose",
             "--project-directory",
             "/srv/web",
+            "--file",
+            "/srv/web/docker-compose.yml",
+            "--file",
+            "/srv/web/compose.cloud.yaml",
             "--project-name",
             "webapp",
             "up",

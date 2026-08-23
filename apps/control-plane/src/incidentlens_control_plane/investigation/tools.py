@@ -78,6 +78,7 @@ _CONTAINER = {"type": "string", "minLength": 1, "maxLength": 128}
 _PATH = {"type": "string", "minLength": 1, "maxLength": 500}
 _LIMIT_200 = {"type": "integer", "minimum": 1, "maximum": 200}
 _ISO_TIME = {"type": "string", "minLength": 8, "maxLength": 40}
+_LINE_NUMBER = {"type": "integer", "minimum": 1, "maximum": 1_000_000}
 
 
 def _host_file_props(*, include_query: bool = False) -> dict[str, Any]:
@@ -98,6 +99,8 @@ def _container_file_props(*, include_query: bool = False) -> dict[str, Any]:
 
 def _file_read_props(*, container: bool) -> dict[str, Any]:
     props = _container_file_props() if container else _host_file_props()
+    props["start_line"] = _LINE_NUMBER
+    props["end_line"] = _LINE_NUMBER
     props["offset"] = {"type": "integer", "minimum": 0, "maximum": 1_048_576}
     props["limit"] = {"type": "integer", "minimum": 1, "maximum": 1_048_576}
     return props
@@ -284,12 +287,17 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         tool_name=TOOL_EVIDENCE_READ,
         concurrency_safe=True,
         description=(
-            "Read one evidence reference this run already collected, returning a "
-            "bounded excerpt of its redacted content and metadata. Evidence not "
-            "collected by this run is refused."
+            "Read redacted content from one evidence reference this run already "
+            "collected. Use 1-based start_line/end_line for an exact line range; "
+            "the result reports its visible range and next_start_line. Evidence "
+            "not collected by this run is refused."
         ),
         parameters_json_schema=_obj(
-            {"evidence_id": {"type": "string", "minLength": 1, "maxLength": 120}},
+            {
+                "evidence_id": {"type": "string", "minLength": 1, "maxLength": 120},
+                "start_line": _LINE_NUMBER,
+                "end_line": _LINE_NUMBER,
+            },
             required=["evidence_id"],
         ),
     ),
@@ -322,7 +330,12 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ToolDefinition(
         tool_name=TOOL_HOST_READ,
         concurrency_safe=True,
-        description="Read a bounded slice of a file on the remote host.",
+        description=(
+            "Read redacted file content from the remote host. Prefer 1-based "
+            "start_line/end_line; omitted ranges return the first complete-line "
+            "page and report next_start_line. Legacy byte offset/limit is supported "
+            "but cannot be mixed with line ranges."
+        ),
         parameters_json_schema=_obj(
             _file_read_props(container=False), required=["service_name", "path"]
         ),
@@ -351,7 +364,12 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     ToolDefinition(
         tool_name=TOOL_CONTAINER_READ,
         concurrency_safe=True,
-        description="Read a bounded slice of a file inside a registered container.",
+        description=(
+            "Read redacted file content inside a registered container. Prefer "
+            "1-based start_line/end_line; omitted ranges return the first "
+            "complete-line page and report next_start_line. Legacy byte "
+            "offset/limit cannot be mixed with line ranges."
+        ),
         parameters_json_schema=_obj(
             _file_read_props(container=True),
             required=["service_name", "container", "path"],

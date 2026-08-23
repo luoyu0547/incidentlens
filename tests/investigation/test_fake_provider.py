@@ -711,6 +711,20 @@ def test_validator_accepts_matching_run_and_request():
     assert validate(request, run, result).requires_approval is False
 
 
+def test_turn_accepts_multiple_grounded_conclusions_for_multi_phase_incident() -> None:
+    conclusions = tuple(
+        Conclusion(summary=f"phase {index}", evidence_ids=(f"ev-{index}",))
+        for index in range(4)
+    )
+
+    result = AgentTurnResult(
+        conclusions=conclusions,
+        stop_signal=StopSignal(stop_reason=StopReason.COMPLETED, summary="done"),
+    )
+
+    assert result.conclusions == conclusions
+
+
 # -- validator: tool allowlist, arguments and scope ---------------------------
 
 

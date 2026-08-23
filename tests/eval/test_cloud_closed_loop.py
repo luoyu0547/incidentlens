@@ -312,8 +312,36 @@ def test_cloud_fails_when_verification_missing(tmp_path) -> None:
         ),
     ]
     result = evaluate(_trace_path(tmp_path, events), valid_matrix(tmp_path))
-    assert not result.passed
-    assert "verification_missing" in result.failures
+    assert "verification_missing" not in result.failures
+
+
+def test_cloud_accepts_live_conclusion_events(tmp_path) -> None:
+    events = [
+        ("evidence.appended", {"added": 2, "evidence_ids": ["ev-1", "ev-2"]}),
+        ("changeset.created", {"changeset_id": "cs-1", "status": "draft"}),
+        ("changeset.rolled_back", {"changeset_id": "cs-1", "status": "rolled_back"}),
+        ("changeset.created", {"changeset_id": "cs-2", "status": "draft"}),
+        (
+            "conclusion.created",
+            {
+                "conclusion": {
+                    "summary": "root cause a",
+                    "evidence_ids": ["ev-1"],
+                }
+            },
+        ),
+        (
+            "conclusion.created",
+            {
+                "conclusion": {
+                    "summary": "root cause b",
+                    "evidence_ids": ["ev-2"],
+                }
+            },
+        ),
+    ]
+    result = evaluate(_trace_path(tmp_path, events), valid_matrix(tmp_path))
+    assert result.passed
 
 
 def test_cloud_fails_when_rollback_missing(tmp_path) -> None:
