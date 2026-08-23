@@ -2,17 +2,21 @@
 
 import json
 from datetime import UTC, datetime
-from unittest.mock import patch
-from urllib.error import HTTPError
+from types import SimpleNamespace
 
 import pytest
-from incidentlens_control_plane.investigation.openai_provider import (
+from incidentlens_control_plane.investigation.model_transport import (
+    ModelTransportError,
     OpenAICompatibleConfig,
+)
+from incidentlens_control_plane.investigation.openai_provider import (
     OpenAICompatibleProvider,
     _message_payload,
     _normalise_optional_fields,
+    _remove_unknown_top_level_tool_arguments,
     _result_payload_from_content,
     _result_payload_from_message,
+    _system_prompt,
 )
 from incidentlens_control_plane.investigation.provider import (
     PromptTooLongError,
@@ -39,28 +43,53 @@ def provider_config() -> OpenAICompatibleConfig:
     )
 
 
-def http_error(status: int) -> HTTPError:
-    return HTTPError(
-        url="https://llm.example.com/v1/chat/completions",
-        code=status,
-        msg="error",
-        hdrs={},
-        fp=None,
+class _FakeTransport:
+    """Records payloads and returns a canned response or raises a canned error."""
+
+    def __init__(
+        self,
+        *,
+        response: dict[str, object] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self.response = response
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+
+    def chat_completions(self, payload: dict[str, object]) -> dict[str, object]:
+        self.calls.append(payload)
+        if self.error is not None:
+            raise self.error
+        assert self.response is not None
+        return self.response
+
+
+_EMPTY_TURN = json.dumps(
+    {
+        "tool_requests": [],
+        "hypotheses": [],
+        "conclusions": [],
+        "child_delegation": None,
+        "stop_signal": None,
+        "usage": {},
+    }
+)
+
+
+def _dummy_request() -> SimpleNamespace:
+    """A minimal request-shaped object for exercising ``generate_turn``."""
+    return SimpleNamespace(
+        task_prompt=None,
+        checkpoint=SimpleNamespace(
+            round_number=1,
+            model_dump=lambda mode="json": {"round_number": 1},
+        ),
+        investigation=SimpleNamespace(
+            model_dump=lambda mode="json": {"symptom": "canary 502"},
+        ),
+        messages=(),
+        tool_schemas=(),
     )
-
-
-class _FakeResponse:
-    def __init__(self, body: bytes) -> None:
-        self._body = body
-
-    def read(self) -> bytes:
-        return self._body
-
-    def __enter__(self) -> "_FakeResponse":
-        return self
-
-    def __exit__(self, *args: object) -> bool:
-        return False
 
 
 def _transcript(role: MessageRole, blocks: tuple) -> TranscriptMessage:
@@ -73,38 +102,64 @@ def _transcript(role: MessageRole, blocks: tuple) -> TranscriptMessage:
     )
 
 
-def test_http_413_is_prompt_too_long(provider_config) -> None:
-    provider = OpenAICompatibleProvider(provider_config)
-    with patch(
-        "incidentlens_control_plane.investigation.openai_provider.urlopen",
-        side_effect=http_error(413),
-    ):
-        with pytest.raises(PromptTooLongError):
-            provider._post({"messages": []})
+async def test_provider_delegates_payload_to_injected_transport(
+    provider_config,
+) -> None:
+    transport = _FakeTransport(
+        response={"choices": [{"message": {"content": _EMPTY_TURN}}]}
+    )
+    provider = OpenAICompatibleProvider(provider_config, transport=transport)
+
+    result = await provider.generate_turn(_dummy_request())
+
+    assert len(transport.calls) == 1
+    payload = transport.calls[0]
+    assert payload["model"] == "spark-x"
+    assert payload["temperature"] == 0.0
+    assert payload["response_format"] == {"type": "json_object"}
+    assert result.tool_requests == ()
 
 
-def test_context_length_exceeded_body_is_prompt_too_long(provider_config) -> None:
-    provider = OpenAICompatibleProvider(provider_config)
-    body = json.dumps(
-        {"error": {"code": "context_length_exceeded", "message": "context too long"}}
-    ).encode("utf-8")
-    with patch(
-        "incidentlens_control_plane.investigation.openai_provider.urlopen",
-        return_value=_FakeResponse(body),
-    ):
-        with pytest.raises(PromptTooLongError):
-            provider._post({"messages": []})
+async def test_provider_propagates_prompt_too_long_from_transport(
+    provider_config,
+) -> None:
+    transport = _FakeTransport(error=PromptTooLongError())
+    provider = OpenAICompatibleProvider(provider_config, transport=transport)
+    with pytest.raises(PromptTooLongError):
+        await provider.generate_turn(_dummy_request())
 
 
-def test_retryable_http_error_is_provider_error(provider_config) -> None:
-    provider = OpenAICompatibleProvider(provider_config)
-    with patch(
-        "incidentlens_control_plane.investigation.openai_provider.urlopen",
-        side_effect=http_error(429),
-    ):
-        with pytest.raises(ProviderError) as excinfo:
-            provider._post({"messages": []})
+async def test_provider_translates_retryable_transport_error_to_provider_error(
+    provider_config,
+) -> None:
+    error = ModelTransportError(
+        "OpenAI-compatible API 请求失败（HTTP 429）",
+        retryable=True,
+        category="http_error",
+    )
+    provider = OpenAICompatibleProvider(
+        provider_config, transport=_FakeTransport(error=error)
+    )
+    with pytest.raises(ProviderError) as excinfo:
+        await provider.generate_turn(_dummy_request())
     assert excinfo.value.retryable is True
+    assert "429" in str(excinfo.value)
+
+
+async def test_provider_translates_non_retryable_transport_error_to_provider_error(
+    provider_config,
+) -> None:
+    error = ModelTransportError(
+        "OpenAI-compatible API TLS 证书校验失败",
+        retryable=False,
+        category="tls_configuration",
+    )
+    provider = OpenAICompatibleProvider(
+        provider_config, transport=_FakeTransport(error=error)
+    )
+    with pytest.raises(ProviderError) as excinfo:
+        await provider.generate_turn(_dummy_request())
+    assert excinfo.value.retryable is False
 
 
 def test_message_payload_maps_tool_use_to_assistant_content() -> None:
@@ -132,6 +187,40 @@ def test_message_payload_maps_tool_use_to_assistant_content() -> None:
             "input": {"namespace": "default"},
         },
     ]
+
+
+def test_removes_only_unknown_top_level_arguments_for_strict_tool_schema() -> None:
+    payload = {
+        "tool_requests": [
+            {
+                "tool_call_id": "call-1",
+                "tool_name": "host_list",
+                "arguments": {
+                    "service_name": "api-gateway",
+                    "path": "/opt/app",
+                    "limit": 100,
+                },
+            }
+        ]
+    }
+    schema = SimpleNamespace(
+        tool_name="host_list",
+        parameters_json_schema={
+            "type": "object",
+            "properties": {
+                "service_name": {"type": "string"},
+                "path": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    )
+
+    _remove_unknown_top_level_tool_arguments(payload, (schema,))
+
+    assert payload["tool_requests"][0]["arguments"] == {
+        "service_name": "api-gateway",
+        "path": "/opt/app",
+    }
 
 
 def test_message_payload_maps_tool_result_to_user_content() -> None:
@@ -177,6 +266,37 @@ def test_normalise_optional_fields_only_converts_known_empty_shapes():
         "summary": "模型请求停止：missing_evidence",
     }
     assert payload["tool_requests"] == []
+
+
+def test_normalise_host_child_scope_discards_incompatible_identity_fields() -> None:
+    payload = {
+        "tool_requests": [
+            {
+                "tool_call_id": "call-1",
+                "tool_name": "delegate_child",
+                "arguments": {
+                    "scope": {
+                        "project_id": "project-1",
+                        "target_id": "target-1",
+                        "scope": "host",
+                        "service_name": "api-gateway",
+                        "container_name": "api-gateway-1",
+                        "allowed_host_paths": ["/srv/payment"],
+                    }
+                },
+            }
+        ]
+    }
+
+    _normalise_optional_fields(payload)
+
+    scope = payload["tool_requests"][0]["arguments"]["scope"]
+    assert scope == {
+        "project_id": "project-1",
+        "target_id": "target-1",
+        "scope": "host",
+        "allowed_host_paths": ["/srv/payment"],
+    }
 
 
 def test_result_payload_unwraps_a_single_provider_result_array() -> None:
@@ -426,3 +546,217 @@ def test_normalise_optional_fields_rejects_non_object_result():
         assert "must be an object" in str(exc)
     else:
         raise AssertionError("non-object provider result must be rejected")
+
+
+def test_late_parent_round_requires_decision_instead_of_repeated_reading() -> None:
+    request = SimpleNamespace(
+        task_prompt=None,
+        checkpoint=SimpleNamespace(round_number=12),
+        messages=(
+            _transcript(
+                MessageRole.ASSISTANT,
+                (
+                    ToolUseBlock(
+                        tool_call_id="compact-1",
+                        tool_name="compact_context",
+                        arguments={},
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    prompt = _system_prompt(request)
+
+    assert "只能调用 file_edit、file_write" in prompt
+    assert "每一条已有证据支持的独立根因" in prompt
+    assert "missing_evidence" in prompt
+
+
+def test_late_parent_round_after_change_requires_restart_or_verification() -> None:
+    request = SimpleNamespace(
+        task_prompt=None,
+        checkpoint=SimpleNamespace(round_number=13),
+        messages=(
+            _transcript(
+                MessageRole.ASSISTANT,
+                (
+                    ToolUseBlock(
+                        tool_call_id="change-1",
+                        tool_name="file_edit",
+                        arguments={"path": "/opt/app/config.env"},
+                    ),
+                ),
+            ),
+            _transcript(
+                MessageRole.USER,
+                (
+                    ToolResultBlock(
+                        tool_call_id="change-1",
+                        status=ToolCallStatus.SUCCEEDED,
+                        content="changeset applied",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    prompt = _system_prompt(request)
+
+    assert "只能调用 docker_action、shell_exec" in prompt
+    assert "不得再次读取源码、配置或旧 evidence" in prompt
+
+
+def test_late_parent_round_after_failed_write_returns_to_file_edit() -> None:
+    request = SimpleNamespace(
+        task_prompt=None,
+        checkpoint=SimpleNamespace(round_number=13),
+        messages=(
+            _transcript(
+                MessageRole.ASSISTANT,
+                (
+                    ToolUseBlock(
+                        tool_call_id="change-1",
+                        tool_name="file_write",
+                        arguments={"path": "/opt/app/config.env"},
+                    ),
+                ),
+            ),
+            _transcript(
+                MessageRole.USER,
+                (
+                    ToolResultBlock(
+                        tool_call_id="change-1",
+                        status=ToolCallStatus.FAILED,
+                        content="target already exists",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    prompt = _system_prompt(request)
+
+    assert "只能调用 file_edit、file_write" in prompt
+    assert "已存在的文件必须使用 file_edit" in prompt
+
+
+def test_late_parent_round_waits_until_every_proposed_change_succeeds() -> None:
+    request = SimpleNamespace(
+        task_prompt=None,
+        checkpoint=SimpleNamespace(round_number=13),
+        messages=(
+            _transcript(
+                MessageRole.ASSISTANT,
+                (
+                    ToolUseBlock(
+                        tool_call_id="change-payment",
+                        tool_name="file_edit",
+                        arguments={"path": "/opt/app/payment.env"},
+                    ),
+                    ToolUseBlock(
+                        tool_call_id="change-order",
+                        tool_name="file_edit",
+                        arguments={"path": "/opt/app/order.env"},
+                    ),
+                ),
+            ),
+            _transcript(
+                MessageRole.USER,
+                (
+                    ToolResultBlock(
+                        tool_call_id="change-payment",
+                        status=ToolCallStatus.SUCCEEDED,
+                        content="changeset applied",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    prompt = _system_prompt(request)
+
+    assert "只能调用 file_edit、file_write" in prompt
+    assert "只能调用 docker_action、shell_exec" not in prompt
+
+
+def test_failed_post_change_verification_returns_to_change_decision() -> None:
+    request = SimpleNamespace(
+        task_prompt=None,
+        checkpoint=SimpleNamespace(round_number=15),
+        messages=(
+            _transcript(
+                MessageRole.ASSISTANT,
+                (
+                    ToolUseBlock(
+                        tool_call_id="change-order",
+                        tool_name="file_edit",
+                        arguments={"path": "/opt/app/order.env"},
+                    ),
+                ),
+            ),
+            _transcript(
+                MessageRole.USER,
+                (
+                    ToolResultBlock(
+                        tool_call_id="change-order",
+                        status=ToolCallStatus.SUCCEEDED,
+                        content="changeset applied",
+                    ),
+                ),
+            ),
+            _transcript(
+                MessageRole.ASSISTANT,
+                (
+                    ToolUseBlock(
+                        tool_call_id="verify-matrix",
+                        tool_name="shell_exec",
+                        arguments={"command": "request_matrix --expected repaired"},
+                    ),
+                ),
+            ),
+            _transcript(
+                MessageRole.USER,
+                (
+                    ToolResultBlock(
+                        tool_call_id="verify-matrix",
+                        status=ToolCallStatus.FAILED,
+                        content="payment case still returns 429",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    prompt = _system_prompt(request)
+
+    assert "只能调用 file_edit、file_write" in prompt
+    assert "验证失败" in prompt
+
+
+def test_pre_decision_behavior_stage_cannot_stop_early() -> None:
+    request = SimpleNamespace(
+        task_prompt=None,
+        checkpoint=SimpleNamespace(round_number=10),
+        messages=(
+            _transcript(
+                MessageRole.ASSISTANT,
+                (
+                    ToolUseBlock(
+                        tool_call_id="delegate-1",
+                        tool_name="delegate_child",
+                        arguments={},
+                    ),
+                    ToolUseBlock(
+                        tool_call_id="compact-1",
+                        tool_name="compact_context",
+                        arguments={},
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    prompt = _system_prompt(request)
+
+    assert "不得使用 missing_evidence 或停止" in prompt

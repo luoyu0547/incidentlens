@@ -30,11 +30,14 @@ from incidentlens_control_plane.investigation.hooks import (
     HookRunner,
     RuntimeHookRecorder,
 )
+from incidentlens_control_plane.investigation.model_transport import (
+    OpenAICompatibleConfig,
+    OpenAICompatibleTransport,
+)
 from incidentlens_control_plane.investigation.openai_compactor import (
     OpenAICompatibleCompactor,
 )
 from incidentlens_control_plane.investigation.openai_provider import (
-    OpenAICompatibleConfig,
     OpenAICompatibleProvider,
 )
 from incidentlens_control_plane.investigation.orchestrator import AgentOrchestrator
@@ -218,8 +221,9 @@ def build_runtime(
             base_url=settings.llm_base_url,
             model=settings.llm_active_model,
         )
-        provider = OpenAICompatibleProvider(provider_config)
-        compactor = OpenAICompatibleCompactor(provider_config)
+        transport = OpenAICompatibleTransport(provider_config)
+        provider = OpenAICompatibleProvider(provider_config, transport=transport)
+        compactor = OpenAICompatibleCompactor(provider_config, transport=transport)
     context_manager = AgentContextManager(
         investigation_store,
         policy=ContextBudgetPolicy(

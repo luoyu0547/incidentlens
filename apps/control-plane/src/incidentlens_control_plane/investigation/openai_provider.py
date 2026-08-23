@@ -6,15 +6,16 @@ import asyncio
 import html
 import json
 import re
-from dataclasses import dataclass
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
+from incidentlens_control_plane.investigation.model_transport import (
+    ModelTransportError,
+    OpenAICompatibleConfig,
+    OpenAICompatibleTransport,
+)
 from incidentlens_control_plane.investigation.provider import (
     AgentTurnResult,
     ConversationRequest,
     ModelProvider,
-    PromptTooLongError,
     ProviderError,
     ToolSchema,
 )
@@ -28,21 +29,14 @@ from incidentlens_control_plane.investigation.types import (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class OpenAICompatibleConfig:
-    """Connection configuration for an OpenAI-compatible endpoint."""
-
-    api_key: str
-    base_url: str
-    model: str
-    timeout_seconds: float = 90.0
-
-
 class OpenAICompatibleProvider(ModelProvider):
     """Send bounded turns to a provider without granting it execution access."""
 
-    def __init__(self, config: OpenAICompatibleConfig) -> None:
+    def __init__(
+        self, config: OpenAICompatibleConfig, transport: OpenAICompatibleTransport
+    ) -> None:
         self._config = config
+        self._transport = transport
 
     async def generate_turn(self, request: ConversationRequest) -> AgentTurnResult:
         payload = {
@@ -56,11 +50,19 @@ class OpenAICompatibleProvider(ModelProvider):
             ],
             "tools": [_tool_payload(schema) for schema in request.tool_schemas],
         }
-        response = await asyncio.to_thread(self._post, payload)
+        try:
+            response = await asyncio.to_thread(
+                self._transport.chat_completions, payload
+            )
+        except ModelTransportError as exc:
+            raise ProviderError(exc.message, retryable=exc.retryable) from exc
         try:
             message = response["choices"][0]["message"]
             result_payload = _result_payload_from_message(message)
             _normalise_optional_fields(result_payload)
+            _remove_unknown_top_level_tool_arguments(
+                result_payload, request.tool_schemas
+            )
             usage = response.get("usage", {})
             result_payload["usage"] = ProviderUsage(
                 input_tokens=int(usage.get("prompt_tokens", 0)),
@@ -76,35 +78,6 @@ class OpenAICompatibleProvider(ModelProvider):
                 f"OpenAI-compatible API 返回的结构化调查回合无效：{str(exc)[:500]}",
                 retryable=True,
             ) from exc
-
-    def _post(self, payload: dict[str, object]) -> dict[str, object]:
-        url = f"{self._config.base_url.rstrip('/')}/chat/completions"
-        request = Request(
-            url,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self._config.api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=self._config.timeout_seconds) as response:  # noqa: S310
-                body = json.loads(response.read().decode("utf-8"))
-                if _context_length_exceeded(body):
-                    raise PromptTooLongError()
-                return body
-        except HTTPError as exc:
-            if exc.code == 413:
-                raise PromptTooLongError() from exc
-            retryable = exc.code in {408, 429, 500, 502, 503, 504}
-            raise ProviderError(
-                f"OpenAI-compatible API 请求失败（HTTP {exc.code}）",
-                retryable=retryable,
-            ) from exc
-        except (TimeoutError, URLError) as exc:
-            raise ProviderError("OpenAI-compatible API 连接失败", retryable=True) from exc
-
 
 def _message_payload(message: TranscriptMessage) -> dict[str, object]:
     if message.role is MessageRole.ASSISTANT:
@@ -196,6 +169,46 @@ def _system_prompt(request: ConversationRequest) -> str:
         for message in request.messages
         for block in message.blocks
     )
+    succeeded_tool_calls = {
+        block.tool_call_id
+        for message in request.messages
+        for block in message.blocks
+        if isinstance(block, ToolResultBlock) and block.status.value == "succeeded"
+    }
+    change_attempt_ids = {
+        block.tool_call_id
+        for message in request.messages
+        for block in message.blocks
+        if isinstance(block, ToolUseBlock)
+        and block.tool_name in {"file_edit", "file_write"}
+    }
+    has_change_attempt = bool(change_attempt_ids)
+    has_change_proposal = bool(change_attempt_ids) and change_attempt_ids.issubset(
+        succeeded_tool_calls
+    )
+    ordered_blocks = [
+        block for message in request.messages for block in message.blocks
+    ]
+    tool_names = {
+        block.tool_call_id: block.tool_name
+        for block in ordered_blocks
+        if isinstance(block, ToolUseBlock)
+    }
+    successful_change_positions = [
+        index
+        for index, block in enumerate(ordered_blocks)
+        if isinstance(block, ToolResultBlock)
+        and block.status.value == "succeeded"
+        and tool_names.get(block.tool_call_id) in {"file_edit", "file_write"}
+    ]
+    latest_successful_change = max(successful_change_positions, default=-1)
+    verification_failed_after_change = any(
+        index > latest_successful_change
+        and isinstance(block, ToolResultBlock)
+        and block.status.value == "failed"
+        and tool_names.get(block.tool_call_id) in {"docker_action", "shell_exec"}
+        for index, block in enumerate(ordered_blocks)
+    )
     if round_number == 1:
         return _SYSTEM_PROMPT + """
 本轮为并行症状调查的建模阶段：必须同时提出至少两个可检验 hypothesis，并使用 todo_write
@@ -207,6 +220,7 @@ def _system_prompt(request: ConversationRequest) -> str:
     if round_number == 3 and not has_child_delegation:
         return _SYSTEM_PROMPT + """
 本轮为并行阶段：必须调用 delegate_child，把另一条独立路径交给收窄的已注册 scope 与小预算。
+不要提供 budget 字段；运行时会根据父运行当前剩余容量自动生成受限子预算。
 不得继续重复父任务 Observation、提出变更或停止。"""
     # A rejected first delegation must not make us skip the memory boundary:
     # after a later retry succeeds, require compaction before any further
@@ -215,14 +229,42 @@ def _system_prompt(request: ConversationRequest) -> str:
     # bounded transcript.  Round five is the first turn after the required
     # delegation retry window, so it supplies a stable backstop for the same
     # boundary without teaching the model anything about a particular target.
-    if (has_child_delegation or round_number >= 5) and not has_compaction:
+    if (
+        (has_child_delegation or round_number >= 5)
+        and not has_compaction
+        and not has_change_attempt
+    ):
         return _SYSTEM_PROMPT + """
 本轮为上下文边界阶段：必须只调用 compact_context。压缩完成后，任何需要的当前细节都要通过
 新的远程 Observation 重新获取；不得依据旧 tool_result 预览直接提出变更。"""
+    if round_number >= 12:
+        if verification_failed_after_change:
+            return _SYSTEM_PROMPT + """
+变更后的真实验证失败，说明修复不完整或需要最小修正。本轮返回强制决策阶段：不得继续重复
+失败的重启或验证，也不得调用读取、搜索、日志、registry、evidence、container 或委派工具。
+只能调用 file_edit、file_write，根据最新失败结果和已有证据补充或修正最小可回滚变更；已有文件
+必须使用 file_edit。每项变更仍须经过运行时精确审批，不得绕过审批或声称成功。"""
+        if has_change_proposal:
+            return _SYSTEM_PROMPT + """
+变更后的恢复与验证阶段。不得再次读取源码、配置或旧 evidence；只能调用 docker_action、shell_exec
+来重启受影响服务并执行完整行为验证。若变更尚未获批或执行，等待精确审批，不得提出替代写入、绕过
+审批或声称成功。验证必须使用真实远程结果；失败时根据结果提出最小修正，成功后给出有证据引用的结论。"""
+        return _SYSTEM_PROMPT + """
+本轮为强制决策阶段。不得调用任何读取、搜索、日志、registry、evidence、container 或委派工具。
+只能调用 file_edit、file_write，为每一条已有证据支持的独立根因提出受保护路径内的最小可回滚
+修改；已存在的文件必须使用 file_edit，file_write 只用于确认不存在的新文件。并在提案中明确验证
+与回滚计划，让运行时生成精确审批；如果现有证据不足以安全形成变更，
+必须使用 missing_evidence 停止。不得继续探测或耗尽预算，也不得声称变更已执行或绕过审批。"""
     if not has_child_delegation:
         return _SYSTEM_PROMPT + """
 并行阶段尚未完成：现在必须只调用 delegate_child，把一条独立路径委派给收窄的已注册 scope
-与小预算。不能继续父任务 Observation、提出变更或停止。"""
+；不要提供 budget 字段，运行时会根据父运行当前剩余容量自动生成受限子预算。
+不能继续父任务 Observation、提出变更或停止。"""
+    if round_number >= 8:
+        return _SYSTEM_PROMPT + """
+本轮为行为验证阶段。不得重复读取已经拥有的 evidence；使用已注册、允许范围内的状态、日志
+或验证脚本执行一项最窄行为探测，把配置/源码假设与实际故障表现关联起来。此阶段证据收集尚未
+到安全决策边界，不得使用 missing_evidence 或停止。"""
     return _SYSTEM_PROMPT
 
 
@@ -235,20 +277,6 @@ def _tool_payload(schema: ToolSchema) -> dict[str, object]:
             "parameters": schema.parameters_json_schema,
         },
     }
-
-
-def _context_length_exceeded(payload: object) -> bool:
-    """Return True when an OpenAI-style error body names a context overflow."""
-    if not isinstance(payload, dict):
-        return False
-    error = payload.get("error")
-    if not isinstance(error, dict):
-        return False
-    code = error.get("code")
-    if isinstance(code, str) and "context_length_exceeded" in code:
-        return True
-    message = error.get("message")
-    return isinstance(message, str) and "context_length_exceeded" in message.lower()
 
 
 def _strip_fence(content: object) -> str:
@@ -441,6 +469,39 @@ def _deepseek_dsml_tool_requests(suffix: str) -> list[dict[str, object]] | None:
     return requests
 
 
+def _remove_unknown_top_level_tool_arguments(
+    payload: object, schemas: tuple[ToolSchema, ...]
+) -> None:
+    """Drop provider-added top-level keys before strict runtime validation.
+
+    This applies only when a tool schema explicitly forbids additional
+    properties. Required fields, nested values, scope, policy and approvals
+    remain unchanged and are still checked by ``ProviderOutputValidator``.
+    """
+    if not isinstance(payload, dict):
+        return
+    requests = payload.get("tool_requests")
+    if not isinstance(requests, list):
+        return
+    by_name = {schema.tool_name: schema.parameters_json_schema for schema in schemas}
+    for request in requests:
+        if not isinstance(request, dict):
+            continue
+        schema = by_name.get(request.get("tool_name"))
+        arguments = request.get("arguments")
+        if (
+            not isinstance(schema, dict)
+            or schema.get("additionalProperties") is not False
+            or not isinstance(schema.get("properties"), dict)
+            or not isinstance(arguments, dict)
+        ):
+            continue
+        allowed = schema["properties"].keys()
+        request["arguments"] = {
+            key: value for key, value in arguments.items() if key in allowed
+        }
+
+
 def _normalise_optional_fields(payload: object) -> None:
     """只规范 model 常见的空值表示，不补造任何操作或外部事实。"""
     if not isinstance(payload, dict):
@@ -494,6 +555,17 @@ def _normalise_optional_fields(payload: object) -> None:
             if tool_request.get("type") == "tool_use":
                 tool_request.pop("type")
             arguments = tool_request.get("arguments")
+            if tool_request.get("tool_name") == "delegate_child" and isinstance(
+                arguments, dict
+            ):
+                child_scope = arguments.get("scope")
+                if isinstance(child_scope, dict) and child_scope.get("scope") == "host":
+                    # These identities are invalid for a host-scoped AgentScope.
+                    # Some compatible models copy them from the parent service;
+                    # dropping only the schema-incompatible optional keys keeps
+                    # the requested target and path bounds unchanged.
+                    child_scope.pop("service_name", None)
+                    child_scope.pop("container_name", None)
             if tool_request.get("tool_name") == "todo_write" and isinstance(arguments, dict):
                 todos = arguments.get("todos")
                 if isinstance(todos, str):

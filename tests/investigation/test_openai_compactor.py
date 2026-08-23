@@ -9,19 +9,21 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from unittest.mock import patch
-from urllib.error import HTTPError, URLError
 
 import pytest
 from incidentlens_control_plane.investigation.compactor import (
     CompactionRejected,
     CompactionRequest,
 )
+from incidentlens_control_plane.investigation.model_transport import (
+    ModelTransportError,
+    OpenAICompatibleConfig,
+)
 from incidentlens_control_plane.investigation.openai_compactor import (
     OpenAICompatibleCompactor,
     _strip_fence,
 )
-from incidentlens_control_plane.investigation.openai_provider import OpenAICompatibleConfig
+from incidentlens_control_plane.investigation.provider import PromptTooLongError
 from incidentlens_control_plane.investigation.types import (
     MessageRole,
     TextBlock,
@@ -38,28 +40,25 @@ NOW = datetime(2026, 8, 18, 10, 0, 0, tzinfo=UTC)
 # ---------------------------------------------------------------------------
 
 
-def http_error(status: int) -> HTTPError:
-    return HTTPError(
-        url="https://llm.example.com/v1/chat/completions",
-        code=status,
-        msg="error",
-        hdrs={},
-        fp=None,
-    )
+class _FakeTransport:
+    """Records payloads and returns a canned response or raises a canned error."""
 
+    def __init__(
+        self,
+        *,
+        response: dict[str, object] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self.response = response
+        self.error = error
+        self.calls: list[dict[str, object]] = []
 
-class _FakeResponse:
-    def __init__(self, data: bytes) -> None:
-        self._data = data
-
-    def read(self) -> bytes:
-        return self._data
-
-    def __enter__(self):  # noqa: ANN204
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        pass
+    def chat_completions(self, payload: dict[str, object]) -> dict[str, object]:
+        self.calls.append(payload)
+        if self.error is not None:
+            raise self.error
+        assert self.response is not None
+        return self.response
 
 
 def _response(payload: dict[str, object]) -> dict[str, object]:
@@ -171,10 +170,10 @@ async def test_compactor_sends_no_executable_tools(
     compact_request: CompactionRequest,
     memory_payload: dict[str, object],
 ) -> None:
-    compactor = OpenAICompatibleCompactor(config)
-    with patch.object(compactor, "_post", return_value=_response(memory_payload)) as post:
-        memory = await compactor.compact(compact_request)
-    payload = post.call_args.args[0]
+    transport = _FakeTransport(response=_response(memory_payload))
+    compactor = OpenAICompatibleCompactor(config, transport=transport)
+    memory = await compactor.compact(compact_request)
+    payload = transport.calls[0]
     assert payload.get("tools", []) == []
     assert payload["response_format"] == {"type": "json_object"}
     assert memory.agent_run_id == compact_request.agent_run_id
@@ -184,10 +183,11 @@ async def test_compactor_sends_no_executable_tools(
 async def test_compactor_rejects_malformed_provider_shape(
     config: OpenAICompatibleConfig, compact_request: CompactionRequest
 ) -> None:
-    compactor = OpenAICompatibleCompactor(config)
-    with patch.object(compactor, "_post", return_value={"choices": []}):
-        with pytest.raises(CompactionRejected, match="invalid"):
-            await compactor.compact(compact_request)
+    compactor = OpenAICompatibleCompactor(
+        config, transport=_FakeTransport(response={"choices": []})
+    )
+    with pytest.raises(CompactionRejected, match="invalid"):
+        await compactor.compact(compact_request)
 
 
 # ---------------------------------------------------------------------------
@@ -203,9 +203,10 @@ async def test_compactor_does_not_repair_wrong_identity(
 ) -> None:
     """A wrong echoed identity must pass through unchanged for the manager to reject."""
     memory_payload = {**memory_payload, "agent_run_id": "other-run"}
-    compactor = OpenAICompatibleCompactor(config)
-    with patch.object(compactor, "_post", return_value=_response(memory_payload)):
-        memory = await compactor.compact(compact_request)
+    compactor = OpenAICompatibleCompactor(
+        config, transport=_FakeTransport(response=_response(memory_payload))
+    )
+    memory = await compactor.compact(compact_request)
     assert memory.agent_run_id == "other-run"
 
 
@@ -217,9 +218,10 @@ async def test_compactor_does_not_repair_foreign_evidence(
 ) -> None:
     """Foreign evidence is not filtered by the adapter; the validator rejects it."""
     memory_payload = {**memory_payload, "evidence_ids": ["foreign"]}
-    compactor = OpenAICompatibleCompactor(config)
-    with patch.object(compactor, "_post", return_value=_response(memory_payload)):
-        memory = await compactor.compact(compact_request)
+    compactor = OpenAICompatibleCompactor(
+        config, transport=_FakeTransport(response=_response(memory_payload))
+    )
+    memory = await compactor.compact(compact_request)
     assert memory.evidence_ids == ("foreign",)
 
 
@@ -231,10 +233,11 @@ async def test_compactor_requires_full_strict_memory_shape(
 ) -> None:
     """A payload missing a mandatory semantic field is rejected, never filled in."""
     del memory_payload["objective"]
-    compactor = OpenAICompatibleCompactor(config)
-    with patch.object(compactor, "_post", return_value=_response(memory_payload)):
-        with pytest.raises(CompactionRejected, match="invalid"):
-            await compactor.compact(compact_request)
+    compactor = OpenAICompatibleCompactor(
+        config, transport=_FakeTransport(response=_response(memory_payload))
+    )
+    with pytest.raises(CompactionRejected, match="invalid"):
+        await compactor.compact(compact_request)
 
 
 # ---------------------------------------------------------------------------
@@ -257,30 +260,48 @@ def test_compaction_request_carries_investigation_identity(
 # ---------------------------------------------------------------------------
 
 
-def test_compactor_maps_429_to_rejected_without_response_body(
+@pytest.mark.asyncio
+async def test_compactor_maps_429_to_rejected_without_response_body(
     config: OpenAICompatibleConfig,
+    compact_request: CompactionRequest,
 ) -> None:
-    compactor = OpenAICompatibleCompactor(config)
-    with patch(
-        "incidentlens_control_plane.investigation.openai_compactor.urlopen",
-        side_effect=http_error(429),
-    ):
-        with pytest.raises(CompactionRejected) as excinfo:
-            compactor._post({"messages": []})
+    error = ModelTransportError(
+        "OpenAI-compatible API 请求失败（HTTP 429）",
+        retryable=True,
+        category="http_error",
+    )
+    compactor = OpenAICompatibleCompactor(config, transport=_FakeTransport(error=error))
+    with pytest.raises(CompactionRejected) as excinfo:
+        await compactor.compact(compact_request)
     assert "secret provider body" not in str(excinfo.value)
     assert "429" in str(excinfo.value)
 
 
-def test_compactor_maps_connection_failure_to_rejected(config: OpenAICompatibleConfig) -> None:
-    compactor = OpenAICompatibleCompactor(config)
-    with patch(
-        "incidentlens_control_plane.investigation.openai_compactor.urlopen",
-        side_effect=URLError("secret connection detail"),
-    ):
-        with pytest.raises(CompactionRejected) as excinfo:
-            compactor._post({"messages": []})
+@pytest.mark.asyncio
+async def test_compactor_maps_connection_failure_to_rejected(
+    config: OpenAICompatibleConfig,
+    compact_request: CompactionRequest,
+) -> None:
+    error = ModelTransportError(
+        "OpenAI-compatible API 连接失败", retryable=True, category="connection"
+    )
+    compactor = OpenAICompatibleCompactor(config, transport=_FakeTransport(error=error))
+    with pytest.raises(CompactionRejected) as excinfo:
+        await compactor.compact(compact_request)
     assert "secret connection detail" not in str(excinfo.value)
-    assert "connection failed" in str(excinfo.value)
+    assert "连接失败" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_compactor_maps_prompt_too_long_to_rejected(
+    config: OpenAICompatibleConfig,
+    compact_request: CompactionRequest,
+) -> None:
+    compactor = OpenAICompatibleCompactor(
+        config, transport=_FakeTransport(error=PromptTooLongError())
+    )
+    with pytest.raises(CompactionRejected, match="too long"):
+        await compactor.compact(compact_request)
 
 
 # ---------------------------------------------------------------------------

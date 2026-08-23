@@ -13,8 +13,6 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 from pydantic import ValidationError
 
@@ -23,7 +21,12 @@ from incidentlens_control_plane.investigation.compactor import (
     CompactionRequest,
     ContextCompactor,
 )
-from incidentlens_control_plane.investigation.openai_provider import OpenAICompatibleConfig
+from incidentlens_control_plane.investigation.model_transport import (
+    ModelTransportError,
+    OpenAICompatibleConfig,
+    OpenAICompatibleTransport,
+)
+from incidentlens_control_plane.investigation.provider import PromptTooLongError
 from incidentlens_control_plane.investigation.types import (
     SessionMemory,
     TextBlock,
@@ -36,8 +39,11 @@ from incidentlens_control_plane.investigation.types import (
 class OpenAICompatibleCompactor(ContextCompactor):
     """OpenAI-compatible compactor that sends no executable tools."""
 
-    def __init__(self, config: OpenAICompatibleConfig) -> None:
+    def __init__(
+        self, config: OpenAICompatibleConfig, transport: OpenAICompatibleTransport
+    ) -> None:
         self._config = config
+        self._transport = transport
 
     async def compact(self, request: CompactionRequest) -> SessionMemory:
         payload: dict[str, Any] = {
@@ -47,7 +53,14 @@ class OpenAICompatibleCompactor(ContextCompactor):
             "messages": _compaction_messages(request),
             "tools": [],
         }
-        response = await asyncio.to_thread(self._post, payload)
+        try:
+            response = await asyncio.to_thread(
+                self._transport.chat_completions, payload
+            )
+        except PromptTooLongError as exc:
+            raise CompactionRejected("model compaction context is too long") from exc
+        except ModelTransportError as exc:
+            raise CompactionRejected(exc.message) from exc
         try:
             content = response["choices"][0]["message"]["content"]
             return SessionMemory.model_validate_json(_strip_fence(content))
@@ -55,27 +68,6 @@ class OpenAICompatibleCompactor(ContextCompactor):
             raise CompactionRejected(
                 "model compaction response is invalid"
             ) from exc
-
-    def _post(self, payload: dict[str, object]) -> dict[str, object]:
-        url = f"{self._config.base_url.rstrip('/')}/chat/completions"
-        request = Request(
-            url,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self._config.api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=self._config.timeout_seconds) as response:  # noqa: S310
-                return json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            raise CompactionRejected(
-                f"model compaction request failed (HTTP {exc.code})"
-            ) from exc
-        except (TimeoutError, URLError) as exc:
-            raise CompactionRejected("model compaction connection failed") from exc
 
 
 def _compaction_messages(request: CompactionRequest) -> list[dict[str, object]]:
@@ -201,7 +193,8 @@ Return exactly one JSON object matching the SessionMemory schema:
 - open_questions: list of unresolved questions
 - completed_actions: list of completed investigation actions
 - child_findings: list of child investigation findings
-- reacquisition_recipes: reproducible remote observations as objects with purpose, tool_name, redacted arguments, and stale_summary
+- reacquisition_recipes: reproducible remote observations as objects with
+  purpose, tool_name, redacted arguments, and stale_summary
 - immutable_observations: bounded pre-change, rotated, transient, or one-time observations
 - pending_actions: pending approvals, repairs, verification, rollback, or reapply work
 - safety_state: approval, changeset, backup, uncertain execution, verification and recovery state
