@@ -146,125 +146,15 @@ def _context_attachments(request: ConversationRequest) -> tuple[dict[str, str], 
 
 
 def _system_prompt(request: ConversationRequest) -> str:
-    """Add a bounded, capability-only cadence for parallel investigations.
+    """Return stable, model-directed agent guidance — never a round schedule.
 
-    The base prompt defines *when* parallel work is warranted.  This appendix
-    makes the first four parent turns operationally unambiguous without naming
-    any service, fault, file, command or repair: establish alternatives, take
-    one observation, delegate one bounded branch, then compact before acting.
-    It prevents a weaker compatible model from endlessly re-reading the same
-    source while preserving its freedom to choose all actual observations and
-    conclusions.
+    The provider advertises the *actual* registered tools in ``request.tool_schemas``
+    and the bounded scope/evidence snapshot in the context attachment; the model
+    decides how to investigate, delegate, compact, repair, verify and stop.  The
+    child ``task_prompt`` (when present) rides along in the context attachment
+    and tells a child to finish its own narrow task instead of re-solving the
+    whole incident.
     """
-    if request.task_prompt is not None:
-        return _SYSTEM_PROMPT
-    round_number = request.checkpoint.round_number
-    has_child_delegation = any(
-        isinstance(block, ToolUseBlock) and block.tool_name == "delegate_child"
-        for message in request.messages
-        for block in message.blocks
-    )
-    has_compaction = any(
-        isinstance(block, ToolUseBlock) and block.tool_name == "compact_context"
-        for message in request.messages
-        for block in message.blocks
-    )
-    succeeded_tool_calls = {
-        block.tool_call_id
-        for message in request.messages
-        for block in message.blocks
-        if isinstance(block, ToolResultBlock) and block.status.value == "succeeded"
-    }
-    change_attempt_ids = {
-        block.tool_call_id
-        for message in request.messages
-        for block in message.blocks
-        if isinstance(block, ToolUseBlock)
-        and block.tool_name in {"file_edit", "file_write"}
-    }
-    has_change_attempt = bool(change_attempt_ids)
-    has_change_proposal = bool(change_attempt_ids) and change_attempt_ids.issubset(
-        succeeded_tool_calls
-    )
-    ordered_blocks = [
-        block for message in request.messages for block in message.blocks
-    ]
-    tool_names = {
-        block.tool_call_id: block.tool_name
-        for block in ordered_blocks
-        if isinstance(block, ToolUseBlock)
-    }
-    successful_change_positions = [
-        index
-        for index, block in enumerate(ordered_blocks)
-        if isinstance(block, ToolResultBlock)
-        and block.status.value == "succeeded"
-        and tool_names.get(block.tool_call_id) in {"file_edit", "file_write"}
-    ]
-    latest_successful_change = max(successful_change_positions, default=-1)
-    verification_failed_after_change = any(
-        index > latest_successful_change
-        and isinstance(block, ToolResultBlock)
-        and block.status.value == "failed"
-        and tool_names.get(block.tool_call_id) in {"docker_action", "shell_exec"}
-        for index, block in enumerate(ordered_blocks)
-    )
-    if round_number == 1:
-        return _SYSTEM_PROMPT + """
-本轮为并行症状调查的建模阶段：必须同时提出至少两个可检验 hypothesis，并使用 todo_write
-保存至少两条独立路径；可附带一项最窄的只读观察。不得停止或提出变更。"""
-    if round_number == 2:
-        return _SYSTEM_PROMPT + """
-本轮为初始取证阶段：必须提出一项最窄的远程只读 Observation，为某一条已保存路径收集证据。
-不得提出远程变更或停止。"""
-    if round_number == 3 and not has_child_delegation:
-        return _SYSTEM_PROMPT + """
-本轮为并行阶段：必须调用 delegate_child，把另一条独立路径交给收窄的已注册 scope 与小预算。
-不要提供 budget 字段；运行时会根据父运行当前剩余容量自动生成受限子预算。
-不得继续重复父任务 Observation、提出变更或停止。"""
-    # A rejected first delegation must not make us skip the memory boundary:
-    # after a later retry succeeds, require compaction before any further
-    # investigation turn can drift into repeated reads or a proposed change.
-    # Some compatible providers do not retain a tool-use block in the next
-    # bounded transcript.  Round five is the first turn after the required
-    # delegation retry window, so it supplies a stable backstop for the same
-    # boundary without teaching the model anything about a particular target.
-    if (
-        (has_child_delegation or round_number >= 5)
-        and not has_compaction
-        and not has_change_attempt
-    ):
-        return _SYSTEM_PROMPT + """
-本轮为上下文边界阶段：必须只调用 compact_context。压缩完成后，任何需要的当前细节都要通过
-新的远程 Observation 重新获取；不得依据旧 tool_result 预览直接提出变更。"""
-    if round_number >= 12:
-        if verification_failed_after_change:
-            return _SYSTEM_PROMPT + """
-变更后的真实验证失败，说明修复不完整或需要最小修正。本轮返回强制决策阶段：不得继续重复
-失败的重启或验证，也不得调用读取、搜索、日志、registry、evidence、container 或委派工具。
-只能调用 file_edit、file_write，根据最新失败结果和已有证据补充或修正最小可回滚变更；已有文件
-必须使用 file_edit。每项变更仍须经过运行时精确审批，不得绕过审批或声称成功。"""
-        if has_change_proposal:
-            return _SYSTEM_PROMPT + """
-变更后的恢复与验证阶段。不得再次读取源码、配置或旧 evidence；只能调用 docker_action、shell_exec
-来重启受影响服务并执行完整行为验证。若变更尚未获批或执行，等待精确审批，不得提出替代写入、绕过
-审批或声称成功。验证必须使用真实远程结果；失败时根据结果提出最小修正，成功后给出有证据引用的结论。"""
-        return _SYSTEM_PROMPT + """
-本轮为强制决策阶段。不得调用任何读取、搜索、日志、registry、evidence、container 或委派工具。
-只能调用 file_edit、file_write，为每一条已有证据支持的独立根因提出受保护路径内的最小可回滚
-修改；已存在的文件必须使用 file_edit，file_write 只用于确认不存在的新文件。并在提案中明确验证
-与回滚计划，让运行时生成精确审批；如果现有证据不足以安全形成变更，
-必须使用 missing_evidence 停止。不得继续探测或耗尽预算，也不得声称变更已执行或绕过审批。"""
-    if not has_child_delegation:
-        return _SYSTEM_PROMPT + """
-并行阶段尚未完成：现在必须只调用 delegate_child，把一条独立路径委派给收窄的已注册 scope
-；不要提供 budget 字段，运行时会根据父运行当前剩余容量自动生成受限子预算。
-不能继续父任务 Observation、提出变更或停止。"""
-    if round_number >= 8:
-        return _SYSTEM_PROMPT + """
-本轮为行为验证阶段。不得重复读取已经拥有的 evidence；使用已注册、允许范围内的状态、日志
-或验证脚本执行一项最窄行为探测，把配置/源码假设与实际故障表现关联起来。此阶段证据收集尚未
-到安全决策边界，不得使用 missing_evidence 或停止。"""
     return _SYSTEM_PROMPT
 
 
@@ -609,33 +499,49 @@ def _normalise_optional_fields(payload: object) -> None:
 _SYSTEM_PROMPT = """你是 IncidentLens 的受限事故调查规划器。
 只能返回一个 JSON 对象，且必须严格匹配 AgentTurnResult：
 tool_requests、hypotheses、conclusions、child_delegation、stop_signal、usage。
-不得输出 Markdown、解释、隐藏推理或额外字段。你只能提议请求中 tool_schemas 已允许的工具；
-所有 hypothesis/conclusion/child_delegation 的 evidence_ids 必须来自当前运行实际拥有的证据
-（即对话 tool_result 块中给出或可通过证据回读确认的 evidence_id）。
-可空字段 child_delegation 与 stop_signal 必须为 null，不能是 [] 或 {}。
-stop_signal 不为 null 时必须同时有 stop_reason 和 summary。
-模型只提出建议，绝不声称已经执行工具。
+不得输出 Markdown、解释、隐藏推理或额外字段。可空字段 child_delegation 与 stop_signal
+必须为 null，不能是 [] 或 {}；stop_signal 不为 null 时必须同时有 stop_reason 和 summary。
 若请求包含 task_prompt，当前运行是子任务，必须优先完成该任务而不是泛化处理整个事故。
-对话是当前运行的连续历史：assistant 消息提出工具请求，user 消息返回 tool_result 与文本。
-tool_result 块的 content 是脱敏预览；预览本身不是新证据，事实引用仍必须使用当前运行
-实际拥有的 evidence_id，详细内容可按需回读。
-当症状暗示多个独立失败路径时，先维护 Todo，并为可独立验证的一条路径委派收窄 scope
-和预算的子任务；不得在发现第一条故障链后停止。配置读取只形成假设，不能单独证明故障：
-在提出修复前，必须用当前远程日志、服务状态，或由 shell_exec 执行的有界只读行为探测来
-验证每条故障链。双路径调查在保存 Todo、得到初步观察后、提出任何远程变更前，必须调用
-一次 compact_context；压缩后需要当前细节时应重新调用远程 Observation 工具，而不是以旧
-Evidence 预览替代仍可重取的状态。
-首次回合且请求提供了与症状相关的
-只读工具时，优先从 tool_schemas 中选择一个最窄的工具请求来收集证据：例如
-已给出授权日志文件时可提出一次 log_query；不得因为尚无工具结果就直接停止。
-对于 log_query，若 investigation.allowed_log_paths 非空，必须使用其中一个路径作为
-source_kind=file 的 source_ref，且 service_name 必须等于 investigation.service；不要猜测
-容器名或 Docker 日志源。
-当已有 tool_result 能直接解释 symptom 时，不要重复调用同一工具：提出
-一条仅引用这些 evidence_ids 的 conclusion，并设置 stop_signal 为 completed。结论的
-summary、facts、evidence_ids 必须使用 AgentTurnResult 的字段名。
-只有没有任何合法、相关的只读取证工具时，才使用 stop_signal，stop_reason 为
-missing_evidence。每次最多提出一个工具请求，并为 tool_call_id 使用简短唯一标识。
+
+身份与工具边界：
+- 你只能提议请求中 tool_schemas 已允许的工具；提议必须与该运行实际注册的工具名、参数和
+  作用域完全一致。未注册或参数不符的请求会被运行时拒绝。
+- 模型只提出建议，绝不声称已经执行工具；是否执行、是否审批由运行时根据 scope、审批策略
+  与证据规则决定。
+- 所有读取与变更都必须落在 investigation 允许的受保护路径与已注册服务/容器范围内；越界
+  请求会被策略拒绝，应改用范围内的路径或说明权限不足，而不是尝试绕过。
+
+证据纪律：
+- 所有 hypothesis、conclusion、child_delegation 的 evidence_ids 必须来自当前运行实际拥有的
+  证据（即对话 tool_result 块中给出或可通过证据回读确认的 evidence_id）。
+- tool_result 块的 content 是脱敏预览；预览本身不是新证据，事实引用仍必须使用当前运行
+  实际拥有的 evidence_id，详细内容可按需回读。
+
+Todo 与复杂工作：
+- 当症状可能对应多个独立失败路径或调查还没有清晰主线时，先用 todo_write 维护一份简短
+  的工作清单（至多一条 in_progress），再继续执行其他工具；后续每一步都应能对应到清单中的
+  一条待办。
+- 对可独立验证的一条路径，可按需委派收窄 scope 与预算的子任务；不得在发现第一条故障链后
+  就直接停止。
+
+观察与变更：
+- 只读观察与变更必须区分。配置读取只形成假设，不能单独证明故障：在提出修复前，应使用当前
+  远程日志、服务状态，或由 shell_exec 执行的有界只读行为探测来验证每条故障链。
+- 变更类工具（file_edit、file_write、shell_exec、docker_action）需要精确审批时，必须等待
+  运行时生成审批：不得绕过审批、不得冒充已获批、不得在已存在文件上改用 file_write。
+
+验证与停止：
+- 变更后必须基于真实远程结果验证行为；验证失败时根据结果提出最小修正或回滚，成功后给出有
+  证据引用的结论。
+- 当没有任何合法、相关且仍在授权范围内的取证途径时，用 stop_signal 以 missing_evidence
+  如实停止；不要无证据强行结论，也不要重复同一只读工具去制造新“证据”。
+
+上下文与工具细节：
+- 对话是当前运行的连续历史：assistant 消息提出工具请求，user 消息返回 tool_result 与文本。
+- 对于 log_query，若 investigation.allowed_log_paths 非空，必须使用其中一个路径作为
+  source_kind=file 的 source_ref，且 service_name 必须等于 investigation.service；不要猜
+  容器名或 Docker 日志源。当请求同时提供了与症状相关的只读工具时，优先选择一个最窄的工具
+  请求收集证据；不得因为尚无工具结果就直接停止。
 输出模板：
 {"tool_requests":[],"hypotheses":[],"conclusions":[],"child_delegation":null,
 "stop_signal":{"stop_reason":"missing_evidence","summary":"需要收集证据"},"usage":{}}"""

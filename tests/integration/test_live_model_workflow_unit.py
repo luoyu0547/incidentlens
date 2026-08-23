@@ -150,6 +150,147 @@ async def test_live_workflow_returns_recording_shape_and_scripted_completion(tmp
 
 
 @pytest.mark.asyncio
+async def test_unanticipated_sequence_continues_through_generic_loop(tmp_path) -> None:
+    """The generic loop follows the model's tool order, not a fixed round script.
+
+    Round one proposes an out-of-scope host read, which the executor rejects as a
+    scope-policy decision rather than a phase gate; the loop then continues with
+    in-scope observations to an evidence-grounded completion.  No round-number
+    stage directive is needed or consulted.
+    """
+    registry = _unanticipated_sequence_registry()
+    factory = FakeTransportFactory()
+    transport = await factory.connect(_target())
+    await transport.write_bytes(
+        PurePosixPath("/workspace/service/live.log"),
+        b"ERROR checkout timeout\n",
+    )
+
+    result = await run_live_model_workflow(
+        _settings(tmp_path),
+        factory,
+        _target(),
+        _service(),
+        fake_provider_registry=registry,
+    )
+
+    assert result.run["status"] == "completed"
+    tool_calls = result.tool_calls
+    assert [item["tool_name"] for item in tool_calls] == [
+        "host_read",
+        "host_read",
+        "log_query",
+    ]
+    assert tool_calls[0]["status"] == "failed"
+    assert "outside the run's allowed" in (tool_calls[0]["error_redacted"] or "")
+    assert tool_calls[1]["status"] == "succeeded"
+    assert tool_calls[2]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_approval_policy_gates_execution_absent_provider_round(tmp_path) -> None:
+    """A round-one mutation is gated by exact approval, never by a round rule.
+
+    The mutation is proposed on the very first turn (before any hypothetical
+    round-stage choreography), and the loop pauses for the runtime's approval
+    policy instead of executing it.
+    """
+    registry = FakeProviderRegistry()
+    registry.set_script(
+        "pending",
+        [
+            RequestToolsStep(
+                tool_requests=(
+                    ToolRequest(
+                        tool_call_id="restart-1",
+                        tool_name="docker_action",
+                        arguments={
+                            "service_name": "test-ssh",
+                            "action": "restart",
+                            "container": "test-ssh",
+                            "reason": "verify recovery",
+                        },
+                    ),
+                ),
+            ),
+        ],
+    )
+    factory = FakeTransportFactory()
+    transport = await factory.connect(_target())
+    await transport.write_bytes(
+        PurePosixPath("/workspace/service/live.log"),
+        b"ERROR checkout timeout\n",
+    )
+
+    with pytest.raises(RuntimeError, match="waiting_approval"):
+        await run_live_model_workflow(
+            _settings(tmp_path),
+            factory,
+            _target(),
+            _service(),
+            fake_provider_registry=registry,
+        )
+
+
+def _unanticipated_sequence_registry() -> FakeProviderRegistry:
+    """A model-chosen sequence that follows no fixed-round stage schedule."""
+    registry = _RecordingRegistry()
+    registry.set_script(
+        "pending",
+        [
+            RequestToolsStep(
+                tool_requests=(
+                    ToolRequest(
+                        tool_call_id="read-1",
+                        tool_name="host_read",
+                        arguments={
+                            "service_name": "test-ssh",
+                            "path": "/etc/passwd",
+                        },
+                    ),
+                ),
+            ),
+            RequestToolsStep(
+                tool_requests=(
+                    ToolRequest(
+                        tool_call_id="read-2",
+                        tool_name="host_read",
+                        arguments={
+                            "service_name": "test-ssh",
+                            "path": "/workspace/service/live.log",
+                        },
+                    ),
+                ),
+            ),
+            RequestToolsStep(
+                tool_requests=(
+                    ToolRequest(
+                        tool_call_id="log-1",
+                        tool_name="log_query",
+                        arguments={
+                            "service_name": "test-ssh",
+                            "source_kind": "file",
+                            "source_ref": "/workspace/service/live.log",
+                        },
+                    ),
+                ),
+            ),
+            StopStep(
+                stop_signal=StopSignal(
+                    stop_reason=StopReason.COMPLETED,
+                    summary="recorded",
+                ),
+                conclusion=Conclusion(
+                    summary="recorded conclusion",
+                    evidence_ids=("__latest__",),
+                ),
+            ),
+        ],
+    )
+    return registry
+
+
+@pytest.mark.asyncio
 async def test_context_overrides_prefill_complete_groups_and_whitelists_keys(tmp_path) -> None:
     registry = _registry()
     factory = FakeTransportFactory()

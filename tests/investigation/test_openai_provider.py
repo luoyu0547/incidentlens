@@ -548,215 +548,46 @@ def test_normalise_optional_fields_rejects_non_object_result():
         raise AssertionError("non-object provider result must be rejected")
 
 
-def test_late_parent_round_requires_decision_instead_of_repeated_reading() -> None:
-    request = SimpleNamespace(
-        task_prompt=None,
-        checkpoint=SimpleNamespace(round_number=12),
-        messages=(
-            _transcript(
-                MessageRole.ASSISTANT,
-                (
-                    ToolUseBlock(
-                        tool_call_id="compact-1",
-                        tool_name="compact_context",
-                        arguments={},
-                    ),
-                ),
-            ),
-        ),
+def _request_at(round_number: int) -> SimpleNamespace:
+    """A minimal parent turn-shaped request observed at *round_number*."""
+    request = _dummy_request()
+    request.checkpoint.round_number = round_number
+    return request
+
+
+@pytest.mark.parametrize("round_number", [1, 3, 8, 12, 50])
+def test_parent_prompt_does_not_encode_round_workflow(round_number: int) -> None:
+    prompt = _system_prompt(_request_at(round_number))
+    assert "本轮为" not in prompt
+    assert "只能调用 file_edit" not in prompt
+    assert "必须只调用 compact_context" not in prompt
+    assert "受保护路径" in prompt
+
+
+async def _provider_payload(
+    provider_config: OpenAICompatibleConfig, tool_names: tuple[str, ...]
+) -> dict:
+    """One recorded ``generate_turn`` payload for the given registered tools."""
+    transport = _FakeTransport(
+        response={"choices": [{"message": {"content": _EMPTY_TURN}}]}
     )
-
-    prompt = _system_prompt(request)
-
-    assert "只能调用 file_edit、file_write" in prompt
-    assert "每一条已有证据支持的独立根因" in prompt
-    assert "missing_evidence" in prompt
-
-
-def test_late_parent_round_after_change_requires_restart_or_verification() -> None:
-    request = SimpleNamespace(
-        task_prompt=None,
-        checkpoint=SimpleNamespace(round_number=13),
-        messages=(
-            _transcript(
-                MessageRole.ASSISTANT,
-                (
-                    ToolUseBlock(
-                        tool_call_id="change-1",
-                        tool_name="file_edit",
-                        arguments={"path": "/opt/app/config.env"},
-                    ),
-                ),
-            ),
-            _transcript(
-                MessageRole.USER,
-                (
-                    ToolResultBlock(
-                        tool_call_id="change-1",
-                        status=ToolCallStatus.SUCCEEDED,
-                        content="changeset applied",
-                    ),
-                ),
-            ),
-        ),
+    provider = OpenAICompatibleProvider(provider_config, transport=transport)
+    request = _request_at(1)
+    request.tool_schemas = tuple(
+        SimpleNamespace(
+            tool_name=name,
+            description="registered test tool",
+            parameters_json_schema={"type": "object", "additionalProperties": False},
+        )
+        for name in tool_names
     )
-
-    prompt = _system_prompt(request)
-
-    assert "只能调用 docker_action、shell_exec" in prompt
-    assert "不得再次读取源码、配置或旧 evidence" in prompt
+    await provider.generate_turn(request)
+    return transport.calls[0]
 
 
-def test_late_parent_round_after_failed_write_returns_to_file_edit() -> None:
-    request = SimpleNamespace(
-        task_prompt=None,
-        checkpoint=SimpleNamespace(round_number=13),
-        messages=(
-            _transcript(
-                MessageRole.ASSISTANT,
-                (
-                    ToolUseBlock(
-                        tool_call_id="change-1",
-                        tool_name="file_write",
-                        arguments={"path": "/opt/app/config.env"},
-                    ),
-                ),
-            ),
-            _transcript(
-                MessageRole.USER,
-                (
-                    ToolResultBlock(
-                        tool_call_id="change-1",
-                        status=ToolCallStatus.FAILED,
-                        content="target already exists",
-                    ),
-                ),
-            ),
-        ),
-    )
-
-    prompt = _system_prompt(request)
-
-    assert "只能调用 file_edit、file_write" in prompt
-    assert "已存在的文件必须使用 file_edit" in prompt
-
-
-def test_late_parent_round_waits_until_every_proposed_change_succeeds() -> None:
-    request = SimpleNamespace(
-        task_prompt=None,
-        checkpoint=SimpleNamespace(round_number=13),
-        messages=(
-            _transcript(
-                MessageRole.ASSISTANT,
-                (
-                    ToolUseBlock(
-                        tool_call_id="change-payment",
-                        tool_name="file_edit",
-                        arguments={"path": "/opt/app/payment.env"},
-                    ),
-                    ToolUseBlock(
-                        tool_call_id="change-order",
-                        tool_name="file_edit",
-                        arguments={"path": "/opt/app/order.env"},
-                    ),
-                ),
-            ),
-            _transcript(
-                MessageRole.USER,
-                (
-                    ToolResultBlock(
-                        tool_call_id="change-payment",
-                        status=ToolCallStatus.SUCCEEDED,
-                        content="changeset applied",
-                    ),
-                ),
-            ),
-        ),
-    )
-
-    prompt = _system_prompt(request)
-
-    assert "只能调用 file_edit、file_write" in prompt
-    assert "只能调用 docker_action、shell_exec" not in prompt
-
-
-def test_failed_post_change_verification_returns_to_change_decision() -> None:
-    request = SimpleNamespace(
-        task_prompt=None,
-        checkpoint=SimpleNamespace(round_number=15),
-        messages=(
-            _transcript(
-                MessageRole.ASSISTANT,
-                (
-                    ToolUseBlock(
-                        tool_call_id="change-order",
-                        tool_name="file_edit",
-                        arguments={"path": "/opt/app/order.env"},
-                    ),
-                ),
-            ),
-            _transcript(
-                MessageRole.USER,
-                (
-                    ToolResultBlock(
-                        tool_call_id="change-order",
-                        status=ToolCallStatus.SUCCEEDED,
-                        content="changeset applied",
-                    ),
-                ),
-            ),
-            _transcript(
-                MessageRole.ASSISTANT,
-                (
-                    ToolUseBlock(
-                        tool_call_id="verify-matrix",
-                        tool_name="shell_exec",
-                        arguments={"command": "request_matrix --expected repaired"},
-                    ),
-                ),
-            ),
-            _transcript(
-                MessageRole.USER,
-                (
-                    ToolResultBlock(
-                        tool_call_id="verify-matrix",
-                        status=ToolCallStatus.FAILED,
-                        content="payment case still returns 429",
-                    ),
-                ),
-            ),
-        ),
-    )
-
-    prompt = _system_prompt(request)
-
-    assert "只能调用 file_edit、file_write" in prompt
-    assert "验证失败" in prompt
-
-
-def test_pre_decision_behavior_stage_cannot_stop_early() -> None:
-    request = SimpleNamespace(
-        task_prompt=None,
-        checkpoint=SimpleNamespace(round_number=10),
-        messages=(
-            _transcript(
-                MessageRole.ASSISTANT,
-                (
-                    ToolUseBlock(
-                        tool_call_id="delegate-1",
-                        tool_name="delegate_child",
-                        arguments={},
-                    ),
-                    ToolUseBlock(
-                        tool_call_id="compact-1",
-                        tool_name="compact_context",
-                        arguments={},
-                    ),
-                ),
-            ),
-        ),
-    )
-
-    prompt = _system_prompt(request)
-
-    assert "不得使用 missing_evidence 或停止" in prompt
+async def test_prompt_exposes_actual_tools_not_scripted_stage(provider_config) -> None:
+    payload = await _provider_payload(provider_config, ("host_read", "file_edit"))
+    assert [tool["function"]["name"] for tool in payload["tools"]] == [
+        "host_read",
+        "file_edit",
+    ]
