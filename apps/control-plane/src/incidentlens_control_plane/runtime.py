@@ -235,6 +235,7 @@ def build_runtime(
             keep_recent_tool_results=settings.agent_context_keep_recent_tool_results,
             compact_max_failures=settings.agent_compact_max_failures,
             reactive_keep_recent_groups=settings.agent_reactive_keep_recent_groups,
+            semantic_compact_at_fraction=settings.agent_context_semantic_compact_at_fraction,
         ),
         compactor=compactor,
     )

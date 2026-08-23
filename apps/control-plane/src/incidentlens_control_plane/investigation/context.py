@@ -147,6 +147,11 @@ class ContextBudget:
     ``input_tokens`` is the conservative estimate of the actual input the
     current context would consume (system prompt + attachments, serialized tool
     schemas and all active messages).
+
+    ``semantic_compact_at_tokens`` is the *pressure* threshold: a fraction of
+    ``max_input_tokens`` below the hard ceiling at which the run asks the
+    semantic compactor to consolidate the transcript before the deterministic
+    path is forced to.
     """
 
     context_window: int
@@ -155,10 +160,15 @@ class ContextBudget:
     system_tokens: int
     tool_tokens: int
     message_tokens: int
+    semantic_compact_at_fraction: float = 0.9
 
     @property
     def max_input_tokens(self) -> int:
         return self.context_window - self.max_output_tokens - self.reserve_tokens
+
+    @property
+    def semantic_compact_at_tokens(self) -> int:
+        return int(self.max_input_tokens * self.semantic_compact_at_fraction)
 
     @property
     def input_tokens(self) -> int:
@@ -171,6 +181,11 @@ class ContextBudgetPolicy:
 
     The token window, output reservation and deterministic compaction limits
     mirror the runtime settings Task 7 wires into the manager.
+
+    ``semantic_compact_at_fraction`` is the fraction of ``max_input_tokens`` at
+    which ``AgentContextManager.prepare`` asks the semantic compactor to run,
+    *before* the deterministic over-budget path is forced.  A value below 1.0
+    keeps the pressure threshold under the hard ceiling.
     """
 
     context_window: int = 128_000
@@ -182,6 +197,7 @@ class ContextBudgetPolicy:
     system_prompt: str = ""
     compact_max_failures: int = 3
     reactive_keep_recent_groups: int = 5
+    semantic_compact_at_fraction: float = 0.9
 
     def __post_init__(self) -> None:
         if self.context_window < 8_000:
@@ -202,6 +218,8 @@ class ContextBudgetPolicy:
             raise ValueError("compact_max_failures must be >= 1")
         if self.reactive_keep_recent_groups < 1:
             raise ValueError("reactive_keep_recent_groups must be >= 1")
+        if not 0 < self.semantic_compact_at_fraction <= 1:
+            raise ValueError("semantic_compact_at_fraction must be in (0, 1]")
 
 
 class TokenEstimator(Protocol):
@@ -563,6 +581,57 @@ class AgentContextManager:
                 run, investigation, tool_schemas, boundary, memory, todos, child_reports
             )
         return active
+
+    async def prepare(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        tool_schemas: tuple[ToolSchema, ...],
+        *,
+        child_reports: tuple[ChildReport, ...] = (),
+    ) -> ActiveContext:
+        """Materialize one provider context, compacting semantically on pressure.
+
+        The deterministic pipeline (tool-result budget, group-safe snip and
+        micro-compaction every turn) runs first; the semantic compactor is the
+        *pressure valve*.  When the estimated input has crossed
+        ``semantic_compact_at_tokens`` -- a configurable fraction below
+        ``max_input_tokens`` -- one model-backed compaction summarizes the
+        recent transcript and an atomic memory/boundary commit is made, after
+        which the active context is rebuilt from the committed boundary.
+
+        A semantic compaction failure never advances the previous boundary and
+        never overwrites the last valid memory: ``prepare`` falls back to the
+        deterministic ``build`` path (which may itself deterministically
+        compact into a fresh revision when the context is over budget).  The
+        one-shot reactive compaction for a real ``PromptTooLongError`` remains
+        unchanged.
+        """
+        boundary = self._store.get_latest_compact_boundary(run.agent_run_id)
+        memory = self._store.get_latest_session_memory(run.agent_run_id)
+        todos = self._store.list_todos(run.agent_run_id)
+
+        active = self._materialize(
+            run, investigation, tool_schemas, boundary, memory, todos, child_reports
+        )
+        if active.budget.input_tokens < active.budget.semantic_compact_at_tokens:
+            return active
+        if self._compactor is None:
+            return self.build(
+                run, investigation, tool_schemas, child_reports=child_reports
+            )
+        try:
+            memory = await self.semantic_compact(run)
+        except (CompactionRejected, CompactionCircuitOpen):
+            # The broken or rejecting compactor left the previous boundary
+            # intact; fall back to the deterministic pipeline.
+            return self.build(
+                run, investigation, tool_schemas, child_reports=child_reports
+            )
+        boundary = self._store.get_latest_compact_boundary(run.agent_run_id)
+        return self._materialize(
+            run, investigation, tool_schemas, boundary, memory, todos, child_reports
+        )
 
     # -- semantic / reactive compaction ---------------------------------------
 
@@ -1292,6 +1361,7 @@ class AgentContextManager:
             system_tokens=system_tokens,
             tool_tokens=tool_tokens,
             message_tokens=message_tokens,
+            semantic_compact_at_fraction=self._policy.semantic_compact_at_fraction,
         )
 
     @staticmethod

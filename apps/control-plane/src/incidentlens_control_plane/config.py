@@ -40,8 +40,8 @@ class RuntimeSettings(BaseModel):
     # -- per-run default budget bounds ---------------------------------------
     # These mirror the ``AgentBudget`` contract bounds and become the default
     # budget for a run when a caller does not supply one.
-    max_rounds_per_run: int = Field(default=8, ge=1, le=200)
-    max_tool_calls_per_run: int = Field(default=16, ge=1, le=500)
+    max_rounds_per_run: int = Field(default=20, ge=1, le=200)
+    max_tool_calls_per_run: int = Field(default=40, ge=1, le=500)
     max_run_wall_clock_seconds: int = Field(default=1_800, ge=1, le=43_200)
     max_output_bytes_per_tool: int = Field(
         default=512 * 1024, ge=1, le=64 * 1024 * 1024
@@ -63,6 +63,10 @@ class RuntimeSettings(BaseModel):
     )
     agent_context_max_message_groups: int = Field(default=50, ge=10, le=500)
     agent_context_keep_recent_tool_results: int = Field(default=3, ge=1, le=20)
+    # Fraction of ``max_input_tokens`` at which the agent loop asks the semantic
+    # compactor to run, before the deterministic over-budget path is forced.
+    # Stays below 1.0 so pressure compaction triggers before the hard ceiling.
+    agent_context_semantic_compact_at_fraction: float = Field(default=0.9, gt=0, le=1)
     agent_compact_max_failures: int = Field(default=3, ge=1, le=10)
     agent_reactive_keep_recent_groups: int = Field(default=5, ge=1, le=20)
 
@@ -122,14 +126,23 @@ class RuntimeSettings(BaseModel):
             agent_context_keep_recent_tool_results=_environment_int(
                 "INCIDENTLENS_AGENT_CONTEXT_KEEP_RECENT_TOOL_RESULTS", 3
             ),
-            max_rounds_per_run=_environment_int("INCIDENTLENS_MAX_ROUNDS_PER_RUN", 8),
+            agent_context_semantic_compact_at_fraction=_environment_float(
+                "INCIDENTLENS_AGENT_CONTEXT_SEMANTIC_COMPACT_AT_FRACTION", 0.9
+            ),
+            max_rounds_per_run=_environment_int("INCIDENTLENS_MAX_ROUNDS_PER_RUN", 20),
             max_tool_calls_per_run=_environment_int(
-                "INCIDENTLENS_MAX_TOOL_CALLS_PER_RUN", 16
+                "INCIDENTLENS_MAX_TOOL_CALLS_PER_RUN", 40
             ),
             max_no_new_evidence_rounds=_environment_int(
                 "INCIDENTLENS_MAX_NO_NEW_EVIDENCE_ROUNDS", 3
             ),
             max_provider_retries=_environment_int("INCIDENTLENS_MAX_PROVIDER_RETRIES", 2),
+            max_investigation_rounds=_environment_int(
+                "INCIDENTLENS_MAX_INVESTIGATION_ROUNDS", 32
+            ),
+            max_investigation_tool_calls=_environment_int(
+                "INCIDENTLENS_MAX_INVESTIGATION_TOOL_CALLS", 64
+            ),
         )
 
     def default_run_budget(self) -> AgentBudget:
@@ -174,3 +187,9 @@ def _environment_int(name: str, default: int) -> int:
     """Read an optional integer override while keeping defaults explicit."""
     value = os.environ.get(name)
     return default if value is None else int(value)
+
+
+def _environment_float(name: str, default: float) -> float:
+    """Read an optional float override while keeping defaults explicit."""
+    value = os.environ.get(name)
+    return default if value is None else float(value)

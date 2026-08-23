@@ -417,7 +417,7 @@ class AgentOrchestrator:
         provider_started = time.monotonic()
 
         try:
-            request = self._build_request(run, investigation, round_number, child_reports)
+            request = await self._build_request(run, investigation, round_number, child_reports)
         except Exception as exc:  # noqa: BLE001 - a corrupt transcript must pause, not crash
             self._pause(
                 run, investigation, AgentRunStatus.PAUSED_UNCERTAIN_STATE,
@@ -711,7 +711,7 @@ class AgentOrchestrator:
                 ):
                     raise exc
 
-    def _build_request(
+    async def _build_request(
         self,
         run: AgentRun,
         investigation: Investigation,
@@ -723,7 +723,7 @@ class AgentOrchestrator:
             item for item in project.services if item.compose_service == investigation.service
         )
         tool_schemas = self._executor.tool_schemas(scope=run.scope.scope)
-        context = self._context.build(
+        context = await self._context.prepare(
             run, investigation, tool_schemas, child_reports=tuple(child_reports)
         )
         return ConversationRequest(

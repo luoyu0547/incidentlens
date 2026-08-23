@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 
 from pydantic import ValidationError
@@ -27,6 +28,7 @@ from incidentlens_control_plane.investigation.model_transport import (
     OpenAICompatibleTransport,
 )
 from incidentlens_control_plane.investigation.provider import PromptTooLongError
+from incidentlens_control_plane.investigation.state_machine import ToolCallStatus
 from incidentlens_control_plane.investigation.types import (
     SessionMemory,
     TextBlock,
@@ -63,11 +65,13 @@ class OpenAICompatibleCompactor(ContextCompactor):
             raise CompactionRejected(exc.message) from exc
         try:
             content = response["choices"][0]["message"]["content"]
-            return SessionMemory.model_validate_json(_strip_fence(content))
+            memory = SessionMemory.model_validate_json(_strip_fence(content))
         except (KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
             raise CompactionRejected(
                 "model compaction response is invalid"
             ) from exc
+        _require_preserved_state(request, memory)
+        return memory
 
 
 def _compaction_messages(request: CompactionRequest) -> list[dict[str, object]]:
@@ -144,7 +148,14 @@ def _serialize_expected_output(request: CompactionRequest) -> str:
                 "Summarize the transcript into a SessionMemory object. "
                 "You must echo the following identity fields exactly: "
                 "agent_run_id, investigation_id, revision, "
-                "through_round, through_transcript_sequence."
+                "through_round, through_transcript_sequence. "
+                "Preserve every evidence-backed SHA-256 hash verbatim. "
+                "Carry every pending approval and proposed change in "
+                "safety_state and pending_actions. "
+                "Record the latest verification outcome (applied / verified / "
+                "failed / rolled back / reapplied) in completed_actions or "
+                "open_questions. "
+                "Always end with concrete next_actions."
             ),
             "agent_run_id": request.agent_run_id,
             "investigation_id": request.investigation_id,
@@ -191,24 +202,123 @@ Return exactly one JSON object matching the SessionMemory schema:
 - active_hypotheses: list of current hypotheses
 - rejected_hypotheses: rejected hypotheses with their reason
 - open_questions: list of unresolved questions
-- completed_actions: list of completed investigation actions
+- completed_actions: list of completed investigation actions, including the
+  latest verification outcome
 - child_findings: list of child investigation findings
 - reacquisition_recipes: reproducible remote observations as objects with
   purpose, tool_name, redacted arguments, and stale_summary
-- immutable_observations: bounded pre-change, rotated, transient, or one-time observations
-- pending_actions: pending approvals, repairs, verification, rollback, or reapply work
-- safety_state: approval, changeset, backup, uncertain execution, verification and recovery state
+- immutable_observations: bounded pre-change, rotated, transient, or one-time
+  observations; preserve every evidence-backed SHA-256 hash verbatim
+- pending_actions: pending approvals, repairs, verification, rollback, or
+  reapply work; carry every tool call that is still waiting approval or that
+  failed / ran uncertain
+- safety_state: approval, changeset, backup, uncertain execution, verification
+  and recovery state; never drop a pending approval or an unverified change
 - evidence_ids: only from the allowed_evidence_ids list; never fabricate
 - user_constraints: list of user-stated constraints
 - todos: list of pending investigation items
-- next_actions: list of recommended next steps
+- next_actions: list of recommended next steps (always concrete and non-empty)
 - created_at: ISO timestamp
 
 Never invent evidence IDs not in the allowed list.
 Never change the agent_run_id, investigation_id, or through_round values.
 Never change the through_transcript_sequence to a value lower than requested.
+Preserve every evidence-backed SHA-256 hash exactly.
+Preserve every pending approval / proposed / applied / unverified change.
+Record the latest verification outcome in completed_actions or open_questions.
+Always end with concrete next actions.
 Return ONLY the JSON object, no markdown fences, no explanation.
 """
+
+
+_SHA256_TOKEN_RE = re.compile(r"\b[0-9a-f]{64}\b")
+_VERIFICATION_MARKERS = ("verified", "verification", "verify", "rollback", "reapplied")
+
+
+def _require_preserved_state(request: CompactionRequest, memory: SessionMemory) -> None:
+    """Reject a memory that drops incident state the transcript still carries.
+
+    The compaction contract is a *preservation* contract: evidence-backed
+    SHA-256 hashes, pending approvals / unverified changes, the latest
+    verification outcome and concrete next actions must survive the summary.
+    Each check scans the bounded transcript the compactor was asked to
+    summarize and requires the corresponding existing ``SessionMemory`` field
+    (never a new schema field) to carry that state.
+    """
+    if not memory.next_actions:
+        raise CompactionRejected(
+            "model compaction memory must preserve concrete next_actions"
+        )
+
+    transcript_hashes: set[str] = set()
+    pending_calls: set[str] = set()
+    has_verification = False
+    for message in request.messages:
+        for block in message.blocks:
+            if isinstance(block, ToolResultBlock):
+                if block.status in {
+                    ToolCallStatus.WAITING_APPROVAL,
+                    ToolCallStatus.FAILED,
+                    ToolCallStatus.UNCERTAIN,
+                }:
+                    pending_calls.add(block.tool_call_id)
+                transcript_hashes.update(_SHA256_TOKEN_RE.findall(block.content))
+                if any(marker in block.content.lower() for marker in _VERIFICATION_MARKERS):
+                    has_verification = True
+            elif isinstance(block, ToolUseBlock):
+                if "verify" in block.tool_name.lower():
+                    has_verification = True
+            elif isinstance(block, TextBlock):
+                transcript_hashes.update(_SHA256_TOKEN_RE.findall(block.text))
+                if any(marker in block.text.lower() for marker in _VERIFICATION_MARKERS):
+                    has_verification = True
+
+    carried = " ".join(_memory_text_fields(memory))
+    dropped_hashes = sorted(
+        transcript_hash for transcript_hash in transcript_hashes if transcript_hash not in carried
+    )
+    if dropped_hashes:
+        raise CompactionRejected(
+            "model compaction memory drops evidence-backed hash"
+            f" {dropped_hashes[0]!r}"
+        )
+
+    safety_text = " ".join((*memory.safety_state, *memory.pending_actions))
+    dropped_calls = sorted(call_id for call_id in pending_calls if call_id not in safety_text)
+    if dropped_calls:
+        raise CompactionRejected(
+            "model compaction memory drops pending state for call"
+            f" {dropped_calls[0]!r}"
+        )
+
+    if has_verification:
+        verification_text = " ".join((*memory.completed_actions, *memory.open_questions)).lower()
+        if not verification_text or not any(
+            marker in verification_text for marker in _VERIFICATION_MARKERS
+        ):
+            raise CompactionRejected(
+                "model compaction memory drops the latest verification state"
+            )
+
+
+def _memory_text_fields(memory: SessionMemory) -> list[str]:
+    """Every free-text value in a ``SessionMemory`` (evidence ids are ids)."""
+    fields: list[str] = []
+    for field, value in memory.model_dump(mode="json").items():
+        if field == "evidence_ids":
+            continue
+        if isinstance(value, str):
+            fields.append(value)
+        elif isinstance(value, list):
+            fields.extend(item for item in value if isinstance(item, str))
+            fields.extend(
+                str(nested)
+                for item in value
+                if isinstance(item, dict)
+                for nested in item.values()
+                if isinstance(nested, str)
+            )
+    return fields
 
 
 __all__ = [

@@ -23,6 +23,10 @@ from datetime import UTC, datetime
 import pytest
 from incidentlens_control_plane.evidence.store import EvidenceStore
 from incidentlens_control_plane.evidence.types import EvidenceKind, EvidenceRef
+from incidentlens_control_plane.investigation.compactor import (
+    CompactionRejected,
+    CompactionRequest,
+)
 from incidentlens_control_plane.investigation.context import (
     AgentContextManager,
     ConservativeTokenEstimator,
@@ -50,10 +54,12 @@ from incidentlens_control_plane.investigation.types import (
     Investigation,
     InvestigationBudget,
     MessageRole,
+    SessionMemory,
     StopReason,
     TextBlock,
     TodoItem,
     TodoStatus,
+    ToolCall,
     ToolResultBlock,
     ToolUseBlock,
     TranscriptMessage,
@@ -799,3 +805,201 @@ def test_context_policy_rejects_invalid_compaction_limits() -> None:
         ContextBudgetPolicy(compact_max_failures=0)
     with pytest.raises(ValueError, match="reactive_keep_recent_groups"):
         ContextBudgetPolicy(reactive_keep_recent_groups=0)
+
+
+# -- pressure-driven semantic compaction --------------------------------------
+
+
+class _RecordingCompactor:
+    """A compactor that records every request and returns a scripted memory.
+
+    The returned memory is aligned to the request (revision and boundary), so
+    a full-transcript semantic compact commits a fresh revision instead of
+    colliding on a stale one.
+    """
+
+    def __init__(self, memory: SessionMemory) -> None:
+        self._memory = memory
+        self.requests: list[CompactionRequest] = []
+
+    async def compact(self, request: CompactionRequest) -> SessionMemory:
+        self.requests.append(request)
+        revision = (
+            (request.prior_memory.revision + 1)
+            if request.prior_memory is not None
+            else 1
+        )
+        return self._memory.model_copy(
+            update={
+                "revision": revision,
+                "memory_id": f"mem-{request.agent_run_id}-{revision}",
+                "through_transcript_sequence": max(
+                    request.through_sequence,
+                    self._memory.through_transcript_sequence,
+                ),
+            }
+        )
+
+
+class _FailingCompactor:
+    """A compactor that always rejects, recording how many times it was called."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def compact(self, request: CompactionRequest) -> SessionMemory:
+        self.calls += 1
+        raise CompactionRejected("scripted compactor failure")
+
+
+@pytest.fixture
+def recording_compactor() -> _RecordingCompactor:
+    """A semantic compactor that preserves the incident work state."""
+    return _RecordingCompactor(
+        SessionMemory(
+            memory_id="mem-run-1-1",
+            agent_run_id="run-1",
+            investigation_id="inv-1",
+            revision=1,
+            through_round=0,
+            through_transcript_sequence=1,
+            objective="checkout requests return 502",
+            immutable_observations=("pre-change target sha256 " + "a" * 64,),
+            todos=("[pending] verify root cause",),
+            evidence_ids=("ev-hash",),
+            created_at=NOW,
+        )
+    )
+
+
+@pytest.fixture
+def pressure_manager(store: InvestigationStore, recording_compactor) -> AgentContextManager:
+    """A manager whose semantic pressure threshold sits far below the ceiling.
+
+    ``semantic_compact_at_fraction=0.1`` means a modest seeded transcript
+    crosses the pressure band (10k of 107k tokens) without ever tripping the
+    deterministic over-``max_input_tokens`` path, so ``prepare`` exercises the
+    semantic compactor rather than the deterministic memory fallback.
+    """
+    return AgentContextManager(
+        store,
+        policy=ContextBudgetPolicy(
+            context_window=128_000,
+            max_output_tokens=8_000,
+            reserve_tokens=13_000,
+            semantic_compact_at_fraction=0.1,
+        ),
+        compactor=recording_compactor,
+        now=lambda: NOW,
+    )
+
+
+def seed_large_transcript_with_target_hash(
+    store: InvestigationStore, run: AgentRun, *, sha256: str
+) -> AgentRun:
+    """Append a large transcript plus an immutable pre-change observation.
+
+    The immutable ``file_edit`` pair records ``sha256`` as the observed target
+    file hash and attaches matching owned evidence to the run, so whichever
+    memory path summarizes the transcript still surfaces the hash.
+    """
+    seed_many_message_groups(store, count=60, content_width=500)
+    call = ToolCall(
+        tool_call_id="call-hash",
+        agent_run_id="run-1",
+        tool_name="file_edit",
+        status=ToolCallStatus.SUCCEEDED,
+        idempotency_key="call-hash",
+        planned_at=NOW,
+        finished_at=NOW,
+    )
+    store.create_tool_call(call)
+    evidence = EvidenceReference(
+        evidence_id="ev-hash",
+        operation_id="call-hash",
+        summary=f"pre-change target sha256 {sha256}",
+    )
+    store.append_transcript_message(
+        TranscriptMessage(
+            agent_run_id="run-1",
+            sequence=121,
+            role=MessageRole.ASSISTANT,
+            blocks=(
+                ToolUseBlock(
+                    tool_call_id="call-hash",
+                    tool_name="file_edit",
+                    arguments={"path": "/etc/orders.env", "expected_sha256": sha256},
+                ),
+            ),
+            created_at=NOW,
+        )
+    )
+    store.append_transcript_message(
+        TranscriptMessage(
+            agent_run_id="run-1",
+            sequence=122,
+            role=MessageRole.USER,
+            blocks=(
+                ToolResultBlock(
+                    tool_call_id="call-hash",
+                    status=ToolCallStatus.SUCCEEDED,
+                    content=f"pre-change sha256 {sha256} persisted",
+                    evidence_ids=(evidence.evidence_id,),
+                    persisted_output=True,
+                ),
+            ),
+            created_at=NOW,
+        )
+    )
+    return run.model_copy(update={"evidence": (evidence,)})
+
+
+def test_semantic_compaction_is_not_requested_below_pressure(
+    store: InvestigationStore, pressure_manager: AgentContextManager, recording_compactor
+) -> None:
+    active = pressure_manager.build(run(), investigation(), schemas())
+    assert active.budget.input_tokens < active.budget.semantic_compact_at_tokens
+    assert recording_compactor.requests == []
+
+
+@pytest.mark.asyncio
+async def test_pressure_compaction_preserves_work_state(
+    store: InvestigationStore, pressure_manager: AgentContextManager, recording_compactor
+) -> None:
+    seeded = seed_large_transcript_with_target_hash(store, run(), sha256="a" * 64)
+    active = await pressure_manager.prepare(seeded, investigation(), schemas())
+    assert active.memory is not None
+    assert active.memory.objective == investigation().symptom
+    assert "a" * 64 in " ".join(active.memory.immutable_observations)
+    assert active.memory.todos
+    assert active.budget.input_tokens <= active.budget.max_input_tokens
+    # Pressing the threshold must actually invoke the semantic compactor.
+    assert recording_compactor.requests
+
+
+@pytest.mark.asyncio
+async def test_prepare_falls_back_without_boundary_advance_on_semantic_failure(
+    store: InvestigationStore,
+) -> None:
+    """A failed semantic compact returns an in-budget context, never advancing
+    the previous boundary (the failure breaker still counts the attempt)."""
+    failing = _FailingCompactor()
+    manager_ = AgentContextManager(
+        store,
+        policy=ContextBudgetPolicy(
+            context_window=128_000,
+            max_output_tokens=8_000,
+            reserve_tokens=13_000,
+            semantic_compact_at_fraction=0.1,
+        ),
+        compactor=failing,
+        now=lambda: NOW,
+    )
+    seeded = seed_large_transcript_with_target_hash(store, run(), sha256="a" * 64)
+    active = await manager_.prepare(seeded, investigation(), schemas())
+    assert failing.calls == 1
+    assert store.get_latest_compact_boundary("run-1") is None
+    assert active.memory is None
+    assert active.budget.input_tokens <= active.budget.max_input_tokens
+    state = store.get_compaction_state("run-1")
+    assert state is not None and state.consecutive_failures == 1
