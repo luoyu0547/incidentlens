@@ -6,3 +6,5 @@ __pycache__/
 .env
 data/
 artifacts/
+.claude/
+.incidentlens-data/

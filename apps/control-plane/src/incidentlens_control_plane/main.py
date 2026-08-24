@@ -7,10 +7,8 @@ wired only through the typed policy gate and provider adapters.
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
-from starlette.staticfiles import StaticFiles
 
 from incidentlens_control_plane.config import RuntimeSettings
 from incidentlens_control_plane.remote_ops.transport import RemoteTransportFactory
@@ -113,7 +111,6 @@ def create_app(
     from incidentlens_control_plane.routes.remote_sessions import (
         router as remote_sessions_router,
     )
-    from incidentlens_control_plane.web.routes import router as web_router
 
     application.include_router(approvals_router)
     application.include_router(changes_router)
@@ -124,12 +121,6 @@ def create_app(
     application.include_router(evidence_router)
     application.include_router(incidents_router)
     application.include_router(investigations_router)
-    application.include_router(web_router)
-
-    _static_dir = Path(__file__).parent / "web" / "static"
-    application.mount(
-        "/static", StaticFiles(directory=str(_static_dir)), name="static"
-    )
 
     return application
 

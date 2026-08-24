@@ -1,8 +1,0 @@
-{% if status == "approved" %}
-<mark>Approved</mark>
-{% elif status == "rejected" %}
-<mark>Rejected</mark>
-{% else %}
-<button hx-post="/web/approvals/{{ approval_id }}/approve" hx-swap="outerHTML">Approve</button>
-<button hx-post="/web/approvals/{{ approval_id }}/reject" hx-swap="outerHTML">Reject</button>
-{% endif %}
