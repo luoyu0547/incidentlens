@@ -22,10 +22,16 @@ from incidentlens_control_plane.idempotency.types import (
     ReservationStatus,
 )
 
-#: Lease on an in_progress reservation.  A worker that crashes or fails with a
-#: 5xx leaves the key reclaimable after this many seconds, so a same-key retry
-#: does not deadlock on a reservation that will never complete.
-IN_PROGRESS_LEASE_SECONDS = 60
+#: Lease on a fresh in_progress reservation.  It is deliberately longer than the
+#: failure re-arm lease so a legitimate slow mutation retried, say, 90 seconds
+#: in does not double-execute: the occupant is only reclaimable once the worker
+#: exceeds this window.
+RESERVATION_LEASE_SECONDS = 300
+
+#: Re-arm lease for a failed (non-2xx / raised) reservation.  A worker that
+#: crashes or fails leaves the key reclaimable after this many seconds, so a
+#: same-key retry does not deadlock on a reservation that will never complete.
+FAILED_RESERVATION_LEASE_SECONDS = 60
 
 #: How long a completed response is retained for exact replay.
 COMPLETED_RETENTION_SECONDS = 24 * 60 * 60
@@ -149,7 +155,7 @@ class IdempotencyStore:
                         now_utc.isoformat(),
                         (
                             now_utc
-                            + timedelta(seconds=IN_PROGRESS_LEASE_SECONDS)
+                            + timedelta(seconds=RESERVATION_LEASE_SECONDS)
                         ).isoformat(),
                     ),
                 )
@@ -238,7 +244,7 @@ class IdempotencyStore:
                 (
                     (
                         now_utc
-                        + timedelta(seconds=IN_PROGRESS_LEASE_SECONDS)
+                        + timedelta(seconds=FAILED_RESERVATION_LEASE_SECONDS)
                     ).isoformat(),
                     principal_id,
                     method,

@@ -23,10 +23,8 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from incidentlens_control_plane.api.idempotency import (
-    IdempotencyInProgressError,
     execute_idempotent,
     idempotency_request_sha256,
-    in_progress_response,
 )
 from incidentlens_control_plane.auth.dependencies import get_principal
 from incidentlens_control_plane.auth.types import Principal
@@ -83,19 +81,16 @@ def _register_test_idempotent_route(app: FastAPI) -> None:
         async def action() -> tuple[int, TestIdempotentResult]:
             return 201, TestIdempotentResult(value=body.value, created=True)
 
-        try:
-            status_code, payload, replayed = await execute_idempotent(
-                service=service,
-                principal=principal,
-                method="POST",
-                route_key=route_key,
-                idempotency_key=request.headers.get("Idempotency-Key"),
-                request_sha256=request_sha256,
-                response_type=TestIdempotentResult,
-                action=action,
-            )
-        except IdempotencyInProgressError:
-            return in_progress_response(request)
+        status_code, payload, replayed = await execute_idempotent(
+            service=service,
+            principal=principal,
+            method="POST",
+            route_key=route_key,
+            idempotency_key=request.headers.get("Idempotency-Key", ""),
+            request_sha256=request_sha256,
+            response_type=TestIdempotentResult,
+            action=action,
+        )
         headers = {"Idempotency-Replayed": "true"} if replayed else None
         return JSONResponse(
             status_code=status_code,

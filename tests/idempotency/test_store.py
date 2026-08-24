@@ -13,7 +13,8 @@ from pathlib import Path
 
 from incidentlens_control_plane.idempotency.store import (
     COMPLETED_RETENTION_SECONDS,
-    IN_PROGRESS_LEASE_SECONDS,
+    FAILED_RESERVATION_LEASE_SECONDS,
+    RESERVATION_LEASE_SECONDS,
     IdempotencyStore,
 )
 from incidentlens_control_plane.idempotency.types import (
@@ -73,7 +74,17 @@ def test_reserve_inserts_in_progress_row(tmp_path: Path) -> None:
     assert record.request_sha256 == "sha-a"
     assert record.created_at == NOW
     assert record.completed_at is None
-    assert record.expires_at == NOW + timedelta(seconds=IN_PROGRESS_LEASE_SECONDS)
+    assert record.expires_at == NOW + timedelta(seconds=RESERVATION_LEASE_SECONDS)
+
+
+def test_lease_policy_separates_fresh_and_failure_leases(tmp_path: Path) -> None:
+    """A fresh reservation is held much longer than a failed one is re-armed.
+
+    A legitimate slow mutation retried, say, 90 seconds in must NOT double
+    execute: only a non-2xx/failed reservation is reclaimable after the short
+    60s lease.
+    """
+    assert RESERVATION_LEASE_SECONDS > FAILED_RESERVATION_LEASE_SECONDS
 
 
 def test_reserve_same_key_different_hash_is_conflict(tmp_path: Path) -> None:
@@ -150,14 +161,42 @@ def test_rearm_lease_refreshes_short_ttl_and_stays_in_progress(
     record = store.get(**PK)
     assert record is not None
     assert record.state == IdempotencyState.IN_PROGRESS
-    assert record.expires_at == NOW + timedelta(seconds=IN_PROGRESS_LEASE_SECONDS)
+    assert record.expires_at == NOW + timedelta(
+        seconds=FAILED_RESERVATION_LEASE_SECONDS
+    )
 
 
-def test_stale_in_progress_is_reclaimed_after_lease(tmp_path: Path) -> None:
+def test_fresh_in_progress_is_held_through_short_lease(tmp_path: Path) -> None:
+    """A legit slow mutation retried ~90s in is not double-executed."""
     store, _ = make_store(tmp_path)
     store.reserve(request_sha256="sha-a", now=NOW, **PK)
 
-    later = NOW + timedelta(seconds=IN_PROGRESS_LEASE_SECONDS + 1)
+    later = NOW + timedelta(seconds=FAILED_RESERVATION_LEASE_SECONDS + 1)
+    reservation = store.reserve(request_sha256="sha-a", now=later, **PK)
+
+    assert reservation.status == ReservationStatus.IN_PROGRESS
+
+
+def test_rearmed_in_progress_is_reclaimed_after_short_lease(
+    tmp_path: Path,
+) -> None:
+    """A failed (non-2xx) reservation is reclaimable after ~60s."""
+    store, _ = make_store(tmp_path)
+    store.reserve(request_sha256="sha-a", now=NOW, **PK)
+    store.rearm_lease(now=NOW, **PK)
+
+    later = NOW + timedelta(seconds=FAILED_RESERVATION_LEASE_SECONDS + 1)
+    reservation = store.reserve(request_sha256="sha-a", now=later, **PK)
+
+    assert reservation.status == ReservationStatus.RESERVED
+    assert store.get(**PK).state == IdempotencyState.IN_PROGRESS
+
+
+def test_fresh_in_progress_is_reclaimed_after_long_lease(tmp_path: Path) -> None:
+    store, _ = make_store(tmp_path)
+    store.reserve(request_sha256="sha-a", now=NOW, **PK)
+
+    later = NOW + timedelta(seconds=RESERVATION_LEASE_SECONDS + 1)
     reservation = store.reserve(request_sha256="sha-a", now=later, **PK)
 
     assert reservation.status == ReservationStatus.RESERVED

@@ -12,10 +12,12 @@ The route layer is responsible for:
 - computing ``request_sha256`` (:func:`idempotency_request_sha256`) from the
   method, stable route key, path parameters, and canonical JSON body only --
   never auth, cookies, CSRF tokens, or request IDs;
-- setting ``Idempotency-Replayed: true`` when the returned flag is ``True``;
-- returning :func:`in_progress_response` when the helper raises
-  :class:`IdempotencyInProgressError`, so the envelope carries
-  ``Retry-After: 1``.
+- setting ``Idempotency-Replayed: true`` when the returned flag is ``True``.
+
+The ``idempotency_in_progress`` envelope with ``Retry-After: 1`` is produced by
+an app-level exception handler (:func:`idempotency_in_progress_handler`)
+registered in :func:`incidentlens_control_plane.api.errors.install_error_handlers`,
+so every future mutation route gets the header for free without a manual catch.
 """
 
 from __future__ import annotations
@@ -109,10 +111,10 @@ def idempotency_request_sha256(
 def in_progress_response(request: Request) -> JSONResponse:
     """Build the stable ``idempotency_in_progress`` envelope + ``Retry-After``.
 
-    The shared :func:`~incidentlens_control_plane.api.errors.api_problem_handler`
-    serializes :class:`ApiProblem` without extra headers, so the in-progress
-    case -- which must carry ``Retry-After: 1`` -- is emitted here through a
-    response builder that mirrors the same envelope shape.
+    The generic :class:`ApiProblem` handler serializes without extra headers, so
+    the in-progress case -- which must carry ``Retry-After: 1`` -- is emitted
+    here through a response builder that mirrors the same envelope shape.  It is
+    wired app-wide via :func:`idempotency_in_progress_handler`.
     """
     request_id = getattr(request.state, "request_id", None) or ""
     headers = {"Retry-After": "1"}
@@ -134,6 +136,18 @@ def in_progress_response(request: Request) -> JSONResponse:
     )
 
 
+async def idempotency_in_progress_handler(
+    request: Request, exc: IdempotencyInProgressError
+) -> JSONResponse:
+    """App-level handler: 409 ``idempotency_in_progress`` with ``Retry-After: 1``.
+
+    Registered in ``install_error_handlers`` so any route that lets
+    :class:`IdempotencyInProgressError` propagate gets the correct envelope and
+    header without route-specific code.
+    """
+    return in_progress_response(request)
+
+
 async def execute_idempotent[T: BaseModel](
     *,
     service: IdempotencyService,
@@ -147,11 +161,13 @@ async def execute_idempotent[T: BaseModel](
 ) -> tuple[int, T, bool]:
     """Run *action* exactly once under *idempotency_key* and persist the result.
 
-    Returns ``(status_code, body, replayed)`` where ``replayed`` is ``True``
-    when the returned 2xx was served from the store rather than by running
-    *action*.  Raises :class:`IdempotencyConflictError` (409) for a same-key
-    different-request collision and :class:`IdempotencyInProgressError` (409)
-    for a still-active reservation.
+    Only a 2xx outcome is pinned as a replayable completed result: anything else
+    (3xx/4xx as well as 5xx) re-arms the short lease so a later same-key retry
+    can re-run instead of replaying a non-2xx.  Returns ``(status_code, body,
+    replayed)`` where ``replayed`` is ``True`` when a stored 2xx was served
+    rather than by running *action*.  Raises :class:`IdempotencyConflictError`
+    (409) for a same-key different-request collision and
+    :class:`IdempotencyInProgressError` (409) for a still-active reservation.
     """
     validated_key = require_idempotency_key(idempotency_key)
     reservation = service.reserve(
@@ -163,6 +179,10 @@ async def execute_idempotent[T: BaseModel](
         now=datetime.now(UTC),
     )
     if reservation.status == ReservationStatus.REPLAY:
+        if reservation.response_json is None:
+            raise RuntimeError(
+                "stored idempotency record is completed but has no response body"
+            )
         replayed_body = response_type.model_validate_json(reservation.response_json)
         status_code = reservation.status_code if reservation.status_code is not None else 200
         return status_code, replayed_body, True
@@ -177,7 +197,7 @@ async def execute_idempotent[T: BaseModel](
         _rearm_after_failure(service, principal, method, route_key, validated_key)
         raise
 
-    if status_code >= 500:
+    if not 200 <= status_code < 300:
         _rearm_after_failure(service, principal, method, route_key, validated_key)
         return status_code, body, False
 

@@ -231,7 +231,18 @@ def install_error_handlers(app: FastAPI) -> None:
 
     Handlers are registered app-wide; each one delegates non-``/api/v1``
     requests to FastAPI's default handler so legacy bodies are unchanged.
+
+    The :class:`~incidentlens_control_plane.api.idempotency.IdempotencyInProgressError`
+    handler is registered here too (imported lazily to avoid a module cycle
+    with ``api/idempotency.py``) so every app gets the ``Retry-After: 1``
+    in-progress envelope without slicing it into each idempotent route.
     """
+    from incidentlens_control_plane.api.idempotency import (
+        IdempotencyInProgressError,
+        idempotency_in_progress_handler,
+    )
+
+    app.add_exception_handler(IdempotencyInProgressError, idempotency_in_progress_handler)
     app.add_exception_handler(ApiProblem, api_problem_handler)
     app.add_exception_handler(RequestValidationError, request_validation_handler)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
