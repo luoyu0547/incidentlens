@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from incidentlens_control_plane.approvals.service import ApprovalService
 from incidentlens_control_plane.approvals.store import ApprovalStore
+from incidentlens_control_plane.auth.service import AuthService, profiles_from_json
 from incidentlens_control_plane.changes.backup import EncryptedBackupVault
 from incidentlens_control_plane.changes.manager import ChangeManager
 from incidentlens_control_plane.changes.store import ChangeSetStore
@@ -97,6 +98,7 @@ class RuntimeServices:
     reports: object  # ReportService — 前向引用避免循环导入
     project_memory_store: ProjectMemoryStore
     project_memory: ProjectMemoryCoordinator
+    auth: AuthService
 
 
 def build_runtime(
@@ -338,6 +340,13 @@ def build_runtime(
         output_dir=report_dir,
     )
 
+    auth = AuthService(
+        profiles=profiles_from_json(settings.auth_profiles_json),
+        signing_key=settings.session_signing_key.get_secret_value(),
+        session_ttl_seconds=settings.session_ttl_seconds,
+        secure_cookies=settings.secure_cookies,
+    )
+
     return RuntimeServices(
         projects=projects,
         events=events,
@@ -363,4 +372,5 @@ def build_runtime(
         reports=reports,
         project_memory_store=project_memory_store,
         project_memory=project_memory,
+        auth=auth,
     )

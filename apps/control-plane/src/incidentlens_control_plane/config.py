@@ -5,12 +5,17 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from incidentlens_control_plane.investigation.types import (
     AgentBudget,
     InvestigationBudget,
 )
+
+#: Clearly-marked development signing key used when
+#: ``INCIDENTLENS_SESSION_SIGNING_KEY`` is not set.  Never use this in
+#: production: session forgery protection depends on a secret key.
+DEFAULT_SESSION_SIGNING_KEY = "incidentlens-dev-only-session-signing-key-change-me"
 
 
 class RuntimeSettings(BaseModel):
@@ -101,6 +106,25 @@ class RuntimeSettings(BaseModel):
     # offline export.
     expose_api_docs: bool = False
 
+    # -- authentication ---------------------------------------------------------
+    # Static deployment profiles (SHA-256 token digests) and the signed-session
+    # configuration.  ``auth_profiles_json`` and ``session_signing_key`` default
+    # to empty / non-secret so a test or local runtime boots without ceremony,
+    # and every legacy ``/api/*`` route stays open behind ``legacy_api_enabled``.
+    auth_profiles_json: str | None = None
+    session_signing_key: SecretStr = Field(
+        default_factory=lambda: SecretStr(DEFAULT_SESSION_SIGNING_KEY)
+    )
+    session_ttl_seconds: int = Field(default=3_600, ge=60, le=86_400)
+    #: Allowed Host headers.  ``testserver`` keeps Starlette's TestClient (which
+    #: sends host ``testserver``) working; ``localhost``/``127.0.0.1`` cover
+    #: local browser and loopback health checks.
+    trusted_hosts: list[str] = Field(
+        default_factory=lambda: ["testserver", "localhost", "127.0.0.1"]
+    )
+    secure_cookies: bool = True
+    legacy_api_enabled: bool = True
+
     @classmethod
     def from_environment(cls) -> RuntimeSettings:
         """Create local runtime settings from ``INCIDENTLENS_*`` environment variables."""
@@ -108,6 +132,12 @@ class RuntimeSettings(BaseModel):
         configured = os.environ.get("INCIDENTLENS_DATA_DIR")
         data_dir = Path(configured).expanduser() if configured else Path.home() / ".incidentlens"
         report_output_dir = data_dir.resolve() / "reports"
+        session_key_value = os.environ.get("INCIDENTLENS_SESSION_SIGNING_KEY")
+        session_signing_key = (
+            SecretStr(session_key_value)
+            if session_key_value
+            else SecretStr(DEFAULT_SESSION_SIGNING_KEY)
+        )
         return cls(
             data_dir=data_dir.resolve(),
             report_output_dir=report_output_dir,
@@ -118,6 +148,16 @@ class RuntimeSettings(BaseModel):
             expose_api_docs=_environment_bool(
                 "INCIDENTLENS_EXPOSE_API_DOCS", False
             ),
+            auth_profiles_json=os.environ.get("INCIDENTLENS_AUTH_PROFILES_JSON"),
+            session_signing_key=session_signing_key,
+            session_ttl_seconds=_environment_int(
+                "INCIDENTLENS_SESSION_TTL_SECONDS", 3_600
+            ),
+            trusted_hosts=_environment_list(
+                "INCIDENTLENS_TRUSTED_HOSTS", ["testserver", "localhost", "127.0.0.1"]
+            ),
+            secure_cookies=_environment_bool("INCIDENTLENS_SECURE_COOKIES", True),
+            legacy_api_enabled=_environment_bool("INCIDENTLENS_LEGACY_API_ENABLED", True),
             agent_context_window_tokens=_environment_int(
                 "INCIDENTLENS_AGENT_CONTEXT_WINDOW_TOKENS", 128_000
             ),
@@ -213,3 +253,11 @@ def _environment_bool(name: str, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be a boolean, got {value!r}")
+
+
+def _environment_list(name: str, default: list[str]) -> list[str]:
+    """Read an optional comma-separated list override, trimming entries."""
+    value = os.environ.get(name)
+    if value is None:
+        return list(default)
+    return [item.strip() for item in value.split(",") if item.strip()]

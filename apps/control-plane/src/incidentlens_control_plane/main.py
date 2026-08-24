@@ -9,10 +9,15 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from incidentlens_control_plane.api.errors import install_error_handlers
 from incidentlens_control_plane.api.request_id import RequestIdMiddleware
 from incidentlens_control_plane.api.router import router as v1_router
+from incidentlens_control_plane.api.routes.auth import (
+    auth_router,
+    session_router,
+)
 from incidentlens_control_plane.config import RuntimeSettings
 from incidentlens_control_plane.remote_ops.transport import RemoteTransportFactory
 from incidentlens_control_plane.runtime import build_runtime
@@ -39,6 +44,11 @@ async def _lifespan(
             await services.subscriptions.start_active_opt_in()
         except Exception:
             logger.exception("failed to restore active log subscriptions")
+        if settings.legacy_api_enabled:
+            logger.warning(
+                "legacy /api/* routes are enabled (INCIDENTLENS_LEGACY_API_ENABLED=true); "
+                "migrate clients to the authenticated /api/v1 surface before disabling"
+            )
         # Then reconcile decided-but-unhandled approvals and scan the
         # investigations/checkpoints left over from a previous process, so a
         # restart never replays a dangerous in-flight operation.
@@ -98,6 +108,10 @@ def create_app(
     # registered app-wide but scoped to /api/v1 at call time; legacy /api/*
     # error bodies are delegated to FastAPI's defaults byte-for-byte.
     application.add_middleware(RequestIdMiddleware)
+    if settings.trusted_hosts:
+        application.add_middleware(
+            TrustedHostMiddleware, allowed_hosts=list(settings.trusted_hosts)
+        )
     install_error_handlers(application)
 
     @application.get("/healthz")
@@ -125,15 +139,19 @@ def create_app(
     )
 
     application.include_router(v1_router)
-    application.include_router(approvals_router)
-    application.include_router(changes_router)
-    application.include_router(events_router)
-    application.include_router(projects_router)
-    application.include_router(remote_sessions_router)
-    application.include_router(logs_router)
-    application.include_router(evidence_router)
-    application.include_router(incidents_router)
-    application.include_router(investigations_router)
+    application.include_router(auth_router)
+    application.include_router(session_router)
+
+    if settings.legacy_api_enabled:
+        application.include_router(approvals_router)
+        application.include_router(changes_router)
+        application.include_router(events_router)
+        application.include_router(projects_router)
+        application.include_router(remote_sessions_router)
+        application.include_router(logs_router)
+        application.include_router(evidence_router)
+        application.include_router(incidents_router)
+        application.include_router(investigations_router)
 
     return application
 
