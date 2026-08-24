@@ -16,6 +16,8 @@ from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.evidence.service import EvidenceService
 from incidentlens_control_plane.evidence.store import EvidenceStore
+from incidentlens_control_plane.idempotency.service import IdempotencyService
+from incidentlens_control_plane.idempotency.store import IdempotencyStore
 from incidentlens_control_plane.investigation.context import (
     AgentContextManager,
     ContextBudgetPolicy,
@@ -99,6 +101,7 @@ class RuntimeServices:
     project_memory_store: ProjectMemoryStore
     project_memory: ProjectMemoryCoordinator
     auth: AuthService
+    idempotency: IdempotencyService
 
 
 def build_runtime(
@@ -134,6 +137,7 @@ def build_runtime(
     evidence = EvidenceStore(connect)
     investigation_store = InvestigationStore(connect)
     project_memory_store = ProjectMemoryStore(connect)
+    idempotency_store = IdempotencyStore(connect)
     projects.migrate()
     events.migrate()
     approval_store.migrate()
@@ -142,6 +146,7 @@ def build_runtime(
     evidence.migrate()
     investigation_store.migrate()
     project_memory_store.migrate()
+    idempotency_store.migrate()
 
     broker = RuntimeEventBroker()
     approvals = ApprovalService(
@@ -347,6 +352,8 @@ def build_runtime(
         secure_cookies=settings.secure_cookies,
     )
 
+    idempotency = IdempotencyService(idempotency_store)
+
     return RuntimeServices(
         projects=projects,
         events=events,
@@ -373,4 +380,5 @@ def build_runtime(
         project_memory_store=project_memory_store,
         project_memory=project_memory,
         auth=auth,
+        idempotency=idempotency,
     )
