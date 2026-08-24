@@ -211,6 +211,25 @@ class OperationStore:
             ).fetchall()
         return tuple(self._row_to_attempt(row) for row in rows)
 
+    def list_non_terminal(self) -> tuple[Operation, ...]:
+        """Return every operation not yet in a terminal state, oldest first.
+
+        This is the recovery/startup sweep query: only rows that are not one of
+        the absorbing terminal statuses need classification after a restart.
+        """
+        terminal = tuple(status.value for status in OPERATION_TERMINAL)
+        with self._connection_factory() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {", ".join(_OPERATION_COLUMNS)}
+                FROM operations
+                WHERE status NOT IN ({_placeholders(len(terminal))})
+                ORDER BY created_at ASC
+                """,
+                terminal,
+            ).fetchall()
+        return tuple(self._row_to_operation(row) for row in rows)
+
     # -- writes ----------------------------------------------------------------
 
     def create(self, operation: Operation) -> Operation:
@@ -356,6 +375,69 @@ class OperationStore:
                 conn.execute("ROLLBACK")
                 raise
         return self.get(operation.operation_id)
+
+    def requeue(self, operation: Operation, *, now: datetime) -> Operation:
+        """Recovery-only: return one ``running`` operation to ``queued``.
+
+        Only a ``running`` row is matched (single conditional UPDATE), so a
+        concurrent writer cannot double-requeue an operation.  Claim metadata is
+        cleared so a fresh worker can claim it again.  Raises
+        ``OperationNotFound`` when the row is gone and
+        ``ConcurrentOperationUpdate`` when it is no longer ``running``.
+        """
+        now_utc = now.astimezone(UTC)
+        with self._connection_factory() as conn:
+            conn.isolation_level = None
+            conn.execute("BEGIN")
+            try:
+                cursor = conn.execute(
+                    """
+                    UPDATE operations
+                    SET status = 'queued', claim_token = NULL, claimed_at = NULL,
+                        updated_at = ?
+                    WHERE operation_id = ? AND status = 'running'
+                    """,
+                    (_iso(now_utc), operation.operation_id),
+                )
+                if cursor.rowcount == 0:
+                    exists = conn.execute(
+                        "SELECT operation_id FROM operations WHERE operation_id = ?",
+                        (operation.operation_id,),
+                    ).fetchone()
+                    if exists is None:
+                        raise OperationNotFound(
+                            f"operation not found: {operation.operation_id}"
+                        )
+                    raise ConcurrentOperationUpdate(
+                        f"operation {operation.operation_id} is not running and "
+                        "cannot be requeued"
+                    )
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        return self.get(operation.operation_id)
+
+    def heartbeat(self, operation_id: str, *, now: datetime) -> bool:
+        """Touch a ``running`` operation's claim timestamp.
+
+        Returns ``True`` when a running row was updated (the worker is still
+        making progress) and ``False`` when the operation is no longer running so
+        the caller can stop beating.  A missing row is treated the same way:
+        there is nothing left to keep alive.
+        """
+        now_utc = now.astimezone(UTC)
+        with self._connection_factory() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE operations
+                SET claimed_at = ?, updated_at = ?
+                WHERE operation_id = ? AND status = 'running'
+                """,
+                (_iso(now_utc), _iso(now_utc), operation_id),
+            )
+            conn.commit()
+        return cursor.rowcount == 1
 
     # -- row mapping -------------------------------------------------------------
 

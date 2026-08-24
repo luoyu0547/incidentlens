@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -103,6 +104,20 @@ class OperationAttempt(BaseModel):
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("timestamps must be timezone-aware")
         return value
+
+
+class OperationAccepted(BaseModel):
+    """The 202 body a route returns after enqueuing a durable operation.
+
+    Carries only ``accepted=True`` and the new ``operation_id`` so a caller can
+    follow the operation through the ``/api/v1/operations`` read surface without
+    ever echoing a redacted payload or an actor identity back to the wire.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    accepted: Literal[True] = True
+    operation_id: str
 
 
 class OperationView(BaseModel):

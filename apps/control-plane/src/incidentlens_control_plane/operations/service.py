@@ -157,6 +157,35 @@ class OperationService:
         self._publisher.operation_queued(stored)
         return stored
 
+    def enqueue(
+        self,
+        *,
+        kind: OperationKind,
+        target_id: str,
+        created_by: str,
+        session_id: str | None = None,
+        investigation_id: str | None = None,
+        request_payload: str | None = None,
+        progress_summary: str | None = None,
+        now: datetime | None = None,
+    ) -> Operation:
+        """Queue a new durable operation (the Task 7 dispatch-facing name).
+
+        Thin alias of :meth:`create_operation` for the routes and dispatcher
+        that enqueue work: the persisted envelope, redaction and event emission
+        are identical.
+        """
+        return self.create_operation(
+            kind=kind,
+            target_id=target_id,
+            created_by=created_by,
+            session_id=session_id,
+            investigation_id=investigation_id,
+            request_payload=request_payload,
+            progress_summary=progress_summary,
+            now=now,
+        )
+
     # -- read surface ----------------------------------------------------------
 
     def get_operation(self, operation_id: str) -> Operation:
@@ -214,6 +243,31 @@ class OperationService:
         )
         self._publisher.operation_status_changed(updated)
         return updated
+
+    def requeue(
+        self, operation_id: str, *, now: datetime | None = None
+    ) -> Operation:
+        """Recovery-only: return a ``running`` operation to the ``queued`` queue.
+
+        Used by startup/shutdown classification for safe read-only work that was
+        interrupted before any durable effect: a fresh worker claims and re-runs
+        it.  Dangerous kinds are never requeued by recovery.  Emits an
+        ``operation.queued`` event so live subscribers see the re-enqueue.
+        """
+        now_utc = now.astimezone(UTC) if now is not None else datetime.now(UTC)
+        operation = self._store.get(operation_id)
+        updated = self._store.requeue(operation, now=now_utc)
+        self._publisher.operation_queued(updated)
+        return updated
+
+    def heartbeat(self, operation_id: str, *, now: datetime | None = None) -> bool:
+        """Touch a running operation's claim timestamp (dispatcher heartbeat).
+
+        Returns ``True`` while the operation is still ``running`` and ``False``
+        once it reached a terminal state so the dispatcher can stop beating.
+        """
+        now_utc = now.astimezone(UTC) if now is not None else datetime.now(UTC)
+        return self._store.heartbeat(operation_id, now=now_utc)
 
     # -- cancellation -----------------------------------------------------------
 

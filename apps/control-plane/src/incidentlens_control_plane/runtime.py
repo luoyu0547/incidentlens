@@ -57,9 +57,16 @@ from incidentlens_control_plane.investigation.tool_executor import ToolExecutor
 from incidentlens_control_plane.logs.service import LogService
 from incidentlens_control_plane.logs.store import LogStore
 from incidentlens_control_plane.logs.subscriptions import LogSubscriptionManager
+from incidentlens_control_plane.operations.dispatcher import OperationDispatcher
 from incidentlens_control_plane.operations.events import OperationEventPublisher
+from incidentlens_control_plane.operations.handlers import (
+    build_rollback_handler,
+    build_target_test_handler,
+)
+from incidentlens_control_plane.operations.recovery import OperationRecovery
 from incidentlens_control_plane.operations.service import OperationService
 from incidentlens_control_plane.operations.store import OperationStore
+from incidentlens_control_plane.operations.types import OperationKind
 from incidentlens_control_plane.project_memory.openai_adapter import (
     OpenAIProjectMemoryAdapter,
     ProjectMemoryCoordinator,
@@ -111,6 +118,8 @@ class RuntimeServices:
     target_service: TargetService
     operation_store: OperationStore
     operation_service: OperationService
+    operation_recovery: OperationRecovery
+    dispatcher: OperationDispatcher
 
 
 def build_runtime(
@@ -378,6 +387,32 @@ def build_runtime(
         publisher=OperationEventPublisher(events, broker),
     )
 
+    # Task 7: classify leftovers after a restart and dispatch queued durable
+    # work.  Recovery runs before the dispatcher's first claim (start()), and
+    # only queued (never started) dangerous work is ever executed by a worker.
+    operation_recovery = OperationRecovery(
+        store=operation_store,
+        operations=operation_service,
+        investigations=investigation_store,
+    )
+    dispatcher = OperationDispatcher(
+        store=operation_store,
+        operations=operation_service,
+        recovery=operation_recovery,
+    )
+    dispatcher.register(
+        OperationKind.ROLLBACK,
+        build_rollback_handler(changes),
+    )
+    dispatcher.register(
+        OperationKind.TARGET_TEST,
+        build_target_test_handler(
+            target_store=target_store,
+            projects=projects,
+            sessions=sessions,
+        ),
+    )
+
     return RuntimeServices(
         projects=projects,
         events=events,
@@ -409,4 +444,6 @@ def build_runtime(
         target_service=target_service,
         operation_store=operation_store,
         operation_service=operation_service,
+        operation_recovery=operation_recovery,
+        dispatcher=dispatcher,
     )

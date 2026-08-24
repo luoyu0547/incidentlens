@@ -14,6 +14,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from incidentlens_control_plane.api.errors import install_error_handlers
 from incidentlens_control_plane.api.request_id import RequestIdMiddleware
 from incidentlens_control_plane.api.router import router as v1_router
+from incidentlens_control_plane.api.routes import changes as changes_routes
 from incidentlens_control_plane.api.routes import operations as operations_routes
 from incidentlens_control_plane.api.routes import targets as targets_routes
 from incidentlens_control_plane.api.routes.auth import (
@@ -69,12 +70,27 @@ async def _lifespan(
             await services.recovery.startup()
         except Exception:
             logger.exception("failed to run investigation startup recovery")
+        # Then classify leftover durable operations (a dangerous RUNNING
+        # rollback becomes UNCERTAIN, never replayed) and start the worker pool
+        # that claims queued operations.
+        try:
+            await services.dispatcher.start()
+        except Exception:
+            logger.exception("failed to start operation dispatcher")
         yield
     finally:
-        # Orderly shutdown: stop accepting new investigations, request active
-        # loops to checkpoint/cancel/drain and sweep unconfirmable dangerous
-        # calls to UNCERTAIN, then close investigations/children, then log
-        # subscriptions, and only then the host sessions.
+        # Orderly shutdown: stop the operation dispatcher first so no durable
+        # operation is running while the investigation stack and host sessions
+        # are being torn down, then stop accepting new investigations, request
+        # active loops to checkpoint/cancel/drain and sweep unconfirmable
+        # dangerous calls to UNCERTAIN, then close investigations/children, then
+        # log subscriptions, and only then the host sessions.
+        try:
+            await services.dispatcher.stop(
+                grace_seconds=settings.shutdown_grace_seconds
+            )
+        except Exception:
+            logger.exception("failed to stop operation dispatcher")
         try:
             await services.recovery.shutdown()
         except Exception:
@@ -156,6 +172,7 @@ def create_app(
     application.include_router(session_router)
     application.include_router(targets_routes.router)
     application.include_router(operations_routes.router)
+    application.include_router(changes_routes.router)
 
     if settings.legacy_api_enabled:
         application.include_router(approvals_router)

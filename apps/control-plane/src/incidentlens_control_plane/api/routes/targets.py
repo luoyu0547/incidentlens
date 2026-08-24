@@ -28,8 +28,10 @@ from incidentlens_control_plane.api.models import ApiErrorResponse
 from incidentlens_control_plane.auth.dependencies import (
     authorize_target,
     get_principal,
+    require_scopes,
 )
-from incidentlens_control_plane.auth.types import Principal
+from incidentlens_control_plane.auth.types import Principal, PrincipalScope
+from incidentlens_control_plane.operations.types import OperationAccepted, OperationKind
 from incidentlens_control_plane.project_registry.store import (
     ProjectAlreadyExists,
     ProjectNotFound,
@@ -59,6 +61,7 @@ router = APIRouter(
 #: Stable route keys for idempotency request hashing (independent of host/path).
 _CREATE_ROUTE_KEY = "/api/v1/targets"
 _ITEM_ROUTE_KEY = "/api/v1/targets/{target_id}"
+_TEST_ROUTE_KEY = "/api/v1/targets/{target_id}/test"
 
 
 class _DeletedResult(BaseModel):
@@ -309,3 +312,73 @@ async def delete_target(
         raise _to_http(exc) from exc
     if replayed:
         response.headers["Idempotency-Replayed"] = "true"
+
+
+@router.post(
+    "/{target_id}/test",
+    status_code=202,
+    response_model=OperationAccepted,
+    operation_id="testTarget",
+    responses={
+        401: _error_response(401, "Authentication required"),
+        403: _error_response(403, "Permission denied"),
+        404: _error_response(404, "Target not found"),
+        409: _error_response(
+            409,
+            "The Idempotency-Key conflicts with / is still in progress "
+            "under another request",
+        ),
+        422: _error_response(422, "Validation failed or Idempotency-Key missing"),
+    },
+)
+async def test_target(
+    request: Request,
+    response: Response,
+    target_id: str,
+    principal: Annotated[Principal, Depends(require_scopes(PrincipalScope.OPERATE))],
+) -> OperationAccepted:
+    """Enqueue a durable TARGET_TEST reachability probe idempotently.
+
+    The probe executes through the registered target-test handler on the
+    operation dispatcher (connect + capability check) and answers ``202``
+    immediately with the new ``operation_id`` so the caller can follow it on the
+    ``/api/v1/operations`` read surface.
+    """
+    authorize_target(principal, target_id)
+    request_sha256 = idempotency_request_sha256(
+        method="POST",
+        route_key=_TEST_ROUTE_KEY,
+        path_params={"target_id": target_id},
+        canonical_body="{}",
+    )
+
+    async def action() -> tuple[int, OperationAccepted]:
+        runtime = request.app.state.runtime
+        # Resolve the facade target (lazily binding pre-existing registry
+        # targets) so the enqueued probe always carries a valid product target.
+        _service(request).get_target(target_id)
+        operation = runtime.operation_service.enqueue(
+            kind=OperationKind.TARGET_TEST,
+            target_id=target_id,
+            created_by=principal.principal_id,
+            request_payload=json.dumps({}, sort_keys=True, separators=(",", ":")),
+            now=datetime.now(UTC),
+        )
+        return 202, OperationAccepted(operation_id=operation.operation_id)
+
+    try:
+        _status_code, payload, replayed = await execute_idempotent(
+            service=request.app.state.runtime.idempotency,
+            principal=principal,
+            method="POST",
+            route_key=_TEST_ROUTE_KEY,
+            idempotency_key=request.headers.get("Idempotency-Key", ""),
+            request_sha256=request_sha256,
+            response_type=OperationAccepted,
+            action=action,
+        )
+    except TargetNotFound as exc:
+        raise _to_http(exc) from exc
+    if replayed:
+        response.headers["Idempotency-Replayed"] = "true"
+    return payload
