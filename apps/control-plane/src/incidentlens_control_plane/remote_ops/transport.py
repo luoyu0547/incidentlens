@@ -7,8 +7,11 @@ resolve credentials from a secret manager at execution time.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Protocol, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +110,22 @@ class RemoteTransportFactory(Protocol):
         raise NotImplementedError
 
 
+# --- Host-key identity ---
+
+
+class HostKeyPolicy(StrEnum):
+    STRICT = "strict"
+    PINNED = "pinned"
+
+
+class HostKeyVerification(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    policy: HostKeyPolicy
+    verified: bool
+    known_hosts_source: str
+    fingerprint_sha256: str | None = None
+
+
 # --- Exceptions ---
 
 
@@ -116,6 +135,10 @@ class RemoteError(Exception):
 
 class RemoteConnectionError(RemoteError):
     """Raised when an SSH or transport connection fails."""
+
+
+class RemoteHostKeyError(RemoteConnectionError):
+    """Raised when the SSH server's host identity cannot be verified."""
 
 
 class RemoteTimeoutError(RemoteError):

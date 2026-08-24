@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from incidentlens_control_plane.project_registry.types import TargetRegistration
 from incidentlens_control_plane.remote_ops.asyncssh_adapter import AsyncSshTransportFactory
-from incidentlens_control_plane.remote_ops.transport import RemoteConnectionError
+from incidentlens_control_plane.remote_ops.transport import (
+    RemoteConnectionError,
+    RemoteHostKeyError,
+)
 
 PATCH_TARGET = (
     "incidentlens_control_plane.remote_ops.asyncssh_adapter.asyncssh.connect"
@@ -58,10 +61,10 @@ async def test_connect_uses_ssh_config_alias_and_credentials(
         mock_connect.assert_awaited_once_with(
             "dev-a",
             username="deploy",
-            known_hosts=(),
             keepalive_interval=15,
             keepalive_count_max=3,
         )
+        assert "known_hosts" not in mock_connect.await_args.kwargs
         assert transport is not None
 
 
@@ -82,10 +85,10 @@ async def test_connect_falls_back_to_host_when_no_alias(
         mock_connect.assert_awaited_once_with(
             "dev-b.example.test",
             username="admin",
-            known_hosts=(),
             keepalive_interval=15,
             keepalive_count_max=3,
         )
+        assert "known_hosts" not in mock_connect.await_args.kwargs
 
 
 @pytest.mark.asyncio
@@ -126,10 +129,10 @@ async def test_connect_injects_test_key_and_port(
             username="admin",
             port=2222,
             client_keys=["/tmp/test-key"],
-            known_hosts=(),
             keepalive_interval=15,
             keepalive_count_max=3,
         )
+        assert "known_hosts" not in mock_connect.await_args.kwargs
 
 
 @pytest.mark.asyncio
@@ -154,6 +157,69 @@ async def test_connect_injects_test_known_hosts_file(
             keepalive_interval=15,
             keepalive_count_max=3,
         )
+
+
+@pytest.mark.asyncio
+async def test_default_connection_uses_asyncssh_known_hosts_resolution(
+    target: TargetRegistration,
+) -> None:
+    """Without ``known_hosts_path``, AsyncSSH resolves default known-hosts files."""
+    mock_conn = _make_mock_conn()
+    mock_sftp = AsyncMock()
+    mock_conn.start_sftp_client = AsyncMock(return_value=mock_sftp)
+
+    factory = AsyncSshTransportFactory()
+
+    with patch(PATCH_TARGET, new_callable=AsyncMock) as mock_connect:
+        mock_connect.return_value = mock_conn
+        await factory.connect(target)
+
+    assert "known_hosts" not in mock_connect.await_args.kwargs
+    assert mock_connect.await_args.kwargs.get("known_hosts") != ()
+
+
+def test_known_hosts_path_must_be_absolute_and_non_empty() -> None:
+    """A configured ``known_hosts_path`` must be a non-empty absolute path."""
+    with pytest.raises(ValueError, match="absolute"):
+        AsyncSshTransportFactory(known_hosts_path="relative/known_hosts")
+    with pytest.raises(ValueError, match="non-empty"):
+        AsyncSshTransportFactory(known_hosts_path="  ")
+    with pytest.raises(ValueError, match="non-empty"):
+        AsyncSshTransportFactory(known_hosts_path="")
+
+
+@pytest.mark.asyncio
+async def test_host_key_failure_maps_to_remote_host_key_error(
+    target: TargetRegistration,
+) -> None:
+    """A host-key verification failure surfaces as ``RemoteHostKeyError``.
+
+    ``asyncssh`` raises ``HostKeyNotVerifiable`` when the server host key is
+    not trusted.  The adapter must translate it to the domain error and must
+    not leak any raw key material (public key blob/fingerprint) into the
+    message.
+    """
+    import asyncssh
+
+    key_text = (
+        asyncssh.generate_private_key("ssh-ed25519").export_public_key().decode()
+    )
+    factory = AsyncSshTransportFactory()
+
+    with patch(
+        PATCH_TARGET,
+        new_callable=AsyncMock,
+        side_effect=asyncssh.HostKeyNotVerifiable(
+            f"Host key is not trusted for host {target.host}"
+        ),
+    ):
+        with pytest.raises(RemoteHostKeyError) as exc_info:
+            await factory.connect(target)
+
+    message = str(exc_info.value)
+    assert "Host key is not trusted" in message
+    assert "ssh-ed25519" not in message
+    assert key_text not in message
 
 
 @pytest.mark.asyncio
