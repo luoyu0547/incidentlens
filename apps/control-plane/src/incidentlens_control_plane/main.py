@@ -10,6 +10,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from incidentlens_control_plane.api.errors import install_error_handlers
+from incidentlens_control_plane.api.request_id import RequestIdMiddleware
+from incidentlens_control_plane.api.router import router as v1_router
 from incidentlens_control_plane.config import RuntimeSettings
 from incidentlens_control_plane.remote_ops.transport import RemoteTransportFactory
 from incidentlens_control_plane.runtime import build_runtime
@@ -86,7 +89,16 @@ def create_app(
         title="IncidentLens",
         version="0.2.0",
         lifespan=lifespan,
+        docs_url="/docs" if settings.expose_api_docs else None,
+        redoc_url="/redoc" if settings.expose_api_docs else None,
+        openapi_url="/openapi.json" if settings.expose_api_docs else None,
     )
+
+    # Per-request request IDs and the versioned error envelope.  Handlers are
+    # registered app-wide but scoped to /api/v1 at call time; legacy /api/*
+    # error bodies are delegated to FastAPI's defaults byte-for-byte.
+    application.add_middleware(RequestIdMiddleware)
+    install_error_handlers(application)
 
     @application.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -112,6 +124,7 @@ def create_app(
         router as remote_sessions_router,
     )
 
+    application.include_router(v1_router)
     application.include_router(approvals_router)
     application.include_router(changes_router)
     application.include_router(events_router)

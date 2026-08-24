@@ -95,6 +95,12 @@ class RuntimeSettings(BaseModel):
     llm_base_url: str | None = None
     llm_api_key: str | None = None
 
+    # -- API surface -------------------------------------------------------------
+    # When false, the interactive docs (/docs, /redoc) and the served
+    # /openapi.json are disabled; ``application.openapi()`` still works for
+    # offline export.
+    expose_api_docs: bool = False
+
     @classmethod
     def from_environment(cls) -> RuntimeSettings:
         """Create local runtime settings from ``INCIDENTLENS_*`` environment variables."""
@@ -109,6 +115,9 @@ class RuntimeSettings(BaseModel):
             llm_active_model=os.environ.get("INCIDENTLENS_LLM_ACTIVE_MODEL"),
             llm_base_url=os.environ.get("INCIDENTLENS_LLM_BASE_URL"),
             llm_api_key=os.environ.get("INCIDENTLENS_LLM_API_KEY"),
+            expose_api_docs=_environment_bool(
+                "INCIDENTLENS_EXPOSE_API_DOCS", False
+            ),
             agent_context_window_tokens=_environment_int(
                 "INCIDENTLENS_AGENT_CONTEXT_WINDOW_TOKENS", 128_000
             ),
@@ -191,3 +200,16 @@ def _environment_float(name: str, default: float) -> float:
     """Read an optional float override while keeping defaults explicit."""
     value = os.environ.get(name)
     return default if value is None else float(value)
+
+
+def _environment_bool(name: str, default: bool) -> bool:
+    """Read an optional boolean override while keeping defaults explicit."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean, got {value!r}")
