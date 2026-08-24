@@ -14,14 +14,21 @@ The rules are deliberately conservative:
 - ``queued`` work survives untouched;
 - agent-kind operations (``agent_message`` / ``investigation_start``) are
   reconciled against their linked investigation/run; when the linked work is
-  terminal the operation is marked accordingly, otherwise it is requeued;
+  terminal the operation is marked accordingly, otherwise (and only while the
+  linked investigation still exists and is live) it is requeued.  An orphan
+  whose linked investigation no longer exists is marked ``failed`` so it reaches
+  a terminal state instead of requeueing forever with no dispatcher handler;
 - a ``running`` REPORT_GENERATE is requeued -- report content is derived
   deterministically and there is no durable half-written result to resolve;
 - any leftover ``cancel_requested`` row is finalised to ``cancelled``.
 
-``recover`` is safe to call on an already-consistent store: every transition is
-state-machine-validated and idempotent, and an empty pass returns a zero
-summary without emitting recovery events.
+``recover`` MUST be called only at startup, BEFORE the dispatcher starts its
+workers (never while a dispatcher is alive): it requeues/UNCERTAINs every
+``running`` row, and doing that to an operation a live worker is actively
+executing would be wrong.  The caller (the dispatcher's ``start()``) guarantees
+this ordering.  For the same reason ``recover`` is idempotent on an
+already-consistent store -- every transition is state-machine-validated and
+best-effort, and an empty pass returns a zero summary.
 """
 
 from __future__ import annotations
@@ -168,19 +175,38 @@ class OperationRecovery:
         """Reconcile an agent-kind operation from its linked investigation/run.
 
         When the investigation (or every linked run) is terminal the operation is
-        marked to match; otherwise it is requeued so a live agent loop owns it.
-        Returns ``True`` when a decision reached a terminal (or requeued) status.
+        marked to match; an orphan whose linked investigation no longer exists is
+        marked ``failed`` so it reaches a terminal state (no dispatcher handler
+        would ever claim it); only while the linked investigation exists and is
+        still live is the operation requeued for the agent loop.
+        Returns ``True`` when a decision moved the operation (terminal or requeued).
         """
         if operation.investigation_id is None:
-            return self._requeue(operation, now=now)
+            return self._transition(
+                operation,
+                OperationStatus.FAILED,
+                progress_summary=(
+                    "orphaned agent operation: no linked investigation to reconcile"
+                ),
+                now=now,
+            )
         try:
             investigation = self._investigations.get_investigation(
                 operation.investigation_id
             )
         except InvestigationNotFound:
-            # The linked investigation is gone; there is nothing to reconcile
-            # against, so the operation is simply requeued for a fresh dispatch.
-            return self._requeue(operation, now=now)
+            # The linked investigation is gone (or never existed); there is no
+            # live agent loop to hand back to, so park the operation failed
+            # rather than requeueing it forever without a dispatcher handler.
+            return self._transition(
+                operation,
+                OperationStatus.FAILED,
+                progress_summary=(
+                    f"orphaned agent operation: linked investigation "
+                    f"{operation.investigation_id} no longer exists"
+                ),
+                now=now,
+            )
 
         runs = self._investigations.list_agent_runs(
             investigation_id=operation.investigation_id

@@ -211,6 +211,83 @@ async def test_same_session_is_serialized_while_sessionless_runs_concurrently(
     assert session_ops <= {operation_id for operation_id, _ in log}
 
 
+async def test_same_target_rollbacks_are_serialized_and_others_concurrent(
+    runtime_factory,
+) -> None:
+    """Dangerous ROLLBACKs run one-at-a-time PER TARGET (no restore interleave).
+
+    Two rollbacks of different changesets covering the same target host/file
+    must never run concurrently; a rollback of a DIFFERENT target may overlap,
+    proving cross-target concurrency is preserved.
+    """
+    runtime = runtime_factory()
+    dispatcher = _dispatcher(runtime, concurrency=4)
+    log: list[tuple[str, str]] = []
+
+    async def rollback_handler(operation):
+        log.append((operation.operation_id, "enter"))
+        await asyncio.sleep(0.05)
+        log.append((operation.operation_id, "exit"))
+        return OperationResult(summary="rolled back")
+
+    dispatcher.register(OperationKind.ROLLBACK, rollback_handler)
+    same_a = runtime.operations.enqueue(
+        kind=OperationKind.ROLLBACK,
+        target_id="tgt-a",
+        created_by="alice",
+        request_payload='{"changeset_id":"chs-a","approval_id":null}',
+        now=NOW,
+    )
+    same_b = runtime.operations.enqueue(
+        kind=OperationKind.ROLLBACK,
+        target_id="tgt-a",
+        created_by="alice",
+        request_payload='{"changeset_id":"chs-b","approval_id":null}',
+        now=NOW,
+    )
+    other = runtime.operations.enqueue(
+        kind=OperationKind.ROLLBACK,
+        target_id="tgt-b",
+        created_by="alice",
+        request_payload='{"changeset_id":"chs-c","approval_id":null}',
+        now=NOW,
+    )
+
+    await dispatcher.start()
+    for operation in (same_a, same_b, other):
+        await _wait_terminal(runtime.operation_store, operation.operation_id)
+    await dispatcher.stop(grace_seconds=0.5)
+
+    # The two same-target rollbacks never overlap in the execution log.
+    same_target = {same_a.operation_id, same_b.operation_id}
+    entered: set[str] = set()
+    overlap = False
+    for operation_id, event in log:
+        if operation_id not in same_target:
+            continue
+        if event == "enter":
+            entered.add(operation_id)
+            if len(entered) > 1:
+                overlap = True
+        else:
+            entered.discard(operation_id)
+    assert overlap is False, "two rollbacks on the same target ran concurrently"
+
+    # The different-target rollback DID overlap the same-target pair: cross-target
+    # concurrency is preserved (at least two handlers were running at once).
+    active: set[str] = set()
+    max_active = 0
+    for operation_id, event in log:
+        if event == "enter":
+            active.add(operation_id)
+            max_active = max(max_active, len(active))
+        else:
+            active.discard(operation_id)
+    assert max_active >= 2
+    assert same_target <= {operation_id for operation_id, _ in log}
+    assert other.operation_id in {operation_id for operation_id, _ in log}
+
+
 async def test_stop_requeues_safe_and_parks_dangerous_in_flight(runtime_factory) -> None:
     runtime = runtime_factory()
     dispatcher = _dispatcher(runtime, concurrency=4)

@@ -10,11 +10,19 @@ rollback handler, consuming the approval and moving the changeset to
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
+from pathlib import Path
 
+import pytest
+from auth.helpers import OPERATOR_A_TOKEN
 from fastapi.testclient import TestClient
 from incidentlens_control_plane.changes.types import ChangeSetStatus, FileChange
+from incidentlens_control_plane.config import RuntimeSettings
+from incidentlens_control_plane.main import create_app
 from incidentlens_control_plane.operations.types import OperationKind, OperationStatus
+from incidentlens_control_plane.remote_ops.fakes import FakeTransportFactory
 
 ROUTE = "/api/v1/changesets"
 
@@ -39,6 +47,42 @@ PROJECT_PAYLOAD = {
         }
     ],
 }
+
+
+RESTRICTED_B_TOKEN = "restricted-b-bearer-token"
+RESTRICTED_B_DIGEST = hashlib.sha256(RESTRICTED_B_TOKEN.encode()).hexdigest()
+OPERATOR_A_DIGEST = hashlib.sha256(OPERATOR_A_TOKEN.encode()).hexdigest()
+
+_PROFILES = [
+    {
+        "principal_id": "operator-a",
+        "display_name": "Operator A",
+        "scopes": ["read", "operate", "approve", "admin"],
+        "token_digest": OPERATOR_A_DIGEST,
+    },
+    {
+        "principal_id": "restricted-b",
+        "display_name": "Restricted B",
+        "scopes": ["read", "operate"],
+        "allowed_target_ids": ["tgt-other"],
+        "token_digest": RESTRICTED_B_DIGEST,
+    },
+]
+
+
+@pytest.fixture
+def restricted_client(tmp_path: Path) -> TestClient:
+    """A client whose principal can only address ``tgt-other`` targets."""
+    app = create_app(
+        RuntimeSettings(
+            data_dir=tmp_path / "data",
+            auth_profiles_json=json.dumps(_PROFILES),
+            secure_cookies=False,
+        ),
+        transport_factory=FakeTransportFactory(),
+    )
+    with TestClient(app) as client:
+        yield client
 
 
 def _headers(client: TestClient, key: str) -> dict[str, str]:
@@ -250,3 +294,26 @@ def test_rollback_missing_idempotency_key_is_422(
     )
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "idempotency_key_required"
+
+
+def test_rollback_unauthorized_target_is_404_no_leak(
+    restricted_client: TestClient,
+) -> None:
+    """A target-restricted principal gets 404 (no existence leak), not 403."""
+    _seed_project(restricted_client)
+    runtime = restricted_client.app.state.runtime
+    changeset_id = _create_applied_changeset(runtime)  # targets "dev-a"
+
+    response = restricted_client.post(
+        f"{ROUTE}/{changeset_id}/rollback",
+        json={},
+        headers={
+            "Authorization": f"Bearer {RESTRICTED_B_TOKEN}",
+            "Idempotency-Key": "rollback-restricted-1",
+        },
+    )
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "resource_not_found"
+    # The unauthorized principal could not enqueue anything: no durable operation,
+    # queued or otherwise, exists for the changeset's target.
+    assert runtime.operation_store.list_queued() == ()

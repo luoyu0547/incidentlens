@@ -196,6 +196,45 @@ def test_crash_mid_cancel_is_finalised_to_cancelled(runtime_factory) -> None:
     assert summary.finalised_cancels == 1
 
 
+def test_orphaned_agent_operation_with_missing_investigation_is_failed(
+    runtime_factory,
+) -> None:
+    """A RUNNING agent op whose linked investigation is gone reaches FAILED.
+
+    It must not requeue forever: no dispatcher handler is registered for
+    agent-kind work, so the only terminal resolution is recovery.
+    """
+    first = runtime_factory()
+    operation = _enqueue(
+        first, OperationKind.AGENT_MESSAGE, investigation_id="inv-gone"
+    )
+    _transition_running(first, operation)
+
+    second = runtime_factory()
+    summary = _recover(second)
+
+    restored = second.operation_store.get(operation.operation_id)
+    assert restored.status == OperationStatus.FAILED
+    assert "orphaned" in (restored.progress_summary or "")
+    assert summary.reconciled_agent_operations == 1
+
+
+def test_agent_operation_without_linked_investigation_is_failed(
+    runtime_factory,
+) -> None:
+    first = runtime_factory()
+    operation = _enqueue(first, OperationKind.INVESTIGATION_START)  # no link
+    _transition_running(first, operation)
+
+    second = runtime_factory()
+    summary = _recover(second)
+
+    restored = second.operation_store.get(operation.operation_id)
+    assert restored.status == OperationStatus.FAILED
+    assert "no linked investigation" in (restored.progress_summary or "")
+    assert summary.reconciled_agent_operations == 1
+
+
 def test_recovery_is_safe_and_idempotent_on_consistent_store(runtime_factory) -> None:
     first = runtime_factory()
     queued = _enqueue(first, OperationKind.TARGET_TEST)  # stays queued

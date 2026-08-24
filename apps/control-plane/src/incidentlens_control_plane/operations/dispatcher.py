@@ -11,12 +11,17 @@ Lifecycle:
   of worker coroutines.
 - Each worker atomically claims one ``queued`` operation for a registered kind,
   runs its handler, and moves the operation to ``succeeded``/``failed``.
-- Execution is serialized per ``session_id`` (one active operation per session
-  at a time) while independent session-less operations (notably TARGET_TEST)
-  run concurrently across workers.
 - While a handler runs, a heartbeat task touches ``claimed_at`` every
   ``heartbeat_seconds`` so a live operation is never misread as a crash-stale
   ``running`` row.
+
+Serialization rules:
+
+- Session-scoped operations run at most one-per-``session_id`` at a time.
+- **Dangerous** operations (``ROLLBACK``) additionally run at most one-per-``target_id``
+  at a time, so two rollbacks of different changesets covering the same host/file
+  can never interleave their restores.  Independent session-less read-only work
+  (notably ``TARGET_TEST``) stays fully concurrent across workers.
 
 ``stop(grace_seconds=...)`` stops claiming new work, gives in-flight handlers a
 grace window to drain, cancels whatever is still running and then sweeps any
@@ -49,13 +54,16 @@ from incidentlens_control_plane.operations.types import Operation, OperationKind
 
 logger = logging.getLogger(__name__)
 
+#: Kinds whose execution mutates remote state.  Two dangerous operations on the
+#: same target are never dispatched concurrently (the restore path holds no
+#: per-path lock in ChangeManager, so interleaving could corrupt a recovery).
+_DANGEROUS_KINDS: frozenset[OperationKind] = frozenset({OperationKind.ROLLBACK})
+
 #: Default worker heartbeat interval (keep a live running row fresh).
 _DEFAULT_HEARTBEAT_SECONDS = 10.0
-#: Running rows untouched for longer than this are stale on startup.
-_DEFAULT_STALE_AFTER_SECONDS = 30.0
 #: Worker poll cadence when the queue is empty.
 _DEFAULT_POLL_INTERVAL = 0.5
-#: Number of concurrent worker coroutines (bounded by per-session serialization).
+#: Number of concurrent worker coroutines (bounded by serialization rules).
 _DEFAULT_CONCURRENCY = 4
 
 
@@ -69,20 +77,18 @@ class OperationDispatcher:
         operations: OperationService,
         recovery: OperationRecovery,
         heartbeat_seconds: float = _DEFAULT_HEARTBEAT_SECONDS,
-        stale_after_seconds: float = _DEFAULT_STALE_AFTER_SECONDS,
         poll_interval: float = _DEFAULT_POLL_INTERVAL,
         concurrency: int = _DEFAULT_CONCURRENCY,
         now: Callable[[], datetime] | None = None,
     ) -> None:
-        if heartbeat_seconds <= 0 or stale_after_seconds <= 0:
-            raise ValueError("heartbeat/stale intervals must be positive")
+        if heartbeat_seconds <= 0:
+            raise ValueError("heartbeat_seconds must be positive")
         if not (1 <= concurrency <= 64):
             raise ValueError("concurrency must be between 1 and 64")
         self._store = store
         self._operations = operations
         self._recovery = recovery
         self._heartbeat_seconds = heartbeat_seconds
-        self._stale_after_seconds = stale_after_seconds
         self._poll_interval = poll_interval
         self._concurrency = concurrency
         self._now = now or (lambda: datetime.now(UTC))
@@ -91,6 +97,7 @@ class OperationDispatcher:
         self._worker_tasks: list[asyncio.Task[None]] = []
         self._in_flight: dict[str, Operation] = {}
         self._active_sessions: set[str] = set()
+        self._active_dangerous_targets: set[str] = set()
         self._selection_lock = asyncio.Lock()
 
     # -- registration ---------------------------------------------------------
@@ -146,10 +153,7 @@ class OperationDispatcher:
             for operation in self._store.list_queued(limit=100):
                 if operation.kind not in self._handlers:
                     continue
-                if (
-                    operation.session_id is not None
-                    and operation.session_id in self._active_sessions
-                ):
+                if self._serialization_blocked(operation):
                     continue
                 try:
                     claimed = self._operations.claim(
@@ -164,8 +168,29 @@ class OperationDispatcher:
                 self._in_flight[claimed.operation_id] = claimed
                 if claimed.session_id is not None:
                     self._active_sessions.add(claimed.session_id)
+                if claimed.kind in _DANGEROUS_KINDS:
+                    self._active_dangerous_targets.add(claimed.target_id)
                 return claimed
         return None
+
+    def _serialization_blocked(self, operation: Operation) -> bool:
+        """Return True when another in-flight operation prevents claiming *operation*.
+
+        Session-scoped operations are one-at-a-time per ``session_id``; dangerous
+        operations are additionally one-at-a-time per ``target_id`` so two
+        concurrent rollbacks can never interleave restores on the same host.
+        """
+        if (
+            operation.session_id is not None
+            and operation.session_id in self._active_sessions
+        ):
+            return True
+        if (
+            operation.kind in _DANGEROUS_KINDS
+            and operation.target_id in self._active_dangerous_targets
+        ):
+            return True
+        return False
 
     async def _execute(self, operation: Operation) -> None:
         """Run one claimed operation through its handler and finalize it."""
@@ -234,9 +259,12 @@ class OperationDispatcher:
             pass
 
     def _release(self, operation: Operation) -> None:
+        """Release the serialization keys held by a finished/cancelled operation."""
         self._in_flight.pop(operation.operation_id, None)
         if operation.session_id is not None:
             self._active_sessions.discard(operation.session_id)
+        if operation.kind in _DANGEROUS_KINDS:
+            self._active_dangerous_targets.discard(operation.target_id)
 
     # -- shutdown sweep -------------------------------------------------------
 

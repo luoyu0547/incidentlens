@@ -114,8 +114,23 @@ async def rollback_changeset(
     principal: Annotated[Principal, Depends(require_scopes(PrincipalScope.OPERATE))],
     body: RollbackRequest | None = None,
 ) -> OperationAccepted:
-    """Enqueue a durable ROLLBACK operation idempotently and answer 202."""
+    """Enqueue a durable ROLLBACK operation idempotently and answer 202.
+
+    Authorization mirrors the target-owner rule: a principal whose
+    ``allowed_target_ids`` excludes the changeset's target is answered with the
+    same 404 ``resource_not_found`` as a missing changeset, so a rollback is
+    never enqueued for (or its existence leaked to) an unauthorized target.
+    The check happens against the resolved changeset BEFORE the idempotent
+    execution path; a replayed same-key request re-validates it (the changeset
+    row is durable) and returns the pinned ``OperationAccepted``.
+    """
     runtime = request.app.state.runtime
+    changeset = runtime.change_store.get(changeset_id)
+    if changeset is None:
+        raise HTTPException(status_code=404, detail="ChangeSet not found")
+    if not principal.authorized_for(changeset.target_id):
+        raise HTTPException(status_code=404, detail="ChangeSet not found")
+
     request_sha256 = idempotency_request_sha256(
         method="POST",
         route_key=_ROLLBACK_ROUTE_KEY,
@@ -128,21 +143,21 @@ async def rollback_changeset(
     )
 
     async def action() -> tuple[int, OperationAccepted]:
-        changeset = runtime.change_store.get(changeset_id)
-        if changeset is None:
+        current = runtime.change_store.get(changeset_id)
+        if current is None:
             raise ChangeSetNotFoundError(f"changeset {changeset_id} not found")
-        if changeset.status not in _ROLLBACKABLE_STATUSES:
+        if current.status not in _ROLLBACKABLE_STATUSES:
             raise ChangeSetNotRollbackableError(
-                f"cannot roll back changeset in status {changeset.status.value}"
+                f"cannot roll back changeset in status {current.status.value}"
             )
         approval_id = body.approval_id if body is not None else None
-        if runtime.changes.interrupts_service(changeset) and approval_id is None:
+        if runtime.changes.interrupts_service(current) and approval_id is None:
             raise RollbackRequiresApprovalError(
                 "an approval is required to roll back a service-interrupting changeset"
             )
         operation = runtime.operation_service.enqueue(
             kind=OperationKind.ROLLBACK,
-            target_id=changeset.target_id,
+            target_id=current.target_id,
             created_by=principal.principal_id,
             request_payload=json.dumps(
                 {"changeset_id": changeset_id, "approval_id": approval_id},
