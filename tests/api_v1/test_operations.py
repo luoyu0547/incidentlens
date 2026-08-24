@@ -22,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 from incidentlens_control_plane.config import RuntimeSettings
 from incidentlens_control_plane.main import create_app
+from incidentlens_control_plane.operations.store import ConcurrentOperationUpdate
 from incidentlens_control_plane.operations.types import OperationKind, OperationStatus
 from incidentlens_control_plane.remote_ops.fakes import FakeTransportFactory
 
@@ -251,6 +252,26 @@ def test_cancel_unauthorized_target_is_404(client: TestClient) -> None:
     )
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "resource_not_found"
+
+
+def test_cancel_concurrent_claim_is_409_resource_conflict(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker claiming the operation between read and write must not 500."""
+    op = _seed(client)
+    service = client.app.state.runtime.operation_service
+
+    def racy_cancel(operation_id: str, *, now: datetime | None = None):
+        raise ConcurrentOperationUpdate("claimed by another worker")
+
+    monkeypatch.setattr(service, "cancel", racy_cancel)
+    response = client.post(
+        f"{ROUTE}/{op.operation_id}/cancel",
+        headers=_idem(OPERATOR_A_TOKEN, "cancel-race-1"),
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "resource_conflict"
 
 
 def test_cancel_unknown_operation_is_404(client: TestClient) -> None:

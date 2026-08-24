@@ -34,7 +34,10 @@ from incidentlens_control_plane.auth.dependencies import get_principal, require_
 from incidentlens_control_plane.auth.types import Principal, PrincipalScope
 from incidentlens_control_plane.operations.service import OperationService
 from incidentlens_control_plane.operations.state_machine import OperationNotCancellable
-from incidentlens_control_plane.operations.store import OperationNotFound
+from incidentlens_control_plane.operations.store import (
+    ConcurrentOperationUpdate,
+    OperationNotFound,
+)
 from incidentlens_control_plane.operations.types import Operation, OperationView
 
 router = APIRouter(
@@ -79,6 +82,13 @@ def _to_http(exc: Exception) -> Exception:
         return HTTPException(status_code=404, detail="Operation not found")
     if isinstance(exc, OperationNotCancellable):
         return OperationNotCancellableProblem()
+    if isinstance(exc, ConcurrentOperationUpdate):
+        # A worker claimed the operation between our read and its conditional
+        # status write (the Task 7 dispatcher makes this window real).  Surface
+        # the race as a stable resource_conflict, never a bare 500.
+        return HTTPException(
+            status_code=409, detail="Operation was modified concurrently"
+        )
     return HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -117,7 +127,12 @@ async def get_operation(
         403: _error_response(403, "Permission denied"),
         404: _error_response(404, "Operation not found"),
         409: _error_response(
-            409, "Operation is terminal and cannot be cancelled"
+            409,
+            "Operation is terminal and cannot be cancelled "
+            "(operation_not_cancellable), the operation changed concurrently "
+            "(resource_conflict), or the Idempotency-Key conflicts with / is "
+            "still in progress under another request "
+            "(idempotency_conflict / idempotency_in_progress)",
         ),
         422: _error_response(422, "Validation failed or Idempotency-Key missing"),
     },
@@ -159,7 +174,7 @@ async def cancel_operation(
             response_type=OperationView,
             action=action,
         )
-    except (OperationNotFound, OperationNotCancellable) as exc:
+    except (OperationNotFound, OperationNotCancellable, ConcurrentOperationUpdate) as exc:
         raise _to_http(exc) from exc
     if replayed:
         response.headers["Idempotency-Replayed"] = "true"

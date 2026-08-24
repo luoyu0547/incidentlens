@@ -6,6 +6,13 @@ cancellation and the redacted/bounded field policy.  Redacted payloads, safe
 summaries and bounded errors are computed here — raw text never reaches the
 store, and events carry only ids/status/safe summaries.
 
+Request payloads are handled specially: they must be valid JSON, and redaction
+walks the JSON tree so keys, quotes, separators and non-string scalars stay
+intact while every string value is redacted (bound per value, never to the
+2,000-char error-message bound).  A Task 7 worker must be able to parse the
+stored payload to execute the operation, so the envelope is never line-rewritten
+or structurally corrupted.
+
 Cancellation semantics:
 
 - ``queued -> cancelled`` (terminal)
@@ -16,6 +23,7 @@ Cancellation semantics:
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 
@@ -33,6 +41,65 @@ from incidentlens_control_plane.operations.types import (
 #: Bound stored error text so failure messages never grow unbounded.
 _MAX_ERROR_MESSAGE_LENGTH = 2000
 _MAX_PROGRESS_SUMMARY_LENGTH = 2000
+#: Payload values are bounded per value at the redaction module's default; the
+#: payload envelope itself is never truncated so a worker keeps durable input.
+_MAX_PAYLOAD_VALUE_LENGTH = 16 * 1024
+
+#: JSON field keys whose entire string value is secret and replaced outright.
+_PASSWORD_FIELD_KEYS = frozenset({"password", "passwd", "pwd", "secret"})
+_SECRET_FIELD_KEYS = frozenset(
+    {
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "token",
+        "api_key",
+        "apikey",
+        "api-key",
+        "access_key",
+        "access-token",
+        "auth_token",
+        "authorization",
+        "bearer",
+        "client_secret",
+        "secret_key",
+        "private_key",
+        "signature",
+        "credential",
+        "credentials",
+    }
+)
+
+
+class OperationPayloadInvalid(ValueError):
+    """Raised when an operation request payload is not valid JSON."""
+
+
+def _redact_json_value(value: object, *, key_hint: str | None = None) -> object:
+    """Redact every string inside a JSON value without breaking the envelope.
+
+    A string under a secret-looking field key is replaced wholesale with a
+    stable placeholder; any other string is passed through the deterministic
+    log redactor (which bounds it per value).  Keys, quotes, separators and
+    non-string scalars are preserved exactly.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _redact_json_value(item, key_hint=key)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_json_value(item, key_hint=key_hint) for item in value]
+    if isinstance(value, str):
+        if key_hint is not None and key_hint.lower() in _SECRET_FIELD_KEYS:
+            if key_hint.lower() in _PASSWORD_FIELD_KEYS:
+                return "[REDACTED_PASSWORD]"
+            return "[REDACTED_TOKEN]"
+        return redact_message(
+            value, max_length=_MAX_PAYLOAD_VALUE_LENGTH
+        ).message_redacted
+    return value
 
 
 class OperationService:
@@ -72,7 +139,9 @@ class OperationService:
             session_id=session_id,
             investigation_id=investigation_id,
             request_payload=(
-                self._redact(request_payload) if request_payload is not None else None
+                self._redact_json_payload(request_payload)
+                if request_payload is not None
+                else None
             ),
             progress_summary=(
                 self._redact(
@@ -201,5 +270,24 @@ class OperationService:
     def _redact(value: str, *, max_length: int = _MAX_ERROR_MESSAGE_LENGTH) -> str:
         return redact_message(value, max_length=max_length).message_redacted
 
+    @staticmethod
+    def _redact_json_payload(payload: str) -> str:
+        """Validate *payload* as JSON and return its JSON-preserving redaction.
 
-__all__ = ["OperationService"]
+        A non-JSON payload raises :class:`OperationPayloadInvalid` before it can
+        reach the store.  The redacted payload is produced by walking the parsed
+        JSON tree (see :func:`_redact_json_value`) and re-serializing it, so the
+        stored text is always valid JSON that a worker can parse to execute the
+        operation.
+        """
+        try:
+            value = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise OperationPayloadInvalid(
+                "request payload must be valid JSON"
+            ) from exc
+        redacted = _redact_json_value(value)
+        return json.dumps(redacted, ensure_ascii=False, separators=(",", ":"))
+
+
+__all__ = ["OperationPayloadInvalid", "OperationService"]

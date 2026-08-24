@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,7 +13,10 @@ from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.events.types import RuntimeEventType
 from incidentlens_control_plane.investigation.state_machine import IllegalTransition
 from incidentlens_control_plane.operations.events import OperationEventPublisher
-from incidentlens_control_plane.operations.service import OperationService
+from incidentlens_control_plane.operations.service import (
+    OperationPayloadInvalid,
+    OperationService,
+)
 from incidentlens_control_plane.operations.state_machine import (
     OPERATION_STATE_MACHINE,
     OPERATION_TERMINAL,
@@ -257,10 +261,44 @@ def test_error_message_is_redacted_and_bounded(tmp_path: Path) -> None:
     assert "token=[REDACTED_TOKEN]" in stored.error_message
 
 
-def test_request_payload_is_redacted_before_storage(tmp_path: Path) -> None:
+def test_request_payload_is_stored_as_valid_redacted_json(tmp_path: Path) -> None:
     service, _ = _stack(tmp_path)
-    op = _create_op(service, request_payload='{"password":"hunter2-hunter2"}')
+    payload = json.dumps(
+        {
+            "host": "db.example.test",
+            "port": 3306,
+            "command": "restart mysql token=xyz",
+            "credentials": {"password": "hunter2", "api_key": "sk-12345"},
+            "tags": ["critical", "restart"],
+            "settings": {"retry": True, "timeout": 30},
+        }
+    )
+    op = _create_op(service, request_payload=payload)
     stored = service.get_operation(op.operation_id)
     assert stored.request_payload is not None
-    assert "hunter2-hunter2" not in stored.request_payload
-    assert "password=[REDACTED_PASSWORD]" in stored.request_payload
+    # The stored payload must still parse as JSON — a Task 7 worker reads it.
+    parsed = json.loads(stored.request_payload)
+    assert parsed["host"] == "db.example.test"
+    assert parsed["port"] == 3306
+    assert parsed["tags"] == ["critical", "restart"]
+    assert parsed["settings"] == {"retry": True, "timeout": 30}
+    assert parsed["command"] == "restart mysql token=[REDACTED_TOKEN]"
+    assert parsed["credentials"]["password"] == "[REDACTED_PASSWORD]"
+    assert parsed["credentials"]["api_key"] == "[REDACTED_TOKEN]"
+    serialized = json.dumps(parsed)
+    assert "hunter2" not in serialized
+    assert "sk-12345" not in serialized
+
+
+def test_invalid_request_payload_is_rejected_before_storage(tmp_path: Path) -> None:
+    service, _ = _stack(tmp_path)
+    with pytest.raises(OperationPayloadInvalid):
+        service.create_operation(
+            kind=OperationKind.TARGET_TEST,
+            target_id="tgt-a",
+            created_by="alice",
+            request_payload="{not valid json",
+            now=NOW,
+        )
+    # Nothing was persisted for the rejected payload.
+    assert service.list_queued() == ()
