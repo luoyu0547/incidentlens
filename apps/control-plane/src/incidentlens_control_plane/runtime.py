@@ -70,6 +70,8 @@ from incidentlens_control_plane.remote_ops.asyncssh_adapter import (
 from incidentlens_control_plane.remote_ops.gateway import RemoteToolGateway
 from incidentlens_control_plane.remote_ops.sessions import SessionManager
 from incidentlens_control_plane.remote_ops.transport import RemoteTransportFactory
+from incidentlens_control_plane.targets.service import TargetService
+from incidentlens_control_plane.targets.store import TargetStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +104,8 @@ class RuntimeServices:
     project_memory: ProjectMemoryCoordinator
     auth: AuthService
     idempotency: IdempotencyService
+    target_store: TargetStore
+    target_service: TargetService
 
 
 def build_runtime(
@@ -138,6 +142,7 @@ def build_runtime(
     investigation_store = InvestigationStore(connect)
     project_memory_store = ProjectMemoryStore(connect)
     idempotency_store = IdempotencyStore(connect)
+    target_store = TargetStore(connect)
     projects.migrate()
     events.migrate()
     approval_store.migrate()
@@ -147,6 +152,7 @@ def build_runtime(
     investigation_store.migrate()
     project_memory_store.migrate()
     idempotency_store.migrate()
+    target_store.migrate()
 
     broker = RuntimeEventBroker()
     approvals = ApprovalService(
@@ -354,6 +360,12 @@ def build_runtime(
 
     idempotency = IdempotencyService(idempotency_store)
 
+    target_service = TargetService(
+        projects=projects,
+        target_store=target_store,
+        investigations=investigation_store,
+    )
+
     return RuntimeServices(
         projects=projects,
         events=events,
@@ -381,4 +393,6 @@ def build_runtime(
         project_memory=project_memory,
         auth=auth,
         idempotency=idempotency,
+        target_store=target_store,
+        target_service=target_service,
     )
