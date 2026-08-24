@@ -18,7 +18,10 @@ from incidentlens_control_plane.api.routes.auth import (
     auth_router,
     session_router,
 )
-from incidentlens_control_plane.config import RuntimeSettings
+from incidentlens_control_plane.config import (
+    DEFAULT_SESSION_SIGNING_KEY,
+    RuntimeSettings,
+)
 from incidentlens_control_plane.remote_ops.transport import RemoteTransportFactory
 from incidentlens_control_plane.runtime import build_runtime
 
@@ -48,6 +51,14 @@ async def _lifespan(
             logger.warning(
                 "legacy /api/* routes are enabled (INCIDENTLENS_LEGACY_API_ENABLED=true); "
                 "migrate clients to the authenticated /api/v1 surface before disabling"
+            )
+        if (
+            settings.session_signing_key.get_secret_value()
+            == DEFAULT_SESSION_SIGNING_KEY
+        ):
+            logger.warning(
+                "session signing key is the documented non-production dev default; "
+                "set INCIDENTLENS_SESSION_SIGNING_KEY before deploying"
             )
         # Then reconcile decided-but-unhandled approvals and scan the
         # investigations/checkpoints left over from a previous process, so a

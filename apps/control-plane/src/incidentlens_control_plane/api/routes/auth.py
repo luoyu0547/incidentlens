@@ -11,9 +11,12 @@ Two routers leave ``routes/auth.py``:
   level.  The same dependency function is reusable by future ``/ws/v1`` and
   ``/events/v1`` routers.
 
-V1 request bodies never accept actor identity: every body model here is an
-empty ``extra="forbid"`` parcel so any unexpected field (such as
-``{"created_by": ...}``) is rejected with a stable 422 before the handler runs.
+Every endpoint declares an explicit ``response_model`` and documents its
+``ApiErrorResponse`` failure cases so the stable v1 envelope is part of the
+OpenAPI contract -- including the 422 ``request_validation_failed`` case that
+enforces the v1 rule that actor identity is never accepted from the request
+body (any unexpected field such as ``{"created_by": ...}`` is rejected before
+the handler runs).
 """
 
 from __future__ import annotations
@@ -21,13 +24,12 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
+from incidentlens_control_plane.api.models import ApiErrorResponse
 from incidentlens_control_plane.auth.dependencies import get_principal
 from incidentlens_control_plane.auth.service import AuthService
-from incidentlens_control_plane.auth.types import Principal
+from incidentlens_control_plane.auth.types import Principal, SessionCreated
 
 session_router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
@@ -37,6 +39,11 @@ auth_router = APIRouter(
     tags=["auth"],
     dependencies=[Depends(get_principal)],
 )
+
+
+def _error_response(status_code: int, description: str) -> dict[str, object]:
+    """Build an OpenAPI ``responses`` entry that carries the v1 error envelope."""
+    return {"model": ApiErrorResponse, "description": description}
 
 
 class EmptyBody(BaseModel):
@@ -55,11 +62,21 @@ def _get_auth_service(request: Request) -> AuthService:
     return runtime.auth
 
 
-@session_router.post("/session", status_code=200)
+@session_router.post(
+    "/session",
+    status_code=200,
+    response_model=SessionCreated,
+    operation_id="createSession",
+    responses={
+        401: _error_response(401, "Missing or invalid bearer token"),
+        422: _error_response(422, "Unexpected request body fields"),
+    },
+)
 async def create_session(
     request: Request,
+    response: Response,
     body: EmptyBody | None = None,
-) -> Response:
+) -> SessionCreated:
     """Exchange a bearer token for a signed ``incidentlens_session`` cookie.
 
     The cookie is HttpOnly, SameSite=Strict, Path=/ and (in production) Secure.
@@ -76,7 +93,6 @@ async def create_session(
     if issued is None:
         raise HTTPException(status_code=401, detail="invalid bearer token")
 
-    response = JSONResponse(content=jsonable_encoder(issued.session))
     response.set_cookie(
         service.cookie_name,
         issued.cookie_value,
@@ -86,10 +102,19 @@ async def create_session(
         path="/",
         max_age=service.session_ttl_seconds,
     )
-    return response
+    return issued.session
 
 
-@auth_router.get("/principal", response_model=Principal)
+@auth_router.get(
+    "/principal",
+    response_model=Principal,
+    operation_id="getCurrentPrincipal",
+    responses={
+        401: _error_response(401, "Authentication required"),
+        403: _error_response(403, "Permission denied"),
+        422: _error_response(422, "Request validation failed"),
+    },
+)
 async def get_current_principal(
     principal: Annotated[Principal, Depends(get_principal)],
 ) -> Principal:
@@ -97,7 +122,17 @@ async def get_current_principal(
     return principal
 
 
-@auth_router.post("/auth/logout", status_code=204)
+@auth_router.post(
+    "/auth/logout",
+    status_code=204,
+    operation_id="logout",
+    responses={
+        204: {"description": "Session ended; session cookie cleared"},
+        401: _error_response(401, "Authentication required"),
+        403: _error_response(403, "CSRF token missing or invalid"),
+        422: _error_response(422, "Unexpected request body fields"),
+    },
+)
 async def logout(
     request: Request,
     body: EmptyBody | None = None,

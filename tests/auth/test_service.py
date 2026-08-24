@@ -192,6 +192,19 @@ def test_expired_session_cookie_is_rejected() -> None:
     assert service.verify_session_cookie(cookie) is None
 
 
+def test_future_issued_at_session_cookie_is_rejected() -> None:
+    service = _service()
+    future = int(time.time()) + 7_200
+    data = SessionData(
+        principal_id=OPERATOR_A_PROFILE_ID,
+        issued_at=future,
+        expires_at=future + 3_600,
+        nonce="c" * 32,
+    )
+    cookie = service.sign_session_data(data)
+    assert service.verify_session_cookie(cookie) is None
+
+
 def test_garbage_cookie_is_rejected() -> None:
     assert _service().verify_session_cookie("not-a-cookie") is None
     assert _service().verify_session_cookie("") is None

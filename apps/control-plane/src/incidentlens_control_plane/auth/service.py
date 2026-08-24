@@ -33,6 +33,11 @@ from incidentlens_control_plane.auth.types import (
 #: Namespace marker so signature inputs are unambiguous across payload shapes.
 _DEFAULT_SESSION_TTL_SECONDS = 3_600
 
+#: Maximum tolerated clock skew (seconds) between the signer and the verifier.
+#: A cookie claiming to be issued in the future beyond this skew is rejected so
+#: a malformed or replayed issuance timestamp cannot stretch a session lifetime.
+ISSUED_AT_SKEW_SECONDS = 300
+
 
 @dataclass(frozen=True, slots=True)
 class IssuedSession:
@@ -190,7 +195,10 @@ class AuthService:
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None
-        if data.expires_at < int(time.time()):
+        now = int(time.time())
+        if data.issued_at > now + ISSUED_AT_SKEW_SECONDS:
+            return None
+        if data.expires_at < now:
             return None
         return data
 
