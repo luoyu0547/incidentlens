@@ -46,6 +46,14 @@ class RuntimeEventType(StrEnum):
     INVESTIGATION_CANCELLED = "investigation.cancelled"
     INVESTIGATION_FAILED = "investigation.failed"
 
+    OPERATION_QUEUED = "operation.queued"
+    OPERATION_RUNNING = "operation.running"
+    OPERATION_CANCEL_REQUESTED = "operation.cancel_requested"
+    OPERATION_SUCCEEDED = "operation.succeeded"
+    OPERATION_FAILED = "operation.failed"
+    OPERATION_CANCELLED = "operation.cancelled"
+    OPERATION_UNCERTAIN = "operation.uncertain"
+
     AGENT_RUN_STARTED = "agent_run.started"
     AGENT_RUN_STATUS_CHANGED = "agent_run.status_changed"
     AGENT_RUN_COMPLETED = "agent_run.completed"

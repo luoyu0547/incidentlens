@@ -57,6 +57,9 @@ from incidentlens_control_plane.investigation.tool_executor import ToolExecutor
 from incidentlens_control_plane.logs.service import LogService
 from incidentlens_control_plane.logs.store import LogStore
 from incidentlens_control_plane.logs.subscriptions import LogSubscriptionManager
+from incidentlens_control_plane.operations.events import OperationEventPublisher
+from incidentlens_control_plane.operations.service import OperationService
+from incidentlens_control_plane.operations.store import OperationStore
 from incidentlens_control_plane.project_memory.openai_adapter import (
     OpenAIProjectMemoryAdapter,
     ProjectMemoryCoordinator,
@@ -106,6 +109,8 @@ class RuntimeServices:
     idempotency: IdempotencyService
     target_store: TargetStore
     target_service: TargetService
+    operation_store: OperationStore
+    operation_service: OperationService
 
 
 def build_runtime(
@@ -135,6 +140,7 @@ def build_runtime(
 
     projects = ProjectRegistryStore(connect)
     events = RuntimeEventStore(connect)
+    operation_store = OperationStore(connect)
     approval_store = ApprovalStore(connect)
     change_store = ChangeSetStore(connect)
     log_store = LogStore(connect)
@@ -145,6 +151,7 @@ def build_runtime(
     target_store = TargetStore(connect)
     projects.migrate()
     events.migrate()
+    operation_store.migrate()
     approval_store.migrate()
     change_store.migrate()
     log_store.migrate()
@@ -366,6 +373,11 @@ def build_runtime(
         investigations=investigation_store,
     )
 
+    operation_service = OperationService(
+        store=operation_store,
+        publisher=OperationEventPublisher(events, broker),
+    )
+
     return RuntimeServices(
         projects=projects,
         events=events,
@@ -395,4 +407,6 @@ def build_runtime(
         idempotency=idempotency,
         target_store=target_store,
         target_service=target_service,
+        operation_store=operation_store,
+        operation_service=operation_service,
     )

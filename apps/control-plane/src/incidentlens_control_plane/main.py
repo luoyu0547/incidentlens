@@ -14,6 +14,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from incidentlens_control_plane.api.errors import install_error_handlers
 from incidentlens_control_plane.api.request_id import RequestIdMiddleware
 from incidentlens_control_plane.api.router import router as v1_router
+from incidentlens_control_plane.api.routes import operations as operations_routes
 from incidentlens_control_plane.api.routes import targets as targets_routes
 from incidentlens_control_plane.api.routes.auth import (
     auth_router,
@@ -154,6 +155,7 @@ def create_app(
     application.include_router(auth_router)
     application.include_router(session_router)
     application.include_router(targets_routes.router)
+    application.include_router(operations_routes.router)
 
     if settings.legacy_api_enabled:
         application.include_router(approvals_router)
