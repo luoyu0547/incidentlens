@@ -25,6 +25,8 @@ from incidentlens_control_plane.logs.types import LogScope, LogSeverity, LogSour
 from incidentlens_control_plane.targets.service import TargetService
 from incidentlens_control_plane.targets.store import TargetStore
 
+_EXPLICIT_SUCCESS = frozenset({"true", "passed", "success", "succeeded", "verified"})
+
 
 class IssueStatus(StrEnum):
     OPEN = "open"
@@ -132,7 +134,10 @@ def decode_issue_cursor(value: str | None) -> tuple[datetime, str] | None:
     try:
         payload = base64.urlsafe_b64decode(value[4:].encode("ascii")).decode("utf-8")
         body = json.loads(payload)
-        return datetime.fromisoformat(str(body["created_at"])), str(body["issue_id"])
+        created_at = datetime.fromisoformat(str(body["created_at"]))
+        if created_at.tzinfo is None or created_at.utcoffset() is None:
+            raise ValueError("issue cursor is invalid")
+        return created_at.astimezone(UTC), str(body["issue_id"])
     except Exception as exc:  # noqa: BLE001
         raise ValueError("issue cursor is invalid") from exc
 
@@ -166,12 +171,7 @@ def _changeset_summary(changeset: ChangeSet) -> ChangeSummaryView:
 
 
 def _validation_summary(evidence: EvidenceRef) -> VerificationSummaryView:
-    passed_value = evidence.metadata.get("passed")
-    passed = None
-    if passed_value == "true":
-        passed = True
-    elif passed_value == "false":
-        passed = False
+    passed = _validation_passed(evidence)
     return VerificationSummaryView(
         evidence_ref_id=evidence.evidence_ref_id,
         passed=passed,
@@ -179,6 +179,18 @@ def _validation_summary(evidence: EvidenceRef) -> VerificationSummaryView:
         summary=evidence.content_redacted,
         created_at=evidence.created_at,
     )
+
+
+def _validation_passed(evidence: EvidenceRef) -> bool | None:
+    passed_value = evidence.metadata.get("passed")
+    if passed_value is None:
+        return None
+    normalized = passed_value.strip().lower()
+    if normalized in _EXPLICIT_SUCCESS:
+        return True
+    if normalized in {"false", "failed", "failure", "error", "unsuccessful"}:
+        return False
+    return None
 
 
 def _status_for(
@@ -204,8 +216,8 @@ def _status_for(
     }:
         return (
             IssueStatus.RESOLVED
-            if latest_change.status is ChangeSetStatus.VERIFIED
-            or latest_verification is not None
+            if latest_verification is not None
+            and _validation_passed(latest_verification) is True
             else IssueStatus.MITIGATED
         )
     return IssueStatus.OPEN
@@ -230,21 +242,56 @@ def _target_lookup(
     return lookup
 
 
-def _incident_changes(changes: ChangeSetStore, incident_id: str) -> tuple[ChangeSet, ...]:
-    return tuple(changes.list_for_incident(incident_id, limit=200))
-
-
-def _incident_evidence(
-    evidence: EvidenceStore,
-    incident_id: str,
+def _matching_changes(
+    changes: ChangeSetStore,
     *,
+    incident_id: str,
+    project_id: str,
+    registry_target_id: str,
+    service_name: str,
+) -> tuple[ChangeSet, ...]:
+    return tuple(
+        changeset
+        for changeset in changes.list_for_incident(incident_id, limit=200)
+        if changeset.project_id == project_id
+        and changeset.target_id == registry_target_id
+        and changeset.service_name == service_name
+    )
+
+
+def _matching_evidence(
+    evidence: EvidenceStore,
+    *,
+    incident_id: str,
+    project_id: str,
     registry_target_id: str,
     service_name: str,
 ) -> tuple[EvidenceRef, ...]:
     return tuple(
         ref
         for ref in evidence.list_for_incident(incident_id, limit=500)
-        if ref.target_id == registry_target_id and ref.service_name == service_name
+        if ref.project_id == project_id
+        and ref.target_id == registry_target_id
+        and ref.service_name == service_name
+    )
+
+
+def _matching_pending_approvals(
+    approvals: ApprovalStore,
+    *,
+    investigation_id: str,
+    facade_target_id: str,
+    registry_target_id: str,
+    service_name: str,
+) -> tuple[str, ...]:
+    return tuple(
+        record.approval_id
+        for record in approvals.list(
+            ApprovalStatus.PENDING,
+            investigation_id=investigation_id,
+        )
+        if record.service in {None, service_name}
+        and record.target_id in {None, facade_target_id, registry_target_id}
     )
 
 
@@ -429,13 +476,20 @@ class IssueProjectionService:
         return tuple(items)
 
     def _build_issue(self, investigation, *, facade_target_id: str) -> IssueView:
-        evidence_refs = _incident_evidence(
+        evidence_refs = _matching_evidence(
             self._evidence,
-            investigation.incident_id,
+            incident_id=investigation.incident_id,
+            project_id=investigation.project_id,
             registry_target_id=investigation.target_id,
             service_name=investigation.service,
         )
-        change_sets = _incident_changes(self._changes, investigation.incident_id)
+        change_sets = _matching_changes(
+            self._changes,
+            incident_id=investigation.incident_id,
+            project_id=investigation.project_id,
+            registry_target_id=investigation.target_id,
+            service_name=investigation.service,
+        )
         latest_change = change_sets[0] if change_sets else None
         validations = tuple(
             ref for ref in evidence_refs if ref.evidence_kind is EvidenceKind.VALIDATION_RESULT
@@ -446,12 +500,12 @@ class IssueProjectionService:
             key=_severity_rank,
             default=None,
         )
-        pending_approval_ids = tuple(
-            record.approval_id
-            for record in self._approvals.list(
-                ApprovalStatus.PENDING,
-                investigation_id=investigation.investigation_id,
-            )
+        pending_approval_ids = _matching_pending_approvals(
+            self._approvals,
+            investigation_id=investigation.investigation_id,
+            facade_target_id=facade_target_id,
+            registry_target_id=investigation.target_id,
+            service_name=investigation.service,
         )
         return IssueView(
             issue_id=_issue_id(investigation.investigation_id),
@@ -492,6 +546,8 @@ __all__ = [
     "IssueStatus",
     "IssueView",
     "VerificationSummaryView",
+    "_matching_changes",
+    "_matching_evidence",
     "_issue_id",
     "_target_lookup",
     "decode_issue_cursor",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
@@ -68,6 +69,24 @@ def client(tmp_path: Path) -> TestClient:
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _issue_cursor(created_at: str, issue_id: str) -> str:
+    payload = json.dumps(
+        {"created_at": created_at, "issue_id": issue_id},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "is1_" + base64.urlsafe_b64encode(payload).decode("ascii")
+
+
+def _investigation_cursor(created_at: str, investigation_id: str) -> str:
+    payload = json.dumps(
+        {"created_at": created_at, "investigation_id": investigation_id},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "iv1_" + base64.urlsafe_b64encode(payload).decode("ascii")
 
 
 def _seed(client: TestClient) -> tuple[str, str, str]:
@@ -307,3 +326,23 @@ def test_openapi_exports_web_read_operations(client: TestClient) -> None:
     assert schema["paths"]["/api/v1/evidence/{evidence_ref_id}"]["get"][
         "operationId"
     ] == "getEvidence"
+
+
+def test_web_read_list_routes_reject_timezone_naive_cursors(client: TestClient) -> None:
+    _seed(client)
+
+    issues = client.get(
+        "/api/v1/issues",
+        params={"after": _issue_cursor("2026-08-25T17:00:00", "iss_inv-1")},
+        headers=_auth(SCOPED_TOKEN),
+    )
+    assert issues.status_code == 422
+    assert issues.json()["error"]["code"] == "cursor_invalid"
+
+    investigations = client.get(
+        "/api/v1/investigations",
+        params={"after": _investigation_cursor("2026-08-25T17:00:00", "inv-1")},
+        headers=_auth(SCOPED_TOKEN),
+    )
+    assert investigations.status_code == 422
+    assert investigations.json()["error"]["code"] == "cursor_invalid"

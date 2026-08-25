@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath
 
 from incidentlens_control_plane.changes.types import ChangeSetStatus, FileChange
 from incidentlens_control_plane.config import RuntimeSettings
-from incidentlens_control_plane.evidence.types import EvidenceKind
+from incidentlens_control_plane.evidence.types import EvidenceKind, EvidenceRef
 from incidentlens_control_plane.investigation.state_machine import (
     AgentRunStatus,
     InvestigationStatus,
@@ -480,3 +480,197 @@ def test_issue_projection_maps_statuses_and_requires_grounded_conclusion(
     assert "content_sha256" not in resolved.model_dump_json()
     assert "metadata" not in resolved.model_dump_json()
 
+
+def test_issue_projection_scopes_changes_and_evidence_to_exact_ownership(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    _register_target(
+        runtime,
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+    )
+    _register_target(
+        runtime,
+        project_id="ops",
+        target_id="dev-b",
+        service_name="worker-api",
+    )
+    _create_investigation(
+        runtime,
+        investigation_id="inv-payments",
+        incident_id="inc-shared",
+        project_id="payments",
+        registry_target_id="dev-a",
+        service_name="payment-api",
+        status=InvestigationStatus.RUNNING,
+        created_at=NOW - timedelta(minutes=5),
+    )
+    _create_investigation(
+        runtime,
+        investigation_id="inv-ops",
+        incident_id="inc-shared",
+        project_id="ops",
+        registry_target_id="dev-b",
+        service_name="worker-api",
+        status=InvestigationStatus.RUNNING,
+        created_at=NOW - timedelta(minutes=4),
+    )
+    _create_run(
+        runtime,
+        investigation_id="inv-payments",
+        run_id="run-payments",
+        target_id="dev-a",
+    )
+    _create_run(runtime, investigation_id="inv-ops", run_id="run-ops", target_id="dev-b")
+    _seed_changeset(
+        runtime,
+        incident_id="inc-shared",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        changeset_id="chs-payments",
+        final_status=ChangeSetStatus.APPLIED,
+    )
+    _seed_changeset(
+        runtime,
+        incident_id="inc-shared",
+        project_id="ops",
+        target_id="dev-b",
+        service_name="worker-api",
+        changeset_id="chs-ops",
+        final_status=ChangeSetStatus.VERIFIED,
+    )
+    payments_evidence = _seed_log_evidence(
+        runtime,
+        incident_id="inc-shared",
+        run_id="run-payments",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        cursor="offset:11",
+    )
+    ops_evidence = _seed_log_evidence(
+        runtime,
+        incident_id="inc-shared",
+        run_id="run-ops",
+        project_id="ops",
+        target_id="dev-b",
+        service_name="worker-api",
+        cursor="offset:22",
+    )
+
+    projection = IssueProjectionService(
+        target_service=runtime.target_service,
+        target_store=runtime.target_store,
+        investigations=runtime.investigation_store,
+        approvals=runtime.approvals._approvals,
+        changes=runtime.change_store,
+        evidence=runtime.evidence,
+        logs=runtime.log_store,
+        now=lambda: NOW,
+    )
+
+    payments_issue = projection.get_issue("iss_inv-payments")
+    ops_issue = projection.get_issue("iss_inv-ops")
+
+    assert payments_issue is not None
+    assert ops_issue is not None
+    assert payments_issue.resolution is not None
+    assert payments_issue.resolution.changeset_id == "chs-payments"
+    assert [item.evidence_ref_id for item in payments_issue.evidence] == [
+        payments_evidence.evidence_ref_id
+    ]
+    assert ops_issue.resolution is not None
+    assert ops_issue.resolution.changeset_id == "chs-ops"
+    assert [item.evidence_ref_id for item in ops_issue.evidence] == [
+        ops_evidence.evidence_ref_id
+    ]
+
+
+def test_issue_projection_does_not_resolve_on_failed_or_inconclusive_validation(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    _register_target(
+        runtime,
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+    )
+    _create_investigation(
+        runtime,
+        investigation_id="inv-failed-validation",
+        incident_id="inc-failed-validation",
+        project_id="payments",
+        registry_target_id="dev-a",
+        service_name="payment-api",
+        status=InvestigationStatus.RUNNING,
+        created_at=NOW - timedelta(minutes=5),
+    )
+    _create_run(
+        runtime,
+        investigation_id="inv-failed-validation",
+        run_id="run-failed-validation",
+        target_id="dev-a",
+    )
+    _seed_changeset(
+        runtime,
+        incident_id="inc-failed-validation",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        changeset_id="chs-failed-validation",
+        final_status=ChangeSetStatus.VERIFIED,
+    )
+    failed_validation = _seed_validation_evidence(
+        runtime,
+        incident_id="inc-failed-validation",
+        run_id="run-failed-validation",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        passed=False,
+    )
+    runtime.evidence.create(
+        EvidenceRef(
+            evidence_ref_id="ev-inconclusive",
+            incident_id="inc-failed-validation",
+            evidence_kind=EvidenceKind.VALIDATION_RESULT,
+            agent_run_id="run-failed-validation",
+            project_id="payments",
+            target_id="dev-a",
+            service_name="payment-api",
+            source_ref="validator:health",
+            content_redacted="health endpoint stayed ambiguous",
+            content_sha256=hashlib.sha256(
+                b"health endpoint stayed ambiguous"
+            ).hexdigest(),
+            redaction_summary={},
+            truncation=None,
+            metadata={"validator": "health"},
+            created_at=NOW + timedelta(minutes=1),
+            created_by="tester",
+        )
+    )
+    projection = IssueProjectionService(
+        target_service=runtime.target_service,
+        target_store=runtime.target_store,
+        investigations=runtime.investigation_store,
+        approvals=runtime.approvals._approvals,
+        changes=runtime.change_store,
+        evidence=runtime.evidence,
+        logs=runtime.log_store,
+        now=lambda: NOW,
+    )
+
+    issue = projection.get_issue("iss_inv-failed-validation")
+
+    assert issue is not None
+    assert issue.status is IssueStatus.MITIGATED
+    assert issue.verification is not None
+    assert issue.verification.evidence_ref_id == "ev-inconclusive"
+    assert issue.verification.passed is None
+
+    runtime.evidence.get(failed_validation.evidence_ref_id)

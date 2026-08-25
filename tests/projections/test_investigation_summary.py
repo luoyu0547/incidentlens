@@ -300,3 +300,59 @@ def test_investigation_summary_projection_derives_milestones_and_safe_details(
     assert "content_sha256" not in dumped
     assert "metadata" not in dumped
 
+
+def test_investigation_summary_projection_pages_filtered_milestones_to_terminal_event(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    _register_target(runtime)
+    _seed_investigation(runtime)
+    for sequence in range(600):
+        runtime.events.append(
+            RuntimeEvent(
+                event_id=f"evt-noise-{sequence}",
+                sequence=0,
+                event_type=RuntimeEventType.AGENT_TEXT_DELTA,
+                occurred_at=NOW + timedelta(seconds=sequence),
+                payload={
+                    "investigation_id": "inv-1",
+                    "session_id": "session-1",
+                    "message_id": f"msg-{sequence}",
+                    "run_id": "run-1",
+                    "text": "noise",
+                },
+            )
+        )
+    runtime.events.append(
+        RuntimeEvent(
+            event_id="evt-terminal",
+            sequence=0,
+            event_type=RuntimeEventType.INVESTIGATION_FAILED,
+            occurred_at=NOW + timedelta(minutes=20),
+            payload={
+                "investigation_id": "inv-1",
+                "incident_id": "inc-1",
+                "status": "failed",
+            },
+        )
+    )
+    projection = InvestigationSummaryProjectionService(
+        target_service=runtime.target_service,
+        target_store=runtime.target_store,
+        investigations=runtime.investigation_store,
+        approvals=runtime.approvals._approvals,
+        changes=runtime.change_store,
+        evidence=runtime.evidence,
+        logs=runtime.log_store,
+        events=runtime.events,
+        now=lambda: NOW,
+    )
+
+    summary = projection.get_summary("inv-1")
+
+    assert summary is not None
+    assert summary.milestones[-1].event_type is RuntimeEventType.INVESTIGATION_FAILED
+    assert all(
+        item.event_type is not RuntimeEventType.AGENT_TEXT_DELTA
+        for item in summary.milestones
+    )

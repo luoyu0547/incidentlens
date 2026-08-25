@@ -10,7 +10,6 @@ from typing import Callable
 from pydantic import BaseModel, ConfigDict
 
 from incidentlens_control_plane.approvals.store import ApprovalStore
-from incidentlens_control_plane.approvals.types import ApprovalStatus
 from incidentlens_control_plane.changes.store import ChangeSetStore
 from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.events.types import RuntimeEventType
@@ -24,9 +23,10 @@ from incidentlens_control_plane.projections.issues import (
     VerificationSummaryView,
     _changeset_summary,
     _evidence_snippets,
-    _incident_changes,
-    _incident_evidence,
     _issue_id,
+    _matching_changes,
+    _matching_evidence,
+    _matching_pending_approvals,
     _target_lookup,
     _validation_summary,
 )
@@ -90,6 +90,26 @@ class InvestigationSummaryPage(BaseModel):
     has_more: bool
 
 
+_MILESTONE_EVENT_TYPES = (
+    RuntimeEventType.INVESTIGATION_CREATED,
+    RuntimeEventType.INVESTIGATION_STARTED,
+    RuntimeEventType.INVESTIGATION_STATUS_CHANGED,
+    RuntimeEventType.INVESTIGATION_COMPLETED,
+    RuntimeEventType.INVESTIGATION_CANCELLED,
+    RuntimeEventType.INVESTIGATION_FAILED,
+    RuntimeEventType.APPROVAL_REQUESTED,
+    RuntimeEventType.APPROVAL_APPROVED,
+    RuntimeEventType.APPROVAL_REJECTED,
+    RuntimeEventType.APPROVAL_CONSUMED,
+    RuntimeEventType.CHANGESET_CREATED,
+    RuntimeEventType.CHANGESET_STATUS_CHANGED,
+    RuntimeEventType.CHANGESET_ROLLED_BACK,
+    RuntimeEventType.CONCLUSION_CREATED,
+    RuntimeEventType.REGISTRY_PROPOSAL_CREATED,
+    RuntimeEventType.REGISTRY_PROPOSAL_DECIDED,
+)
+
+
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("projection timestamps must be timezone-aware")
@@ -116,9 +136,10 @@ def decode_investigation_cursor(value: str | None) -> tuple[datetime, str] | Non
     try:
         payload = base64.urlsafe_b64decode(value[4:].encode("ascii")).decode("utf-8")
         body = json.loads(payload)
-        return datetime.fromisoformat(str(body["created_at"])), str(
-            body["investigation_id"]
-        )
+        created_at = datetime.fromisoformat(str(body["created_at"]))
+        if created_at.tzinfo is None or created_at.utcoffset() is None:
+            raise ValueError("investigation cursor is invalid")
+        return created_at.astimezone(UTC), str(body["investigation_id"])
     except Exception as exc:  # noqa: BLE001
         raise ValueError("investigation cursor is invalid") from exc
 
@@ -137,32 +158,38 @@ def _milestones(
     *,
     investigation_id: str,
 ) -> tuple[InvestigationMilestoneView, ...]:
-    page = events.list_page(
-        after_sequence=0,
-        limit=500,
-        investigation_id=investigation_id,
-    )
     items = []
-    for event in page.items:
-        summary = None
-        if event.event_type is RuntimeEventType.CONCLUSION_CREATED:
-            conclusion = event.payload.get("conclusion")
-            if isinstance(conclusion, dict):
-                text = conclusion.get("summary")
-                summary = str(text) if text is not None else None
-        items.append(
-            InvestigationMilestoneView(
-                event_id=event.event_id,
-                event_type=event.event_type,
-                occurred_at=event.occurred_at,
-                status=(
-                    str(event.payload["status"])
-                    if event.payload.get("status") is not None
-                    else None
-                ),
-                summary=summary,
-            )
+    after_sequence = 0
+    while True:
+        page = events.list_page(
+            after_sequence=after_sequence,
+            limit=500,
+            investigation_id=investigation_id,
+            event_types=_MILESTONE_EVENT_TYPES,
         )
+        for event in page.items:
+            summary = None
+            if event.event_type is RuntimeEventType.CONCLUSION_CREATED:
+                conclusion = event.payload.get("conclusion")
+                if isinstance(conclusion, dict):
+                    text = conclusion.get("summary")
+                    summary = str(text) if text is not None else None
+            items.append(
+                InvestigationMilestoneView(
+                    event_id=event.event_id,
+                    event_type=event.event_type,
+                    occurred_at=event.occurred_at,
+                    status=(
+                        str(event.payload["status"])
+                        if event.payload.get("status") is not None
+                        else None
+                    ),
+                    summary=summary,
+                )
+            )
+        if not page.has_more or not page.items:
+            break
+        after_sequence = page.next_after_sequence
     return tuple(items)
 
 
@@ -287,13 +314,20 @@ class InvestigationSummaryProjectionService:
         return tuple(items)
 
     def _build_summary(self, investigation, *, facade_target_id: str) -> InvestigationSummaryView:
-        evidence_refs = _incident_evidence(
+        evidence_refs = _matching_evidence(
             self._evidence,
-            investigation.incident_id,
+            incident_id=investigation.incident_id,
+            project_id=investigation.project_id,
             registry_target_id=investigation.target_id,
             service_name=investigation.service,
         )
-        change_sets = _incident_changes(self._changes, investigation.incident_id)
+        change_sets = _matching_changes(
+            self._changes,
+            incident_id=investigation.incident_id,
+            project_id=investigation.project_id,
+            registry_target_id=investigation.target_id,
+            service_name=investigation.service,
+        )
         validations = tuple(
             ref for ref in evidence_refs if ref.evidence_kind.value == "validation_result"
         )
@@ -316,12 +350,12 @@ class InvestigationSummaryProjectionService:
             service_id=investigation.service,
             symptom=investigation.symptom,
             status=investigation.status.value,
-            pending_approval_ids=tuple(
-                record.approval_id
-                for record in self._approvals.list(
-                    ApprovalStatus.PENDING,
-                    investigation_id=investigation.investigation_id,
-                )
+            pending_approval_ids=_matching_pending_approvals(
+                self._approvals,
+                investigation_id=investigation.investigation_id,
+                facade_target_id=facade_target_id,
+                registry_target_id=investigation.target_id,
+                service_name=investigation.service,
             ),
             milestones=_milestones(
                 self._events,
