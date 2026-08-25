@@ -9,4 +9,8 @@ export default defineConfig({
   banner: {
     js: '#!/usr/bin/env node',
   },
+  external: [
+    // Native modules should not be bundled
+    /^@napi-rs\/.*$/,
+  ],
 });
