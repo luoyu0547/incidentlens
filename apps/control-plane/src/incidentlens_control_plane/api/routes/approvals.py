@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Annotated, ClassVar
 
@@ -47,6 +48,12 @@ _APPROVE_ROUTE_KEY = "/api/v1/approvals/{approval_id}/approve"
 _REJECT_ROUTE_KEY = "/api/v1/approvals/{approval_id}/reject"
 _INLINE_SECRET_RE = re.compile(
     r"(?i)(?P<key>password|passwd|pwd|secret|token|api[_-]?key)\s*[:=]\s*(?P<value>[^\s\n]+)"
+)
+_RESUMABLE_DOWNSTREAM_STATUSES = frozenset(
+    {
+        ApprovalDownstreamStatus.PENDING,
+        ApprovalDownstreamStatus.PROCESSING,
+    }
 )
 
 
@@ -175,17 +182,39 @@ def _inline_secret_repl(match: re.Match[str]) -> str:
     return f"{match.group('key')}={placeholder}"
 
 
+def _changeset_diff_summary(request: Request, changeset_id: str | None) -> str | None:
+    if not changeset_id:
+        return None
+    changeset = request.app.state.runtime.change_store.get(changeset_id)
+    if changeset is None or not changeset.files:
+        return None
+
+    scope_counts = Counter(file_change.scope for file_change in changeset.files)
+    scope_summary = ", ".join(
+        f"{count}×{scope}" for scope, count in sorted(scope_counts.items())
+    )
+    local_backups = sum(1 for file_change in changeset.files if file_change.local_backup_ref)
+    remote_backups = sum(
+        1 for file_change in changeset.files if file_change.remote_backup_path
+    )
+    checksum_pairs = sum(
+        1
+        for file_change in changeset.files
+        if file_change.expected_sha256 and file_change.replacement_sha256
+    )
+    return (
+        f"{len(changeset.files)} file change(s); scopes={scope_summary}; "
+        f"local_backups={local_backups}; remote_backups={remote_backups}; "
+        f"checksum_pairs={checksum_pairs}"
+    )
+
+
 def _detail_view(request: Request, record: ApprovalRecord) -> ApprovalDetailView:
     preview = dict(record.preview)
+    derived_diff = _changeset_diff_summary(request, record.changeset_id)
     if record.changeset_id:
         changeset = request.app.state.runtime.change_store.get(record.changeset_id)
         if changeset is not None:
-            if "diff" not in preview:
-                preview["diff"] = "\n".join(
-                    file_change.diff_text
-                    for file_change in changeset.files
-                    if file_change.diff_text
-                )[:4000]
             if "verification" not in preview:
                 preview["verification"] = changeset.verification_plan
             if "rollback" not in preview:
@@ -207,7 +236,7 @@ def _detail_view(request: Request, record: ApprovalRecord) -> ApprovalDetailView
         ),
         risk=record.risk,
         preview=_bounded(preview.get("preview")) or _bounded(preview.get("summary")),
-        diff=_bounded(preview.get("diff")),
+        diff=derived_diff,
         impact=_bounded(preview.get("impact")),
         verification=_bounded(preview.get("verification")),
         rollback=_bounded(preview.get("rollback")),
@@ -238,6 +267,20 @@ def _downstream_error_code(exc: Exception) -> str:
     if isinstance(exc, ApprovalAlreadyDecided):
         return "approval_already_decided"
     return "internal_error"
+
+
+def _decision_matches_retry(
+    record: ApprovalRecord,
+    *,
+    decision_status: ApprovalDecisionStatus,
+    actor: str,
+    reason: str,
+) -> bool:
+    return (
+        record.decision_status is decision_status
+        and record.decision_actor == actor
+        and record.decision_reason == reason
+    )
 
 
 async def _run_downstream(request: Request, record: ApprovalRecord) -> ApprovalRecord:
@@ -277,6 +320,29 @@ async def _run_downstream(request: Request, record: ApprovalRecord) -> ApprovalR
         final_status,
         now=datetime.now(UTC),
     )
+
+
+async def _resume_matching_decision(
+    request: Request,
+    *,
+    approval_id: str,
+    decision_status: ApprovalDecisionStatus,
+    actor: str,
+    reason: str,
+) -> ApprovalRecord:
+    record = _service(request).get(approval_id)
+    if record is None:
+        raise ApprovalNotFound(f"Approval '{approval_id}' not found")
+    if not _decision_matches_retry(
+        record,
+        decision_status=decision_status,
+        actor=actor,
+        reason=reason,
+    ):
+        raise ApprovalAlreadyDecided(f"Approval '{approval_id}' is already decided")
+    if record.downstream_status in _RESUMABLE_DOWNSTREAM_STATUSES:
+        return await _run_downstream(request, record)
+    return record
 
 
 def _decision_problem(exc: Exception) -> Exception:
@@ -390,6 +456,7 @@ async def approve_approval(
     )
 
     async def action() -> tuple[int, ApprovalDetailView]:
+        resumed_retry = False
         try:
             decided = await _service(request).approve(
                 approval_id,
@@ -397,9 +464,22 @@ async def approve_approval(
                 actor=principal.principal_id,
                 reason=body.reason,
             )
-        except (ApprovalNotFound, ApprovalExpired, ApprovalAlreadyDecided) as exc:
+        except ApprovalAlreadyDecided:
+            try:
+                decided = await _resume_matching_decision(
+                    request,
+                    approval_id=approval_id,
+                    decision_status=ApprovalDecisionStatus.APPROVED,
+                    actor=principal.principal_id,
+                    reason=body.reason,
+                )
+                resumed_retry = True
+            except (ApprovalNotFound, ApprovalExpired, ApprovalAlreadyDecided) as exc:
+                raise _decision_problem(exc) from exc
+        except (ApprovalNotFound, ApprovalExpired) as exc:
             raise _decision_problem(exc) from exc
-        decided = await _run_downstream(request, decided)
+        if not resumed_retry:
+            decided = await _run_downstream(request, decided)
         return 200, _detail_view(request, decided)
 
     status_code, payload, replayed = await execute_idempotent(
@@ -457,6 +537,7 @@ async def reject_approval(
     )
 
     async def action() -> tuple[int, ApprovalDetailView]:
+        resumed_retry = False
         try:
             decided = await _service(request).reject(
                 approval_id,
@@ -464,9 +545,22 @@ async def reject_approval(
                 actor=principal.principal_id,
                 reason=body.reason,
             )
-        except (ApprovalNotFound, ApprovalExpired, ApprovalAlreadyDecided) as exc:
+        except ApprovalAlreadyDecided:
+            try:
+                decided = await _resume_matching_decision(
+                    request,
+                    approval_id=approval_id,
+                    decision_status=ApprovalDecisionStatus.REJECTED,
+                    actor=principal.principal_id,
+                    reason=body.reason,
+                )
+                resumed_retry = True
+            except (ApprovalNotFound, ApprovalExpired, ApprovalAlreadyDecided) as exc:
+                raise _decision_problem(exc) from exc
+        except (ApprovalNotFound, ApprovalExpired) as exc:
             raise _decision_problem(exc) from exc
-        decided = await _run_downstream(request, decided)
+        if not resumed_retry:
+            decided = await _run_downstream(request, decided)
         return 200, _detail_view(request, decided)
 
     status_code, payload, replayed = await execute_idempotent(

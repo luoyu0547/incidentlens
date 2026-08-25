@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from incidentlens_control_plane.approvals.types import ApprovalDownstreamStatus
 from incidentlens_control_plane.evidence.types import EvidenceKind
 from incidentlens_control_plane.investigation.fake_provider import (
     FakeProvider,
@@ -376,6 +377,63 @@ async def test_startup_reconciles_decided_approval_and_resumes_run(tmp_path: Any
 
     # The operator approves while the process is "down"; restart reconciles it.
     await harness.approvals.approve(pending[0].approval_id)
+
+    summary = await recovery.startup()
+
+    assert summary.reconciled_approvals == 1
+    tool_call = harness.investigations.get_tool_call_by_provider_id("run-1", "call-1")
+    assert tool_call.status is ToolCallStatus.SUCCEEDED
+    assert service.get_run("run-1").status is AgentRunStatus.COMPLETED
+    assert service.get_investigation("inv-1").status is InvestigationStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_startup_reconciles_processing_approval_and_resumes_run(
+    tmp_path: Any,
+) -> None:
+    """A decided approval left mid-processing is resumed on startup."""
+    harness = build_harness(
+        tmp_path,
+        transport_factory=HarnessTransportFactory(
+            shell_output=b"restarted", shell_status=0
+        ),
+    )
+    registry = FakeProviderRegistry()
+    _make_investigation(harness)
+    _make_run(harness)
+    registry.set_script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=(
+                    tool_request(
+                        "shell_exec",
+                        tool_call_id="call-1",
+                        service_name=SERVICE,
+                        command="systemctl restart mysql",
+                    ),
+                )
+            ),
+            StopStep(
+                stop_signal=StopSignal(
+                    stop_reason=StopReason.COMPLETED, summary="investigation complete"
+                )
+            ),
+        ],
+    )
+    _, service, recovery = build_recovery(harness, registry)
+
+    parked = await service.resume_run("run-1")
+    assert parked.status is AgentRunStatus.WAITING_APPROVAL
+    pending = harness.approvals.list()
+    assert len(pending) == 1 and pending[0].status.value == "pending"
+
+    approved = await harness.approvals.approve(pending[0].approval_id)
+    harness.approvals.mark_downstream(
+        approved.approval_id,
+        ApprovalDownstreamStatus.PROCESSING,
+        now=NOW,
+    )
 
     summary = await recovery.startup()
 

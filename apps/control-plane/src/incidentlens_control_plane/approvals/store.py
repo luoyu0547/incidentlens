@@ -130,6 +130,53 @@ def _initial_downstream_status(
     return ApprovalDownstreamStatus.NOT_APPLICABLE
 
 
+def _derive_risk(intent: Mapping[str, object], stored: str | None) -> str:
+    intent_risk = _string(intent.get("risk"))
+    if intent_risk is not None:
+        if stored is None or stored == "approval_required":
+            return intent_risk
+    return stored or intent_risk or "approval_required"
+
+
+def _derive_downstream_status(
+    *,
+    intent: Mapping[str, object],
+    session_id: str | None,
+    investigation_id: str | None,
+    agent_run_id: str | None,
+    tool_call_id: str | None,
+    changeset_id: str | None,
+    proposal_id: str | None,
+    stored_status: str | None,
+    downstream_updated_at: str | None,
+) -> str:
+    expected = _initial_downstream_status(
+        session_id=session_id,
+        investigation_id=investigation_id,
+        agent_run_id=agent_run_id,
+        tool_call_id=tool_call_id,
+        changeset_id=changeset_id,
+        proposal_id=proposal_id,
+    ).value
+    if stored_status is None:
+        return expected
+    if (
+        stored_status == ApprovalDownstreamStatus.NOT_APPLICABLE.value
+        and expected == ApprovalDownstreamStatus.PENDING.value
+        and downstream_updated_at is None
+        and (
+            _string(intent.get("session_id"))
+            or _string(intent.get("investigation_id"))
+            or _string(intent.get("agent_run_id"))
+            or _string(intent.get("tool_call_id"))
+            or _string(intent.get("changeset_id"))
+            or _string(intent.get("proposal_id"))
+        )
+    ):
+        return expected
+    return stored_status
+
+
 class ApprovalStore:
     """SQLite-backed store for exact, single-use approvals."""
 
@@ -218,7 +265,8 @@ class ApprovalStore:
             """
             SELECT approval_id, intent_json, target_id, service, session_id,
                    investigation_id, agent_run_id, tool_call_id, changeset_id,
-                   proposal_id, risk, preview_json, downstream_status
+                   proposal_id, risk, preview_json, downstream_status,
+                   downstream_updated_at
             FROM approvals
             """
         ).fetchall()
@@ -233,20 +281,21 @@ class ApprovalStore:
             tool_call_id = _string(row[7]) or _string(intent.get("tool_call_id"))
             changeset_id = _string(row[8]) or _string(intent.get("changeset_id"))
             proposal_id = _string(row[9]) or _string(intent.get("proposal_id"))
-            risk = _string(row[10]) or _string(intent.get("risk")) or "approval_required"
+            risk = _derive_risk(intent, _string(row[10]))
             preview = _string(row[11])
             if preview is None or preview == "{}":
                 preview = _preview_json(_safe_preview_from_intent(intent))
-            downstream_status = _string(row[12])
-            if downstream_status is None:
-                downstream_status = _initial_downstream_status(
-                    session_id=session_id,
-                    investigation_id=investigation_id,
-                    agent_run_id=agent_run_id,
-                    tool_call_id=tool_call_id,
-                    changeset_id=changeset_id,
-                    proposal_id=proposal_id,
-                ).value
+            downstream_status = _derive_downstream_status(
+                intent=intent,
+                session_id=session_id,
+                investigation_id=investigation_id,
+                agent_run_id=agent_run_id,
+                tool_call_id=tool_call_id,
+                changeset_id=changeset_id,
+                proposal_id=proposal_id,
+                stored_status=_string(row[12]),
+                downstream_updated_at=_string(row[13]),
+            )
             conn.execute(
                 """
                 UPDATE approvals
@@ -397,17 +446,25 @@ class ApprovalStore:
         allowed_target_ids: frozenset[str] | None = None,
     ) -> tuple[ApprovalRecord, ...]:
         """List approval records, optionally filtered, oldest first."""
-        rows, _has_more = self.list_page(
-            status=status,
-            target_id=target_id,
-            session_id=session_id,
-            investigation_id=investigation_id,
-            allowed_target_ids=allowed_target_ids,
-            limit=10_000,
-            after_created_at=None,
-            after_approval_id=None,
-        )
-        return rows
+        items: list[ApprovalRecord] = []
+        after_created_at: datetime | None = None
+        after_approval_id: str | None = None
+        while True:
+            rows, has_more = self.list_page(
+                status=status,
+                target_id=target_id,
+                session_id=session_id,
+                investigation_id=investigation_id,
+                allowed_target_ids=allowed_target_ids,
+                limit=1_000,
+                after_created_at=after_created_at,
+                after_approval_id=after_approval_id,
+            )
+            items.extend(rows)
+            if not has_more or not rows:
+                return tuple(items)
+            after_created_at = rows[-1].created_at
+            after_approval_id = rows[-1].approval_id
 
     def list_page(
         self,
@@ -467,7 +524,20 @@ class ApprovalStore:
             preview = json.loads(preview_raw)
         except json.JSONDecodeError:
             preview = {}
-        downstream_status = _string(row[21]) or ApprovalDownstreamStatus.NOT_APPLICABLE.value
+        downstream_updated_at = datetime.fromisoformat(str(row[23])) if row[23] else None
+        downstream_status = _derive_downstream_status(
+            intent=intent,
+            session_id=_string(row[7]) or _string(intent.get("session_id")),
+            investigation_id=_string(row[8]) or _string(intent.get("investigation_id")),
+            agent_run_id=_string(row[9]) or _string(intent.get("agent_run_id")),
+            tool_call_id=_string(row[10]) or _string(intent.get("tool_call_id")),
+            changeset_id=_string(row[11]) or _string(intent.get("changeset_id")),
+            proposal_id=_string(row[12]) or _string(intent.get("proposal_id")),
+            stored_status=_string(row[21]),
+            downstream_updated_at=(
+                downstream_updated_at.isoformat() if downstream_updated_at else None
+            ),
+        )
         try:
             parsed_downstream_status = ApprovalDownstreamStatus(downstream_status)
         except ValueError:
@@ -487,7 +557,7 @@ class ApprovalStore:
             tool_call_id=_string(row[10]) or _string(intent.get("tool_call_id")),
             changeset_id=_string(row[11]) or _string(intent.get("changeset_id")),
             proposal_id=_string(row[12]) or _string(intent.get("proposal_id")),
-            risk=_string(row[13]) or _string(intent.get("risk")) or "approval_required",
+            risk=_derive_risk(intent, _string(row[13])),
             preview=preview if isinstance(preview, dict) else {},
             created_at=datetime.fromisoformat(str(row[15])),
             expires_at=datetime.fromisoformat(str(row[16])),
@@ -497,7 +567,7 @@ class ApprovalStore:
             decision_reason=_string(row[20]),
             downstream_status=parsed_downstream_status,
             downstream_error_code=_string(row[22]),
-            downstream_updated_at=datetime.fromisoformat(str(row[23])) if row[23] else None,
+            downstream_updated_at=downstream_updated_at,
         )
 
     def approve(

@@ -8,8 +8,10 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from incidentlens_control_plane.api.idempotency import idempotency_request_sha256
 from incidentlens_control_plane.changes.types import FileChange
 from incidentlens_control_plane.config import RuntimeSettings
+from incidentlens_control_plane.investigation.service import ApprovalDecisionOutcome
 from incidentlens_control_plane.main import create_app
 from incidentlens_control_plane.remote_ops.fakes import FakeTransportFactory
 
@@ -89,6 +91,36 @@ def _seed_changeset(runtime, *, changeset_id: str, target_id: str, service: str)
     )
 
 
+def _seed_sensitive_changeset(
+    runtime, *, changeset_id: str, target_id: str, service: str
+) -> None:
+    runtime.change_store.create_changeset(
+        changeset_id=changeset_id,
+        incident_id="inc-1",
+        project_id="proj-1",
+        target_id=target_id,
+        service_name=service,
+        files=(
+            FileChange(
+                file_change_id=f"fc-{changeset_id}",
+                scope="host",
+                remote_path="/opt/app/.env",
+                expected_sha256="c" * 64,
+                replacement_sha256="d" * 64,
+                diff_text=(
+                    "-DATABASE_URL=postgresql://alice:hunter2@db/prod\n"
+                    "+DATABASE_URL=postgresql://alice:[REDACTED]@db/prod\n"
+                ),
+                original_metadata={},
+                local_backup_ref="vault://backup",
+                remote_backup_path="/opt/app/.env.backup",
+            ),
+        ),
+        verification_plan="run syntax checks and compare service behavior",
+        rollback_plan="restore the verified timestamped backup",
+    )
+
+
 def _seed_approval(
     client: TestClient,
     *,
@@ -96,9 +128,10 @@ def _seed_approval(
     now: datetime | None = None,
     linked: bool = False,
     changeset_id: str | None = None,
+    seed_changeset: bool = True,
 ) -> str:
     runtime = client.app.state.runtime
-    if changeset_id is not None:
+    if changeset_id is not None and seed_changeset:
         _seed_changeset(
             runtime,
             changeset_id=changeset_id,
@@ -144,6 +177,7 @@ def test_list_returns_safe_paginated_page(client: TestClient) -> None:
     assert len(body["items"]) == 1
     assert body["items"][0]["approval_id"] == first
     assert body["items"][0]["diff"]
+    assert "file change(s)" in body["items"][0]["diff"]
     assert body["items"][0]["verification"] == "run syntax checks and compare service behavior"
     assert body["items"][0]["rollback"] == "restore the verified timestamped backup"
     assert "argv" not in response.text
@@ -157,6 +191,35 @@ def test_list_returns_safe_paginated_page(client: TestClient) -> None:
     )
     assert second_page.status_code == 200
     assert second_page.json()["items"][0]["approval_id"] == second
+
+
+def test_detail_never_serializes_raw_diff_credentials(client: TestClient) -> None:
+    runtime = client.app.state.runtime
+    _seed_sensitive_changeset(
+        runtime,
+        changeset_id="chs-sensitive",
+        target_id="tgt-a",
+        service="payment-api",
+    )
+    approval_id = _seed_approval(
+        client,
+        approval_id_target="tgt-a",
+        changeset_id="chs-sensitive",
+        seed_changeset=False,
+    )
+
+    response = client.get(f"{ROUTE}/{approval_id}", headers=_auth(OPERATOR_A_TOKEN))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["diff"] == (
+        "1 file change(s); scopes=1×host; local_backups=1; "
+        "remote_backups=1; checksum_pairs=1"
+    )
+    assert "DATABASE_URL" not in response.text
+    assert "postgresql://" not in response.text
+    assert "alice" not in response.text
+    assert "hunter2" not in response.text
 
 
 def test_list_filters_to_authorized_targets(client: TestClient) -> None:
@@ -298,3 +361,79 @@ def test_decision_remains_committed_when_downstream_fails(
     stored = runtime.approvals.get(approval_id)
     assert stored is not None
     assert stored.status.value == "approved"
+
+
+def test_same_key_retry_resumes_matching_decision_after_crash_window(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    approval_id = _seed_approval(client, approval_id_target="tgt-a", linked=True)
+    runtime = client.app.state.runtime
+    reason = "Reviewed exact diff and rollback plan."
+    seeded = runtime.approvals.get(approval_id)
+    assert seeded is not None
+    decision_now = seeded.created_at + timedelta(minutes=1)
+    request_body = json.dumps({"reason": reason}, sort_keys=True, separators=(",", ":"))
+    request_sha256 = idempotency_request_sha256(
+        method="POST",
+        route_key="/api/v1/approvals/{approval_id}/approve",
+        path_params={"approval_id": approval_id},
+        canonical_body=request_body,
+    )
+
+    asyncio.run(
+        runtime.approvals.approve(
+            approval_id,
+            now=decision_now,
+            actor="operator-a",
+            reason=reason,
+        )
+    )
+    runtime.idempotency.reserve(
+        principal_id="operator-a",
+        method="POST",
+        route_key="/api/v1/approvals/{approval_id}/approve",
+        idempotency_key="approve-retry",
+        request_sha256=request_sha256,
+        now=decision_now - timedelta(minutes=10),
+    )
+
+    calls: list[str] = []
+
+    async def _resume(*args, **kwargs):
+        calls.append(kwargs.get("approval_id", args[0] if args else ""))
+        return ApprovalDecisionOutcome(
+            approval_id=approval_id,
+            matched="tool_call",
+            tool_call_id="call-1",
+            run_id="run-1",
+            action="re-executed",
+            applied=True,
+            consumed=True,
+        )
+
+    monkeypatch.setattr(runtime.investigations, "handle_approval_decision", _resume)
+
+    response = client.post(
+        f"{ROUTE}/{approval_id}/approve",
+        headers=_idem(OPERATOR_A_TOKEN, "approve-retry"),
+        json={"reason": reason},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["decision_status"] == "approved"
+    assert body["downstream_status"] == "processed"
+    assert body["decided_by"] == "operator-a"
+    assert calls == [approval_id]
+
+    stored = runtime.approvals.get(approval_id)
+    assert stored is not None
+    assert stored.downstream_status.value == "processed"
+
+    replay = client.post(
+        f"{ROUTE}/{approval_id}/approve",
+        headers=_idem(OPERATOR_A_TOKEN, "approve-retry"),
+        json={"reason": reason},
+    )
+    assert replay.status_code == 200
+    assert replay.headers.get("Idempotency-Replayed") == "true"

@@ -31,7 +31,10 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from incidentlens_control_plane.approvals.service import ApprovalService
-from incidentlens_control_plane.approvals.types import ApprovalStatus
+from incidentlens_control_plane.approvals.types import (
+    ApprovalDownstreamStatus,
+    ApprovalStatus,
+)
 from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.evidence.service import EvidenceService
@@ -85,6 +88,12 @@ _DANGEROUS_TOOLS: frozenset[str] = frozenset(
 
 _DECIDED_APPROVAL_STATUSES: frozenset[ApprovalStatus] = frozenset(
     {ApprovalStatus.APPROVED, ApprovalStatus.REJECTED}
+)
+_RECOVERABLE_DOWNSTREAM_STATUSES: frozenset[ApprovalDownstreamStatus] = frozenset(
+    {
+        ApprovalDownstreamStatus.PENDING,
+        ApprovalDownstreamStatus.PROCESSING,
+    }
 )
 
 
@@ -247,8 +256,23 @@ class RecoveryService:
         parked run.  PENDING approvals are left for the operator.
         """
         reconciled = 0
+        waiting_approval_ids = {
+            tool_call.approval_id
+            for tool_call in self._store.list_waiting_approval_tool_calls()
+            if tool_call.approval_id is not None
+        }
+        pending_proposal_hashes = {
+            proposal.approval_intent_sha256
+            for proposal in self._store.list_pending_proposals()
+        }
         for approval in self._approvals.list():
             if approval.status not in _DECIDED_APPROVAL_STATUSES:
+                continue
+            if (
+                approval.downstream_status not in _RECOVERABLE_DOWNSTREAM_STATUSES
+                and approval.approval_id not in waiting_approval_ids
+                and approval.intent_sha256 not in pending_proposal_hashes
+            ):
                 continue
             try:
                 outcome = await self._investigations.handle_approval_decision(
