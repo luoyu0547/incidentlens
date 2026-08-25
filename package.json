@@ -17,7 +17,14 @@
     "protocol:generate": "npm run generate --workspace @incidentlens/protocol",
     "protocol:check": "npm run check --workspace @incidentlens/protocol",
     "test:pty": "npm run test:pty --workspace @incidentlens/cli",
-    "verify:cli": "npm run protocol:check && npm run lint && npm run format:check && npm run typecheck && npm test && npm run build && npm run test:pty"
+    "verify:cli": "npm run protocol:check && npm run lint && npm run format:check && npm run typecheck && npm test && npm run build && npm run test:pty",
+    "web:dev": "npm run dev --workspace @incidentlens/web",
+    "web:test": "npm run test --workspace @incidentlens/web",
+    "web:typecheck": "npm run typecheck --workspace @incidentlens/web",
+    "web:lint": "npm run lint --workspace @incidentlens/web",
+    "web:build": "npm run build --workspace @incidentlens/web",
+    "web:e2e": "npm run e2e --workspace @incidentlens/web",
+    "web:verify": "npm run web:typecheck && npm run web:lint && npm run web:test && npm run web:build"
   },
   "devDependencies": {
     "typescript": "^5.7.3",
