@@ -53,6 +53,9 @@ class ApprovalRecord(BaseModel):
     consumed_at: datetime | None = None
     decision_actor: str | None = Field(default=None, min_length=1, max_length=200)
     decision_reason: str | None = Field(default=None, min_length=1, max_length=1000)
+    decision_route_key: str | None = Field(default=None, min_length=1, max_length=200)
+    decision_idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+    decision_request_sha256: str | None = Field(default=None, min_length=1, max_length=64)
     downstream_status: ApprovalDownstreamStatus = ApprovalDownstreamStatus.NOT_APPLICABLE
     downstream_error_code: str | None = Field(default=None, min_length=1, max_length=120)
     downstream_updated_at: datetime | None = None

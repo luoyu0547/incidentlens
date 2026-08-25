@@ -275,11 +275,17 @@ def _decision_matches_retry(
     decision_status: ApprovalDecisionStatus,
     actor: str,
     reason: str,
+    route_key: str,
+    idempotency_key: str,
+    request_sha256: str,
 ) -> bool:
     return (
         record.decision_status is decision_status
         and record.decision_actor == actor
         and record.decision_reason == reason
+        and record.decision_route_key == route_key
+        and record.decision_idempotency_key == idempotency_key
+        and record.decision_request_sha256 == request_sha256
     )
 
 
@@ -329,6 +335,9 @@ async def _resume_matching_decision(
     decision_status: ApprovalDecisionStatus,
     actor: str,
     reason: str,
+    route_key: str,
+    idempotency_key: str,
+    request_sha256: str,
 ) -> ApprovalRecord:
     record = _service(request).get(approval_id)
     if record is None:
@@ -338,6 +347,9 @@ async def _resume_matching_decision(
         decision_status=decision_status,
         actor=actor,
         reason=reason,
+        route_key=route_key,
+        idempotency_key=idempotency_key,
+        request_sha256=request_sha256,
     ):
         raise ApprovalAlreadyDecided(f"Approval '{approval_id}' is already decided")
     if record.downstream_status in _RESUMABLE_DOWNSTREAM_STATUSES:
@@ -463,6 +475,9 @@ async def approve_approval(
                 now=datetime.now(UTC),
                 actor=principal.principal_id,
                 reason=body.reason,
+                route_key=_APPROVE_ROUTE_KEY,
+                idempotency_key=request.headers.get("Idempotency-Key", ""),
+                request_sha256=request_sha256,
             )
         except ApprovalAlreadyDecided:
             try:
@@ -472,6 +487,9 @@ async def approve_approval(
                     decision_status=ApprovalDecisionStatus.APPROVED,
                     actor=principal.principal_id,
                     reason=body.reason,
+                    route_key=_APPROVE_ROUTE_KEY,
+                    idempotency_key=request.headers.get("Idempotency-Key", ""),
+                    request_sha256=request_sha256,
                 )
                 resumed_retry = True
             except (ApprovalNotFound, ApprovalExpired, ApprovalAlreadyDecided) as exc:
@@ -544,6 +562,9 @@ async def reject_approval(
                 now=datetime.now(UTC),
                 actor=principal.principal_id,
                 reason=body.reason,
+                route_key=_REJECT_ROUTE_KEY,
+                idempotency_key=request.headers.get("Idempotency-Key", ""),
+                request_sha256=request_sha256,
             )
         except ApprovalAlreadyDecided:
             try:
@@ -553,6 +574,9 @@ async def reject_approval(
                     decision_status=ApprovalDecisionStatus.REJECTED,
                     actor=principal.principal_id,
                     reason=body.reason,
+                    route_key=_REJECT_ROUTE_KEY,
+                    idempotency_key=request.headers.get("Idempotency-Key", ""),
+                    request_sha256=request_sha256,
                 )
                 resumed_retry = True
             except (ApprovalNotFound, ApprovalExpired, ApprovalAlreadyDecided) as exc:

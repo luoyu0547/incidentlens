@@ -188,12 +188,23 @@ class ApprovalService:
         now: datetime | None = None,
         actor: str | None = None,
         reason: str | None = None,
+        route_key: str | None = None,
+        idempotency_key: str | None = None,
+        request_sha256: str | None = None,
     ) -> ApprovalRecord:
         """Approve a pending request and emit APPROVAL_APPROVED event."""
         now = now or datetime.now(UTC)
         now = now.astimezone(UTC)
 
-        record = self._approvals.approve(approval_id, now, actor=actor, reason=reason)
+        record = self._approvals.approve(
+            approval_id,
+            now,
+            actor=actor,
+            reason=reason,
+            route_key=route_key,
+            idempotency_key=idempotency_key,
+            request_sha256=request_sha256,
+        )
 
         event = RuntimeEvent(
             event_id=f"evt-{uuid.uuid4().hex[:12]}",
@@ -219,12 +230,23 @@ class ApprovalService:
         now: datetime | None = None,
         actor: str | None = None,
         reason: str | None = None,
+        route_key: str | None = None,
+        idempotency_key: str | None = None,
+        request_sha256: str | None = None,
     ) -> ApprovalRecord:
         """Reject a pending request and emit APPROVAL_REJECTED event."""
         now = now or datetime.now(UTC)
         now = now.astimezone(UTC)
 
-        record = self._approvals.reject(approval_id, now, actor=actor, reason=reason)
+        record = self._approvals.reject(
+            approval_id,
+            now,
+            actor=actor,
+            reason=reason,
+            route_key=route_key,
+            idempotency_key=idempotency_key,
+            request_sha256=request_sha256,
+        )
 
         event = RuntimeEvent(
             event_id=f"evt-{uuid.uuid4().hex[:12]}",

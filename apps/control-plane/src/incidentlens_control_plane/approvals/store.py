@@ -70,6 +70,9 @@ _SELECT_COLUMNS = """
     consumed_at,
     decision_actor,
     decision_reason,
+    decision_route_key,
+    decision_idempotency_key,
+    decision_request_sha256,
     downstream_status,
     downstream_error_code,
     downstream_updated_at
@@ -210,6 +213,9 @@ class ApprovalStore:
                     consumed_at TEXT,
                     decision_actor TEXT,
                     decision_reason TEXT,
+                    decision_route_key TEXT,
+                    decision_idempotency_key TEXT,
+                    decision_request_sha256 TEXT,
                     downstream_status TEXT NOT NULL DEFAULT 'not_applicable',
                     downstream_error_code TEXT,
                     downstream_updated_at TEXT
@@ -233,6 +239,9 @@ class ApprovalStore:
                 "preview_json": "TEXT NOT NULL DEFAULT '{}'",
                 "decision_actor": "TEXT",
                 "decision_reason": "TEXT",
+                "decision_route_key": "TEXT",
+                "decision_idempotency_key": "TEXT",
+                "decision_request_sha256": "TEXT",
                 "downstream_status": "TEXT NOT NULL DEFAULT 'not_applicable'",
                 "downstream_error_code": "TEXT",
                 "downstream_updated_at": "TEXT",
@@ -381,10 +390,14 @@ class ApprovalStore:
                         target_id, service, session_id, investigation_id, agent_run_id,
                         tool_call_id, changeset_id, proposal_id, risk, preview_json,
                         created_at, expires_at, decided_at, consumed_at, decision_actor,
-                        decision_reason, downstream_status, downstream_error_code,
-                        downstream_updated_at
+                        decision_reason, decision_route_key, decision_idempotency_key,
+                        decision_request_sha256, downstream_status,
+                        downstream_error_code, downstream_updated_at
                     )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     record.approval_id,
@@ -409,6 +422,9 @@ class ApprovalStore:
                     _preview_json(record.preview),
                     record.created_at.isoformat(),
                     record.expires_at.isoformat(),
+                    None,
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -524,7 +540,7 @@ class ApprovalStore:
             preview = json.loads(preview_raw)
         except json.JSONDecodeError:
             preview = {}
-        downstream_updated_at = datetime.fromisoformat(str(row[23])) if row[23] else None
+        downstream_updated_at = datetime.fromisoformat(str(row[26])) if row[26] else None
         downstream_status = _derive_downstream_status(
             intent=intent,
             session_id=_string(row[7]) or _string(intent.get("session_id")),
@@ -533,7 +549,7 @@ class ApprovalStore:
             tool_call_id=_string(row[10]) or _string(intent.get("tool_call_id")),
             changeset_id=_string(row[11]) or _string(intent.get("changeset_id")),
             proposal_id=_string(row[12]) or _string(intent.get("proposal_id")),
-            stored_status=_string(row[21]),
+            stored_status=_string(row[24]),
             downstream_updated_at=(
                 downstream_updated_at.isoformat() if downstream_updated_at else None
             ),
@@ -565,8 +581,11 @@ class ApprovalStore:
             consumed_at=datetime.fromisoformat(str(row[18])) if row[18] else None,
             decision_actor=_string(row[19]),
             decision_reason=_string(row[20]),
+            decision_route_key=_string(row[21]),
+            decision_idempotency_key=_string(row[22]),
+            decision_request_sha256=_string(row[23]),
             downstream_status=parsed_downstream_status,
-            downstream_error_code=_string(row[22]),
+            downstream_error_code=_string(row[25]),
             downstream_updated_at=downstream_updated_at,
         )
 
@@ -577,6 +596,9 @@ class ApprovalStore:
         *,
         actor: str | None = None,
         reason: str | None = None,
+        route_key: str | None = None,
+        idempotency_key: str | None = None,
+        request_sha256: str | None = None,
     ) -> ApprovalRecord:
         """Transition an approval to APPROVED status."""
         return self._decide(
@@ -585,6 +607,9 @@ class ApprovalStore:
             now,
             actor=actor,
             reason=reason,
+            route_key=route_key,
+            idempotency_key=idempotency_key,
+            request_sha256=request_sha256,
         )
 
     def reject(
@@ -594,6 +619,9 @@ class ApprovalStore:
         *,
         actor: str | None = None,
         reason: str | None = None,
+        route_key: str | None = None,
+        idempotency_key: str | None = None,
+        request_sha256: str | None = None,
     ) -> ApprovalRecord:
         """Transition an approval to REJECTED status."""
         return self._decide(
@@ -602,6 +630,9 @@ class ApprovalStore:
             now,
             actor=actor,
             reason=reason,
+            route_key=route_key,
+            idempotency_key=idempotency_key,
+            request_sha256=request_sha256,
         )
 
     def _decide(
@@ -612,6 +643,9 @@ class ApprovalStore:
         *,
         actor: str | None,
         reason: str | None,
+        route_key: str | None,
+        idempotency_key: str | None,
+        request_sha256: str | None,
     ) -> ApprovalRecord:
         now_utc = now.astimezone(UTC)
         with self._connection_factory() as conn:
@@ -636,7 +670,9 @@ class ApprovalStore:
                 """
                 UPDATE approvals
                 SET status = ?, decided_at = ?, decision_actor = ?,
-                    decision_reason = ?, downstream_error_code = NULL
+                    decision_reason = ?, decision_route_key = ?,
+                    decision_idempotency_key = ?, decision_request_sha256 = ?,
+                    downstream_error_code = NULL
                 WHERE approval_id = ? AND status = ? AND expires_at > ?
                 """,
                 (
@@ -644,6 +680,9 @@ class ApprovalStore:
                     now_utc.isoformat(),
                     actor,
                     reason,
+                    route_key,
+                    idempotency_key,
+                    request_sha256,
                     approval_id,
                     ApprovalStatus.PENDING.value,
                     now_utc.isoformat(),

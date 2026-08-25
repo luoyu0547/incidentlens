@@ -445,6 +445,73 @@ async def test_startup_reconciles_processing_approval_and_resumes_run(
 
 
 @pytest.mark.asyncio
+async def test_startup_terminalizes_consumed_processing_approval_from_tool_state(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A consumed approval left processing is finalized from durable tool state."""
+    harness = build_harness(
+        tmp_path,
+        transport_factory=HarnessTransportFactory(
+            shell_output=b"restarted", shell_status=0
+        ),
+    )
+    registry = FakeProviderRegistry()
+    _make_investigation(harness)
+    _make_run(harness)
+    registry.set_script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=(
+                    tool_request(
+                        "shell_exec",
+                        tool_call_id="call-1",
+                        service_name=SERVICE,
+                        command="systemctl restart mysql",
+                    ),
+                )
+            ),
+            StopStep(
+                stop_signal=StopSignal(
+                    stop_reason=StopReason.COMPLETED, summary="investigation complete"
+                )
+            ),
+        ],
+    )
+    _, service, recovery = build_recovery(harness, registry)
+
+    parked = await service.resume_run("run-1")
+    assert parked.status is AgentRunStatus.WAITING_APPROVAL
+    pending = harness.approvals.list()
+    assert len(pending) == 1 and pending[0].status.value == "pending"
+
+    await harness.approvals.approve(pending[0].approval_id)
+    outcome = await service.handle_approval_decision(pending[0].approval_id)
+    assert outcome.consumed is True
+    tool_call = harness.investigations.get_tool_call_by_provider_id("run-1", "call-1")
+    assert tool_call.status is ToolCallStatus.SUCCEEDED
+
+    harness.approvals.mark_downstream(
+        pending[0].approval_id,
+        ApprovalDownstreamStatus.PROCESSING,
+        now=NOW,
+    )
+
+    async def _unexpected(*_args, **_kwargs):
+        raise AssertionError("recovery must not re-execute or re-consume consumed approvals")
+
+    monkeypatch.setattr(service, "handle_approval_decision", _unexpected)
+
+    summary = await recovery.startup()
+
+    assert summary.reconciled_approvals == 1
+    approval = harness.approvals.get(pending[0].approval_id)
+    assert approval is not None
+    assert approval.status.value == "consumed"
+    assert approval.downstream_status is ApprovalDownstreamStatus.PROCESSED
+
+
+@pytest.mark.asyncio
 async def test_startup_leaves_pending_approvals_for_the_operator(tmp_path: Any) -> None:
     harness = build_harness(tmp_path)
     registry = FakeProviderRegistry()

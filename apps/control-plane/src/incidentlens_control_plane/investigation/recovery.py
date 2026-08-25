@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from incidentlens_control_plane.approvals.service import ApprovalService
 from incidentlens_control_plane.approvals.types import (
     ApprovalDownstreamStatus,
+    ApprovalRecord,
     ApprovalStatus,
 )
 from incidentlens_control_plane.events.broker import RuntimeEventBroker
@@ -46,6 +47,7 @@ from incidentlens_control_plane.investigation.service import InvestigationServic
 from incidentlens_control_plane.investigation.state_machine import (
     AGENT_RUN_STATE_MACHINE,
     INVESTIGATION_STATE_MACHINE,
+    TOOL_CALL_TERMINAL,
     AgentRunStatus,
     IllegalTransition,
     InvestigationStatus,
@@ -65,6 +67,8 @@ from incidentlens_control_plane.investigation.types import (
     AgentRun,
     AgentRunKind,
     Investigation,
+    RegistryProposalStatus,
+    RegistryUpdateProposal,
     StopReason,
     ToolCall,
 )
@@ -94,6 +98,9 @@ _RECOVERABLE_DOWNSTREAM_STATUSES: frozenset[ApprovalDownstreamStatus] = frozense
         ApprovalDownstreamStatus.PENDING,
         ApprovalDownstreamStatus.PROCESSING,
     }
+)
+_CONSUMED_RECOVERY_STATUSES: frozenset[ApprovalDownstreamStatus] = frozenset(
+    {ApprovalDownstreamStatus.PROCESSING}
 )
 
 
@@ -261,11 +268,36 @@ class RecoveryService:
             for tool_call in self._store.list_waiting_approval_tool_calls()
             if tool_call.approval_id is not None
         }
+        terminal_tool_calls_by_approval = {
+            tool_call.approval_id: tool_call
+            for tool_call in self._store.list_tool_calls()
+            if tool_call.approval_id is not None and tool_call.status in TOOL_CALL_TERMINAL
+        }
         pending_proposal_hashes = {
             proposal.approval_intent_sha256
             for proposal in self._store.list_pending_proposals()
         }
+        proposals_by_id = {
+            proposal.proposal_id: proposal for proposal in self._store.list_proposals()
+        }
         for approval in self._approvals.list():
+            if approval.status is ApprovalStatus.CONSUMED:
+                if approval.downstream_status not in _CONSUMED_RECOVERY_STATUSES:
+                    continue
+                if self._terminalize_consumed_processing_approval(
+                    approval,
+                    terminal_tool_call=terminal_tool_calls_by_approval.get(
+                        approval.approval_id
+                    ),
+                    proposal=(
+                        proposals_by_id.get(approval.proposal_id)
+                        if approval.proposal_id is not None
+                        else None
+                    ),
+                ):
+                    reconciled += 1
+                continue
+
             if approval.status not in _DECIDED_APPROVAL_STATUSES:
                 continue
             if (
@@ -287,6 +319,47 @@ class RecoveryService:
             if outcome.matched != "none":
                 reconciled += 1
         return reconciled
+
+    def _terminalize_consumed_processing_approval(
+        self,
+        approval: ApprovalRecord,
+        *,
+        terminal_tool_call: ToolCall | None,
+        proposal: RegistryUpdateProposal | None,
+    ) -> bool:
+        if terminal_tool_call is not None:
+            if terminal_tool_call.status is ToolCallStatus.SUCCEEDED:
+                self._approvals.mark_downstream(
+                    approval.approval_id,
+                    ApprovalDownstreamStatus.PROCESSED,
+                    now=self._now(),
+                )
+                return True
+            self._approvals.mark_downstream(
+                approval.approval_id,
+                ApprovalDownstreamStatus.FAILED,
+                error_code=f"tool_call_{terminal_tool_call.status.value}",
+                now=self._now(),
+            )
+            return True
+
+        if proposal is None:
+            return False
+        if proposal.status is RegistryProposalStatus.APPROVED:
+            self._approvals.mark_downstream(
+                approval.approval_id,
+                ApprovalDownstreamStatus.PROCESSED,
+                now=self._now(),
+            )
+            return True
+        if proposal.status is RegistryProposalStatus.STALE:
+            self._approvals.mark_downstream(
+                approval.approval_id,
+                ApprovalDownstreamStatus.NOT_APPLICABLE,
+                now=self._now(),
+            )
+            return True
+        return False
 
     def _classify_in_flight_runs(self) -> RecoverySummary:
         """Classify the in-flight tool calls of every surviving non-terminal run.

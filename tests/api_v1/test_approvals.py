@@ -386,6 +386,9 @@ def test_same_key_retry_resumes_matching_decision_after_crash_window(
             now=decision_now,
             actor="operator-a",
             reason=reason,
+            route_key="/api/v1/approvals/{approval_id}/approve",
+            idempotency_key="approve-retry",
+            request_sha256=request_sha256,
         )
     )
     runtime.idempotency.reserve(
@@ -437,3 +440,59 @@ def test_same_key_retry_resumes_matching_decision_after_crash_window(
     )
     assert replay.status_code == 200
     assert replay.headers.get("Idempotency-Replayed") == "true"
+
+
+def test_fresh_key_cannot_resume_matching_decision_after_crash_window(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    approval_id = _seed_approval(client, approval_id_target="tgt-a", linked=True)
+    runtime = client.app.state.runtime
+    reason = "Reviewed exact diff and rollback plan."
+    seeded = runtime.approvals.get(approval_id)
+    assert seeded is not None
+    decision_now = seeded.created_at + timedelta(minutes=1)
+    request_body = json.dumps({"reason": reason}, sort_keys=True, separators=(",", ":"))
+    request_sha256 = idempotency_request_sha256(
+        method="POST",
+        route_key="/api/v1/approvals/{approval_id}/approve",
+        path_params={"approval_id": approval_id},
+        canonical_body=request_body,
+    )
+
+    asyncio.run(
+        runtime.approvals.approve(
+            approval_id,
+            now=decision_now,
+            actor="operator-a",
+            reason=reason,
+            route_key="/api/v1/approvals/{approval_id}/approve",
+            idempotency_key="approve-original",
+            request_sha256=request_sha256,
+        )
+    )
+
+    calls: list[str] = []
+
+    async def _resume(*args, **kwargs):
+        calls.append(kwargs.get("approval_id", args[0] if args else ""))
+        return ApprovalDecisionOutcome(
+            approval_id=approval_id,
+            matched="tool_call",
+            tool_call_id="call-1",
+            run_id="run-1",
+            action="re-executed",
+            applied=True,
+            consumed=True,
+        )
+
+    monkeypatch.setattr(runtime.investigations, "handle_approval_decision", _resume)
+
+    response = client.post(
+        f"{ROUTE}/{approval_id}/approve",
+        headers=_idem(OPERATOR_A_TOKEN, "approve-fresh"),
+        json={"reason": reason},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "approval_already_decided"
+    assert calls == []
