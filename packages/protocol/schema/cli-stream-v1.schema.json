@@ -1,32 +1,115 @@
 {
+  "$defs": {
+    "JsonValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
   "$id": "incidentlens://protocol/cli-stream-v1",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
     "event_id": {
+      "title": "Event Id",
       "type": "string"
     },
     "event_type": {
-      "minLength": 1,
+      "title": "Event Type",
+      "type": "string"
+    },
+    "investigation_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Investigation Id"
+    },
+    "occurred_at": {
+      "format": "date-time",
+      "title": "Occurred At",
       "type": "string"
     },
     "payload": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Payload",
       "type": "object"
     },
     "schema_version": {
       "const": 1,
+      "default": 1,
+      "title": "Schema Version",
       "type": "integer"
     },
     "sequence": {
-      "minimum": 0,
+      "title": "Sequence",
       "type": "integer"
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "target_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Target Id"
     }
   },
   "required": [
-    "schema_version",
+    "event_id",
+    "sequence",
     "event_type",
-    "sequence"
+    "occurred_at",
+    "payload"
   ],
-  "title": "cli-stream-v1",
+  "title": "StreamEventEnvelope",
   "type": "object"
 }

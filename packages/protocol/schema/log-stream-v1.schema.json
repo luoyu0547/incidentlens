@@ -1,38 +1,89 @@
 {
+  "$defs": {
+    "JsonValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
   "$id": "incidentlens://protocol/log-stream-v1",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
+  "description": "Versioned frame emitted by the cursor-based log WebSocket.",
   "properties": {
     "cursor": {
-      "type": "string"
-    },
-    "event_id": {
-      "type": "string"
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cursor"
     },
     "event_type": {
-      "minLength": 1,
+      "title": "Event Type",
       "type": "string"
     },
-    "message": {
+    "occurred_at": {
+      "format": "date-time",
+      "title": "Occurred At",
       "type": "string"
     },
     "payload": {
-      "type": "object"
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Payload"
     },
     "schema_version": {
       "const": 1,
-      "type": "integer"
-    },
-    "sequence": {
-      "minimum": 0,
+      "default": 1,
+      "title": "Schema Version",
       "type": "integer"
     }
   },
   "required": [
-    "schema_version",
     "event_type",
-    "sequence"
+    "occurred_at"
   ],
-  "title": "log-stream-v1",
+  "title": "LogStreamEnvelope",
   "type": "object"
 }

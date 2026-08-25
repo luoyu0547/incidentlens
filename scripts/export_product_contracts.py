@@ -107,8 +107,8 @@ def exports() -> dict[Path, dict[str, Any]]:
             ("StreamEventEnvelope", "CliStreamEvent"), "cli-stream-v1",
         ),
         SCHEMA_DIR / "log-stream-v1.schema.json": _model_schema(
-            ("incidentlens_control_plane.logs.views", "incidentlens_control_plane.logs.types"),
-            ("LogStreamEnvelope", "LogPage", "LogRecordView"), "log-stream-v1",
+            ("incidentlens_control_plane.logs.views",),
+            ("LogStreamEnvelope",), "log-stream-v1",
         ),
         SCHEMA_DIR / "workspace-stream-v1.schema.json": _model_schema(
             (

@@ -11,10 +11,11 @@ arrive.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from incidentlens_control_plane.api.models import JsonValue
 from incidentlens_control_plane.logs.cursors import encode_log_cursor
 from incidentlens_control_plane.logs.store import LogStore
 from incidentlens_control_plane.logs.types import LogRecord, LogSeverity
@@ -29,6 +30,18 @@ class LogRecordView(BaseModel):
     severity: LogSeverity
     message: str
     fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class LogStreamEnvelope(BaseModel):
+    """Versioned frame emitted by the cursor-based log WebSocket."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    event_type: str
+    occurred_at: datetime
+    cursor: str | None = None
+    payload: dict[str, JsonValue] | None = None
 
 
 class LogPage(BaseModel):
@@ -109,4 +122,4 @@ def _to_view(record: LogRecord) -> LogRecordView:
     )
 
 
-__all__ = ["LogPage", "LogRecordView", "list_log_page"]
+__all__ = ["LogPage", "LogRecordView", "LogStreamEnvelope", "list_log_page"]

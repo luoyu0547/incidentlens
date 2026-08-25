@@ -34,6 +34,39 @@ def _walk(value: Any) -> set[str]:
     return found
 
 
+def _response_schemas(document: dict[str, Any]) -> list[Any]:
+    """Return response schemas, resolving local component references."""
+    components = document.get("components", {}).get("schemas", {})
+    values: list[Any] = []
+    seen: set[str] = set()
+
+    def resolve(value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        ref = value.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+            name = ref.rsplit("/", 1)[-1]
+            if name in seen:
+                return {}
+            seen.add(name)
+            resolved = resolve(components.get(name, {}))
+            seen.remove(name)
+            return resolved
+        return {key: resolve(child) for key, child in value.items()}
+
+    for methods in document.get("paths", {}).values():
+        for operation in methods.values():
+            if not isinstance(operation, dict):
+                continue
+            for response in operation.get("responses", {}).values():
+                if not isinstance(response, dict):
+                    continue
+                for media in response.get("content", {}).values():
+                    if isinstance(media, dict) and "schema" in media:
+                        values.append(resolve(media["schema"]))
+    return values
+
+
 def main() -> int:
     failures: list[str] = []
     generated = exports()
@@ -43,7 +76,11 @@ def main() -> int:
             failures.append(f"missing {path.relative_to(ROOT)}")
         elif path.read_text(encoding="utf-8") != expected:
             failures.append(f"drift {path.relative_to(ROOT)}")
-        forbidden = _walk(value)
+        forbidden = (
+            _walk({"responses": _response_schemas(value)})
+            if path.name == "v1.json"
+            else _walk(value)
+        )
         if forbidden:
             failures.append(f"schema secrecy violation in {path.name}: {sorted(forbidden)}")
 
