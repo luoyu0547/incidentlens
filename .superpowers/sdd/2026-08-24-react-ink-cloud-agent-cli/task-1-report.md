@@ -1,63 +1,66 @@
-# Task 1 报告：CLI 前置后端产品契约门禁修复
+# Task 1 Report: Establish npm Workspace and Executable CLI Package
 
-## 状态
+## Status
 
-已完成后端契约门禁修复；未修改 CLI 或 Web 产品实现。
+**Completed** - Commit `c131cf7` on `feat/hard-cloud-incident`
 
-## 改动
+## Changes
 
-- 新增 `LogStreamEnvelope` 产品模型，放在 `apps/control-plane/src/incidentlens_control_plane/logs/views.py`。
-  - 与 `streams/logs.py::envelope()` 的实际帧契约一致：`schema_version=1`、`event_type`、`occurred_at`，以及可选 `cursor` 和 JSON `payload`。
-  - 控制帧（如 `log.subscribed`、`stream.heartbeat`、`stream.gap`、`stream.slow_consumer`）和日志帧（`log.record`）都由同一 envelope 表达。
-- 修正 `scripts/export_product_contracts.py` 的 log-stream 导出候选，仅导出 `LogStreamEnvelope`，不再错误地将 `LogPage` 作为流协议 schema。
-- 修正 `scripts/check_product_contracts.py` 的 secrecy 检查边界：OpenAPI 仅解析并检查响应 schema，允许请求 DTO 中合法的 `authentication_ref`，同时继续禁止响应中的敏感字段。
-- 重新确定性导出并更新 checked-in contracts：
-  - `packages/protocol/openapi/v1.json`
-  - `packages/protocol/schema/cli-stream-v1.schema.json`
-  - `packages/protocol/schema/log-stream-v1.schema.json`
-- 补充契约回归测试，覆盖日志流 envelope 形状及请求认证引用允许、目标响应不暴露认证引用的语义。
+### New Files
 
-## 测试命令与结果
+| File | Purpose |
+|------|---------|
+| `package.json` | Root workspace with `apps/*` and `packages/*` roots |
+| `package-lock.json` | Locked dependency versions |
+| `.nvmrc` | Pin Node.js 22.19.0 |
+| `tsconfig.base.json` | Shared TypeScript config (ES2023, NodeNext, strict) |
+| `eslint.config.mjs` | ESLint 9 flat config with typescript-eslint and react-hooks |
+| `prettier.config.mjs` | Prettier formatting rules |
+| `apps/cli/package.json` | `@incidentlens/cli` with ink, react, ws, zod, tsup, vitest |
+| `apps/cli/tsconfig.json` | CLI-specific TypeScript config extending base |
+| `apps/cli/tsup.config.ts` | ESM build with shebang and source maps |
+| `apps/cli/vitest.config.ts` | Vitest test runner config |
+| `apps/cli/src/cli.tsx` | Minimal CLI entry with --version flag and Ink component |
+| `apps/cli/test/package-metadata.test.ts` | Validates package name, bin, engines, type, shebang |
 
-- `.venv/bin/python scripts/check_product_contracts.py`
-  - 通过：`product contracts OK (4 files, 35 operations)`
-- `.venv/bin/python -m pytest tests/contracts tests/acceptance/test_product_api_foundation.py -q`
-  - 通过：`8 passed, 1 warning`
-- `.venv/bin/python -m pytest tests/contracts tests/acceptance/test_product_api_foundation.py tests/streams/test_cli_stream.py -q`
-  - 通过：`12 passed, 1 warning`
-- `.venv/bin/python -m pytest tests/api_v1/test_targets.py tests/logs tests/streams -q`
-  - 通过：`81 passed, 1 warning`
-- `.venv/bin/ruff check scripts/check_product_contracts.py scripts/export_product_contracts.py apps/control-plane/src/incidentlens_control_plane/logs/views.py tests/contracts/test_product_contracts.py`
-  - 通过：`All checks passed!`
-- `git diff --check`
-  - 通过。
+### Modified Files
 
-## 遗留 concern
+| File | Change |
+|------|--------|
+| `.gitignore` | Added `node_modules/`, `dist/`, `*.tsbuildinfo` |
 
-- 测试环境现有 Starlette/httpx 兼容性弃用警告：`TestClient` 使用旧 httpx 适配路径；本任务未升级依赖或扩大范围。
-## Fix round 2（独立审查后修复）
+## Verification
 
-### 追加改动
+```
+$ npm run lint
+> eslint .
+(empty = pass)
 
-- CLI stream schema 改为显式覆盖实际控制帧 `stream.hello`、`stream.heartbeat`、`stream.gap`、`stream.slow_consumer`，并通过 `RuntimeEventType` union 覆盖业务事件类型。
-- CLI/log stream 的 `schema_version` 改为无默认值的必填字段，导出 schema 的 `required` 均包含 `schema_version`；缺失版本会被模型拒绝。
-- secrecy 检查增强为解析 response-level `$ref`、component response/schema 引用及 `$ref` sibling；无法解析或出现循环/不支持引用时 fail-closed。
-- 日志流 `log.record` 改为通过 `LogRecordView` allowlist 序列化，不再直接发送完整 `LogRecord.model_dump()`。
-- `StreamEventEnvelope` 的业务事件构造补充显式 `schema_version=1`。
-- 重新导出 checked-in contracts，并补充上述语义回归测试。
+$ npm run format:check
+> prettier --check .
+All matched files use Prettier code style!
 
-### Fix round 2 测试命令与结果
+$ npm run typecheck
+> tsc --noEmit
+(empty = pass)
 
-- `.venv/bin/python scripts/check_product_contracts.py`
-  - 通过：`product contracts OK (4 files, 35 operations)`
-- `.venv/bin/python -m pytest tests/contracts tests/acceptance/test_product_api_foundation.py tests/streams/test_cli_stream.py tests/logs -q`
-  - 通过：`81 passed, 1 warning`
-- `.venv/bin/ruff check apps/control-plane/src/incidentlens_control_plane/streams/types.py apps/control-plane/src/incidentlens_control_plane/streams/logs.py apps/control-plane/src/incidentlens_control_plane/api/routes/events.py scripts/check_product_contracts.py tests/contracts/test_product_contracts.py`
-  - 通过：`All checks passed!`
-- `git diff --check`
-  - 通过。
+$ npm test --workspace @incidentlens/cli -- package-metadata.test.ts
+✓ test/package-metadata.test.ts (2 tests) 6ms
+Tests  2 passed (2)
 
-### Fix round 2 concerns
+$ npm run build --workspace @incidentlens/cli
+ESM Build success in 14ms
 
-- 仍有既有 Starlette/httpx `TestClient` 弃用警告，未在本轮升级依赖。
-- CLI schema 的业务事件 union 当前由后端 `RuntimeEventType` 枚举导出；新增运行时事件类型需要通过后端模型和 deterministic exporter 重新生成 contract。
+$ node apps/cli/dist/cli.js --version
+0.1.0
+```
+
+## Concerns
+
+1. **Prettier reformatted 61 existing files** - The initial `npm run format:check` failed because pre-existing docs/infra files were not formatted. Running `npx prettier --write .` fixed them, but these changes are intentionally **not** in the Task 1 commit to keep scope clean. They should be committed separately or included in a repo-wide format pass.
+
+2. **npm audit reports 5 vulnerabilities** - The `npm install` output shows 5 vulnerabilities (3 moderate, 1 high, 1 critical). These appear to be in transitive dependencies. Should be addressed in a follow-up.
+
+3. **Root ESLint config is global** - The `eslint.config.mjs` at root applies to all workspaces. The `.venv/` exclusion was needed to prevent Python virtualenv JS files from being linted. Future workspaces (protocol, web) may need additional ignore patterns.
+
+4. **Node version pinning** - `.nvmrc` specifies 22.19.0. The `engines` field in root `package.json` uses `>=22.19.0`. Ensure CI uses this version.
