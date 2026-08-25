@@ -129,6 +129,7 @@ class LogRecord(BaseModel):
     normal_signal: str | None = None
     correlation_key: str | None = None
     evidence_ref_id: str | None = None
+    stream_sequence: int = 0
     created_at: datetime
 
 

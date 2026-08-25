@@ -179,8 +179,12 @@ def create_app(
     application.include_router(changes_routes.router)
 
     from incidentlens_control_plane.api.ws.cli_events import router as cli_ws_router
+    from incidentlens_control_plane.api.routes.service_logs import (
+        router as service_logs_router,
+    )
 
     application.include_router(cli_ws_router)
+    application.include_router(service_logs_router)
 
     if settings.legacy_api_enabled:
         application.include_router(approvals_router)

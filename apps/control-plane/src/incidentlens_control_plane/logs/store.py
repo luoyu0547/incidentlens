@@ -55,8 +55,12 @@ _RECORD_COLUMNS = (
     "normal_signal",
     "correlation_key",
     "evidence_ref_id",
+    "stream_sequence",
     "created_at",
 )
+
+_LEGACY_RECORD_COLUMNS = _RECORD_COLUMNS[:18] + _RECORD_COLUMNS[19:]
+
 
 _SUBSCRIPTION_COLUMNS = (
     "subscription_id",
@@ -92,6 +96,8 @@ def _fts_query(text: str) -> str:
 
 
 def _record_from_row(row: tuple[object, ...]) -> LogRecord:
+    include_stream_sequence = len(row) == len(_RECORD_COLUMNS)
+    sequence = row[18] if include_stream_sequence else 0
     return LogRecord(
         log_id=row[0],
         subscription_id=row[1],
@@ -111,7 +117,8 @@ def _record_from_row(row: tuple[object, ...]) -> LogRecord:
         normal_signal=row[15],
         correlation_key=row[16],
         evidence_ref_id=row[17],
-        created_at=datetime.fromisoformat(row[18]),
+        stream_sequence=sequence,
+        created_at=datetime.fromisoformat(row[19 if include_stream_sequence else 18]),
     )
 
 
@@ -174,6 +181,7 @@ class LogStore:
                     normal_signal TEXT,
                     correlation_key TEXT,
                     evidence_ref_id TEXT,
+                    stream_sequence INTEGER NOT NULL UNIQUE,
                     created_at TEXT NOT NULL
                 );
 
@@ -184,6 +192,10 @@ class LogStore:
                     ON log_records(correlation_key);
                 CREATE INDEX IF NOT EXISTS idx_log_records_normal_signal
                     ON log_records(normal_signal);
+                CREATE INDEX IF NOT EXISTS idx_log_records_service_sequence
+                    ON log_records(service_name, stream_sequence);
+                CREATE INDEX IF NOT EXISTS idx_log_records_service_time
+                    ON log_records(service_name, observed_at);
 
                 CREATE TABLE IF NOT EXISTS log_subscriptions (
                     subscription_id TEXT PRIMARY KEY,
@@ -223,6 +235,53 @@ class LogStore:
             )
             conn.commit()
         self._ensure_subscription_columns()
+        self._ensure_stream_sequence()
+
+    def _ensure_stream_sequence(self) -> None:
+        """Add the product ``stream_sequence`` to an existing ``log_records``.
+
+        Fresh databases get the column from the CREATE TABLE statement; an
+        existing database needs an idempotent ALTER TABLE, a backfill from
+        ``rowid`` so historic rows keep their stable order, and the service
+        indexes used by the product log pages.
+        """
+        with self._connection_factory() as conn:
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(log_records)")
+            }
+            if "stream_sequence" not in columns:
+                conn.execute(
+                    "ALTER TABLE log_records ADD COLUMN stream_sequence INTEGER"
+                )
+                conn.execute(
+                    """
+                    UPDATE log_records
+                    SET stream_sequence = (
+                        SELECT COUNT(*) FROM log_records AS lr2
+                        WHERE lr2.rowid <= log_records.rowid
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_log_records_stream_sequence
+                        ON log_records(stream_sequence)
+                    """
+                )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_log_records_service_sequence
+                    ON log_records(service_name, stream_sequence)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_log_records_service_time
+                    ON log_records(service_name, observed_at)
+                """
+            )
+            conn.commit()
 
     def _ensure_subscription_columns(self) -> None:
         """Add the ``last_error_redacted`` column to an existing schema.
@@ -252,6 +311,9 @@ class LogStore:
         with self._connection_factory() as conn:
             inserted: list[LogRecord] = []
             for record in records:
+                next_sequence = conn.execute(
+                    "SELECT COALESCE(MAX(stream_sequence), 0) + 1 FROM log_records"
+                ).fetchone()[0]
                 cursor = conn.execute(
                     """
                     INSERT OR IGNORE INTO log_records (
@@ -259,8 +321,8 @@ class LogStore:
                         source_kind, scope, source_ref, cursor, dedupe_key,
                         observed_at, event_time, severity, message_redacted,
                         redaction_summary_json, normal_signal, correlation_key,
-                        evidence_ref_id, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        evidence_ref_id, stream_sequence, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record.log_id,
@@ -281,6 +343,7 @@ class LogStore:
                         record.normal_signal,
                         record.correlation_key,
                         record.evidence_ref_id,
+                        next_sequence,
                         record.created_at.isoformat(),
                     ),
                 )
@@ -306,7 +369,7 @@ class LogStore:
         with self._connection_factory() as conn:
             rows = conn.execute(
                 f"""
-                SELECT {", ".join(_RECORD_COLUMNS)}
+                SELECT {", ".join(_LEGACY_RECORD_COLUMNS)}
                 FROM log_records
                 WHERE dedupe_key IN ({placeholders})
                 """,
@@ -320,7 +383,7 @@ class LogStore:
         with self._connection_factory() as conn:
             row = conn.execute(
                 f"""
-                SELECT {", ".join(_RECORD_COLUMNS)}
+                SELECT {", ".join(_LEGACY_RECORD_COLUMNS)}
                 FROM log_records
                 WHERE log_id = ?
                 """,
@@ -349,7 +412,7 @@ class LogStore:
             if after_cursor is None:
                 rows = conn.execute(
                     f"""
-                    SELECT {", ".join(_RECORD_COLUMNS)}
+                    SELECT {", ".join(_LEGACY_RECORD_COLUMNS)}
                     FROM log_records
                     WHERE subscription_id = ?
                     ORDER BY rowid ASC
@@ -360,7 +423,7 @@ class LogStore:
             else:
                 rows = conn.execute(
                     f"""
-                    SELECT {", ".join(_RECORD_COLUMNS)}
+                    SELECT {", ".join(_LEGACY_RECORD_COLUMNS)}
                     FROM log_records
                     WHERE subscription_id = ?
                       AND rowid > COALESCE(
@@ -374,6 +437,85 @@ class LogStore:
                     (subscription_id, subscription_id, after_cursor, limit),
                 ).fetchall()
         return tuple(_record_from_row(row) for row in rows)
+
+    def latest_product_sequence(self) -> int:
+        """Return the latest durable product sequence, or zero when empty."""
+        with self._connection_factory() as conn:
+            value = conn.execute(
+                "SELECT COALESCE(MAX(stream_sequence), 0) FROM log_records"
+            ).fetchone()[0]
+        return int(value)
+
+    def list_product_page(
+        self,
+        *,
+        service_name: str,
+        before_sequence: int | None = None,
+        after_sequence: int | None = None,
+        snapshot_sequence: int | None = None,
+        limit: int = 200,
+        severity: str | None = None,
+        source_ref: str | None = None,
+        allowed_target_ids: frozenset[str] | None = None,
+    ) -> tuple[tuple[LogRecord, ...], bool]:
+        """Return a bounded page of records ordered by durable stream sequence.
+
+        Filters by ``service_name`` and optional ``severity``.  ``before_sequence``
+        and ``after_sequence`` bound the page by ``stream_sequence`` (mutually
+        exclusive).  ``allowed_target_ids`` restricts to a principal's targets;
+        rows for any other target are excluded.  Returns ``(records, has_more)``
+        using ``limit + 1`` probe.
+        """
+        if before_sequence is not None and after_sequence is not None:
+            raise ValueError("before and after sequences are mutually exclusive")
+        if not (1 <= limit <= 500):
+            raise ValueError("limit must be between 1 and 500")
+
+        clauses = ["service_name = ?"]
+        params: list[object] = [service_name]
+        if severity is not None:
+            clauses.append("severity = ?")
+            params.append(severity)
+        if snapshot_sequence is not None:
+            clauses.append("stream_sequence <= ?")
+            params.append(snapshot_sequence)
+        if source_ref is not None:
+            clauses.append("source_ref = ?")
+            params.append(source_ref)
+        if allowed_target_ids is not None:
+            if not allowed_target_ids:
+                clauses.append("1 = 0")
+            else:
+                placeholders = ", ".join("?" for _ in allowed_target_ids)
+                clauses.append(f"target_id IN ({placeholders})")
+                params.extend(sorted(allowed_target_ids))
+        if before_sequence is not None:
+            clauses.append("stream_sequence <= ?")
+            params.append(before_sequence)
+            order = "DESC"
+        else:
+            clauses.append("stream_sequence > ?")
+            params.append(after_sequence or 0)
+            order = "ASC"
+
+        where = " AND ".join(clauses)
+        with self._connection_factory() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {", ".join(_RECORD_COLUMNS)}
+                FROM log_records
+                WHERE {where}
+                ORDER BY stream_sequence {order}
+                LIMIT ?
+                """,
+                (*params, limit + 1),
+            ).fetchall()
+        has_more = len(rows) > limit
+        selected = rows[:limit]
+        if order == "DESC":
+            selected = list(reversed(selected))
+        records = tuple(_record_from_row(row) for row in selected)
+        return records, has_more
 
     def search(self, filters: LogSearchFilters, limit: int = 100) -> tuple[LogRecord, ...]:
         """Search log records, optionally restricting by filters and an FTS text match."""
@@ -426,7 +568,7 @@ class LogStore:
         with self._connection_factory() as conn:
             cursor = conn.execute(
                 f"""
-                SELECT {", ".join(_RECORD_COLUMNS)}
+                SELECT {", ".join(_LEGACY_RECORD_COLUMNS)}
                 FROM log_records
                 {where_sql}
                 ORDER BY rowid ASC
