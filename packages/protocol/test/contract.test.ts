@@ -6,7 +6,6 @@ import {
 } from '../src/stream.js';
 import type {
   CliStreamEnvelopeBase,
-  ApiVersionView,
   ClientCompatibility,
 } from '../src/stream.js';
 
@@ -78,6 +77,83 @@ describe('OpenAPI contract readiness', () => {
     // schemas.gen.ts should have at least the validation objects
     const keys = Object.keys(schemas);
     expect(keys.length).toBeGreaterThan(0);
+  });
+
+  it('runtimeEventTypes matches generated RuntimeEventType set', async () => {
+    // Read the generated RuntimeEventType from source to extract its string
+    // literals. RuntimeEventType is a union of string literals that only exists
+    // at the type level, so we extract them from the source text.
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const typesPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      '../src/generated/types.gen.ts',
+    );
+    const source = readFileSync(typesPath, 'utf-8');
+
+    const match = source.match(
+      /export type RuntimeEventType =\s*([\s\S]*?);/,
+    );
+    expect(match, 'RuntimeEventType definition not found in types.gen.ts').not.toBeNull();
+
+    const generatedValues = new Set(
+      match![1]
+        .split('|')
+        .map((s) => s.trim().replace(/^'|'$/g, ''))
+        .filter(Boolean),
+    );
+
+    // Import the runtimeEventTypes used by the Zod schema. The array is not
+    // exported, but KnownCliStreamEnvelope uses it via typeof, so we can
+    // extract it from the parsed envelope's event_type union.
+    // Instead, import the CliStreamEnvelopeSchema and infer the event_type union.
+    const stream = await import('../src/stream.js');
+    // CliStreamEnvelopeSchema's event_type is a union of control + runtime types.
+    // We reconstruct the runtime set by subtracting streamControlTypes.
+    const controlTypes = new Set([
+      'stream.hello',
+      'stream.heartbeat',
+      'stream.gap',
+      'stream.slow_consumer',
+    ]);
+
+    // Use the Zod schema to validate a known runtime event to confirm the
+    // schema accepts all generated types, and reject extras.
+    // Direct comparison: parse the stream.ts source to extract runtimeEventTypes.
+    const streamPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      '../src/stream.ts',
+    );
+    const streamSource = readFileSync(streamPath, 'utf-8');
+    const arrayMatch = streamSource.match(
+      /const runtimeEventTypes = \[([\s\S]*?)\] as const;/,
+    );
+    expect(arrayMatch, 'runtimeEventTypes not found in stream.ts').not.toBeNull();
+
+    const handWrittenValues = new Set(
+      arrayMatch![1]
+        .split('\n')
+        .map((s) => s.trim().replace(/^'|',?$/g, '').trim())
+        .filter(Boolean),
+    );
+
+    // Verify the sets are identical — no drift between hand-written list and generated type
+    const missingInHandWritten = [...generatedValues].filter(
+      (v) => !handWrittenValues.has(v),
+    );
+    const extraInHandWritten = [...handWrittenValues].filter(
+      (v) => !generatedValues.has(v),
+    );
+
+    expect(
+      missingInHandWritten,
+      `RuntimeEventType members missing from runtimeEventTypes: ${missingInHandWritten.join(', ')}`,
+    ).toEqual([]);
+    expect(
+      extraInHandWritten,
+      `runtimeEventTypes has extra members not in RuntimeEventType: ${extraInHandWritten.join(', ')}`,
+    ).toEqual([]);
   });
 });
 
@@ -322,23 +398,23 @@ describe('assertCompatible', () => {
     max_protocol_version: '1.9.0',
   };
 
-  it('passes when server version is within range', () => {
-    const server: ApiVersionView = { protocol_version: '1.5.0' };
+  it('passes when server minimum is within range', () => {
+    const server = { minimum_cli_protocol_version: '1.5.0' } as const;
     expect(() => assertCompatible(server, client)).not.toThrow();
   });
 
   it('passes at lower boundary', () => {
-    const server: ApiVersionView = { protocol_version: '1.0.0' };
+    const server = { minimum_cli_protocol_version: '1.0.0' } as const;
     expect(() => assertCompatible(server, client)).not.toThrow();
   });
 
   it('passes at upper boundary', () => {
-    const server: ApiVersionView = { protocol_version: '1.9.0' };
+    const server = { minimum_cli_protocol_version: '1.9.0' } as const;
     expect(() => assertCompatible(server, client)).not.toThrow();
   });
 
-  it('throws VERSION_TOO_OLD when server is below min', () => {
-    const server: ApiVersionView = { protocol_version: '0.9.0' };
+  it('throws VERSION_TOO_OLD when server minimum is below client min', () => {
+    const server = { minimum_cli_protocol_version: '0.9.0' } as const;
     try {
       assertCompatible(server, client);
       expect.fail('should have thrown');
@@ -348,8 +424,8 @@ describe('assertCompatible', () => {
     }
   });
 
-  it('throws VERSION_TOO_NEW when server is above max', () => {
-    const server: ApiVersionView = { protocol_version: '2.0.0' };
+  it('throws VERSION_TOO_NEW when server minimum exceeds client max', () => {
+    const server = { minimum_cli_protocol_version: '2.0.0' } as const;
     try {
       assertCompatible(server, client);
       expect.fail('should have thrown');
@@ -359,8 +435,8 @@ describe('assertCompatible', () => {
     }
   });
 
-  it('throws MISSING_PROTOCOL_VERSION when server version is absent', () => {
-    const server: ApiVersionView = {};
+  it('throws MISSING_PROTOCOL_VERSION when minimum_cli_protocol_version is absent', () => {
+    const server = {} as Record<string, unknown>;
     try {
       assertCompatible(server, client);
       expect.fail('should have thrown');

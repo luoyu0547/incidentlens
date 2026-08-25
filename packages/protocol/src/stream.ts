@@ -180,11 +180,9 @@ export type ParsedStreamEvent =
 
 // ---- API version compatibility types -------------------------------------
 
-export interface ApiVersionView {
-  protocol_version?: string;
-  min_compatible_version?: string;
-  [key: string]: unknown;
-}
+import type { ApiVersionView as GeneratedApiVersionView } from './generated/types.gen.js';
+
+export type { GeneratedApiVersionView as ApiVersionView };
 
 export interface ClientCompatibility {
   min_protocol_version: string;
@@ -287,28 +285,28 @@ export class ProtocolError extends Error {
  * supported range.  Throws `ProtocolError` on incompatibility.
  */
 export function assertCompatible(
-  server: ApiVersionView,
+  server: GeneratedApiVersionView,
   client: ClientCompatibility,
 ): void {
-  const serverVersion = server.protocol_version;
-  if (!serverVersion) {
+  const minCliVersion = server.minimum_cli_protocol_version;
+  if (!minCliVersion) {
     throw new ProtocolError(
       'MISSING_PROTOCOL_VERSION',
-      'Server version response does not include protocol_version',
+      'Server version response does not include minimum_cli_protocol_version',
     );
   }
 
-  if (serverVersion < client.min_protocol_version) {
+  if (minCliVersion < client.min_protocol_version) {
     throw new ProtocolError(
       'VERSION_TOO_OLD',
-      `Server protocol_version ${serverVersion} is below client minimum ${client.min_protocol_version}`,
+      `Server minimum_cli_protocol_version ${minCliVersion} is below client minimum ${client.min_protocol_version}`,
     );
   }
 
-  if (serverVersion > client.max_protocol_version) {
+  if (minCliVersion > client.max_protocol_version) {
     throw new ProtocolError(
       'VERSION_TOO_NEW',
-      `Server protocol_version ${serverVersion} exceeds client maximum ${client.max_protocol_version}`,
+      `Server minimum_cli_protocol_version ${minCliVersion} exceeds client maximum ${client.max_protocol_version}`,
     );
   }
 }
