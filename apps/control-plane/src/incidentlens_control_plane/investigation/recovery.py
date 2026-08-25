@@ -102,6 +102,15 @@ _RECOVERABLE_DOWNSTREAM_STATUSES: frozenset[ApprovalDownstreamStatus] = frozense
 _CONSUMED_RECOVERY_STATUSES: frozenset[ApprovalDownstreamStatus] = frozenset(
     {ApprovalDownstreamStatus.PROCESSING}
 )
+_DECIDED_POST_CLASSIFICATION_RECOVERY_STATUSES: frozenset[
+    ApprovalDownstreamStatus
+] = frozenset(
+    {
+        ApprovalDownstreamStatus.PENDING,
+        ApprovalDownstreamStatus.PROCESSING,
+        ApprovalDownstreamStatus.NOT_APPLICABLE,
+    }
+)
 
 
 def _is_terminal_run(status: AgentRunStatus) -> bool:
@@ -178,6 +187,7 @@ class RecoveryService:
         reconciled_receipts = await self._reconcile_child_report_receipts()
         reconciled_ids = await self._reconcile_decided_approvals()
         scanned = self._classify_in_flight_runs()
+        reconciled_ids.update(self._reconcile_post_classification_decided_approvals())
         reconciled_ids.update(self._reconcile_consumed_processing_approvals())
         scanned = replace(
             scanned,
@@ -269,12 +279,19 @@ class RecoveryService:
             for tool_call in self._store.list_waiting_approval_tool_calls()
             if tool_call.approval_id is not None
         }
+        terminal_tool_call_approval_ids = {
+            tool_call.approval_id
+            for tool_call in self._store.list_tool_calls()
+            if tool_call.approval_id is not None and tool_call.status in TOOL_CALL_TERMINAL
+        }
         pending_proposal_hashes = {
             proposal.approval_intent_sha256
             for proposal in self._store.list_pending_proposals()
         }
         for approval in self._approvals.list():
             if approval.status not in _DECIDED_APPROVAL_STATUSES:
+                continue
+            if approval.approval_id in terminal_tool_call_approval_ids:
                 continue
             if (
                 approval.downstream_status not in _RECOVERABLE_DOWNSTREAM_STATUSES
@@ -327,7 +344,9 @@ class RecoveryService:
         terminal_tool_calls_by_approval = {
             tool_call.approval_id: tool_call
             for tool_call in self._store.list_tool_calls()
-            if tool_call.approval_id is not None and tool_call.status in TOOL_CALL_TERMINAL
+            if tool_call.approval_id is not None
+            and tool_call.status in TOOL_CALL_TERMINAL
+            and tool_call.status is not ToolCallStatus.CANCELLED
         }
         proposals_by_id = {
             proposal.proposal_id: proposal for proposal in self._store.list_proposals()
@@ -337,7 +356,7 @@ class RecoveryService:
                 continue
             if approval.downstream_status not in _CONSUMED_RECOVERY_STATUSES:
                 continue
-            if self._terminalize_consumed_processing_approval(
+            if self._terminalize_linked_approval_from_local_state(
                 approval,
                 terminal_tool_call=terminal_tool_calls_by_approval.get(
                     approval.approval_id
@@ -351,7 +370,39 @@ class RecoveryService:
                 reconciled.add(approval.approval_id)
         return reconciled
 
-    def _terminalize_consumed_processing_approval(
+    def _reconcile_post_classification_decided_approvals(self) -> set[str]:
+        """Terminalize decided approvals from durable local state after classification.
+
+        This catches the crash window where a decision exists, a dangerous tool
+        was already RUNNING, and pre-classification reconciliation found no
+        WAITING_APPROVAL linkage. Once classification persists the tool as a
+        terminal local state (for example ``UNCERTAIN``), this pass updates the
+        approval without any provider invocation or second consume attempt.
+        """
+        reconciled: set[str] = set()
+        terminal_tool_calls_by_approval = {
+            tool_call.approval_id: tool_call
+            for tool_call in self._store.list_tool_calls()
+            if tool_call.approval_id is not None
+            and tool_call.status in TOOL_CALL_TERMINAL
+            and tool_call.status is not ToolCallStatus.CANCELLED
+        }
+        for approval in self._approvals.list():
+            if approval.status not in _DECIDED_APPROVAL_STATUSES:
+                continue
+            if approval.downstream_status not in _DECIDED_POST_CLASSIFICATION_RECOVERY_STATUSES:
+                continue
+            if self._terminalize_linked_approval_from_local_state(
+                approval,
+                terminal_tool_call=terminal_tool_calls_by_approval.get(
+                    approval.approval_id
+                ),
+                proposal=None,
+            ):
+                reconciled.add(approval.approval_id)
+        return reconciled
+
+    def _terminalize_linked_approval_from_local_state(
         self,
         approval: ApprovalRecord,
         *,

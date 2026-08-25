@@ -517,7 +517,9 @@ class ApprovalStore:
     ) -> tuple[tuple[ApprovalRecord, ...], bool]:
         where: list[str] = []
         params: list[object] = []
-        resolved_target_sql = "COALESCE(tfb.target_id, a.target_id)"
+        resolved_target_sql = (
+            "CASE WHEN a.project_id IS NOT NULL THEN tfb.target_id ELSE a.target_id END"
+        )
         if status is not None:
             where.append("a.status = ?")
             params.append(status.value)
@@ -555,7 +557,7 @@ class ApprovalStore:
                 )
             else:
                 where_sql = [
-                    clause.replace("COALESCE(tfb.target_id, a.target_id)", "a.target_id")
+                    clause.replace(resolved_target_sql, "a.target_id")
                     for clause in where_sql
                 ]
             if where_sql:

@@ -156,9 +156,8 @@ def _decode_cursor(value: str | None) -> tuple[datetime, str] | None:
         body = json.loads(payload)
         created_at = datetime.fromisoformat(str(body["created_at"]))
         if created_at.tzinfo is None or created_at.utcoffset() is None:
-            created_at = created_at.replace(tzinfo=UTC)
-        else:
-            created_at = created_at.astimezone(UTC)
+            raise ValueError("approval cursor timestamp must be timezone-aware")
+        created_at = created_at.astimezone(UTC)
         approval_id = str(body["approval_id"])
     except Exception as exc:  # noqa: BLE001
         raise ApiProblem(
@@ -265,8 +264,7 @@ def _resolved_target_id(request: Request, record: ApprovalRecord) -> str | None:
             record.project_id,
             target_id,
         )
-        if binding is not None:
-            return binding.target_id
+        return binding.target_id if binding is not None else None
     return target_id
 
 
@@ -406,19 +404,47 @@ async def list_approvals(
     if target_id is not None:
         authorize_target(principal, target_id)
     cursor = _decode_cursor(after)
-    items, has_more = _service(request).list_page(
-        status=status,
-        target_id=target_id,
-        session_id=session_id,
-        investigation_id=investigation_id,
-        allowed_target_ids=principal.allowed_target_ids,
-        limit=limit,
-        after_created_at=cursor[0] if cursor else None,
-        after_approval_id=cursor[1] if cursor else None,
-    )
-    next_cursor = _encode_cursor(items[-1]) if items and has_more else None
+    visible: list[ApprovalRecord] = []
+    after_created_at = cursor[0] if cursor else None
+    after_approval_id = cursor[1] if cursor else None
+    last_visible: ApprovalRecord | None = None
+    has_more = False
+
+    while len(visible) < limit:
+        items, batch_has_more = _service(request).list_page(
+            status=status,
+            target_id=target_id,
+            session_id=session_id,
+            investigation_id=investigation_id,
+            allowed_target_ids=principal.allowed_target_ids,
+            limit=limit,
+            after_created_at=after_created_at,
+            after_approval_id=after_approval_id,
+        )
+        if not items:
+            has_more = False
+            break
+        authorized_items = [
+            item for item in items if _authorized(request, principal, item)
+        ]
+        remaining = limit - len(visible)
+        visible.extend(authorized_items[:remaining])
+        if visible:
+            last_visible = visible[-1]
+        after_created_at = items[-1].created_at
+        after_approval_id = items[-1].approval_id
+        if len(visible) >= limit:
+            has_more = batch_has_more or (
+                last_visible is not None and last_visible.approval_id != items[-1].approval_id
+            )
+            break
+        if not batch_has_more:
+            has_more = False
+            break
+
+    next_cursor = _encode_cursor(last_visible) if last_visible is not None and has_more else None
     return ApprovalPage(
-        items=tuple(_detail_view(request, item) for item in items),
+        items=tuple(_detail_view(request, item) for item in visible),
         next_cursor=next_cursor,
         has_more=has_more,
     )

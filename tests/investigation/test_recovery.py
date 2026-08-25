@@ -13,7 +13,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from incidentlens_control_plane.approvals.types import ApprovalDownstreamStatus
+from incidentlens_control_plane.approvals.types import (
+    ApprovalDownstreamStatus,
+    ApprovalStatus,
+)
 from incidentlens_control_plane.evidence.types import EvidenceKind
 from incidentlens_control_plane.investigation.fake_provider import (
     FakeProvider,
@@ -25,6 +28,7 @@ from incidentlens_control_plane.investigation.orchestrator import AgentOrchestra
 from incidentlens_control_plane.investigation.provider import StopSignal
 from incidentlens_control_plane.investigation.recovery import RecoveryService
 from incidentlens_control_plane.investigation.service import (
+    ApprovalDecisionOutcome,
     InvestigationService,
     NotAcceptingInvestigations,
     TooManyActiveInvestigations,
@@ -512,8 +516,9 @@ async def test_startup_terminalizes_consumed_processing_approval_from_tool_state
 
 
 @pytest.mark.asyncio
-async def test_startup_terminalizes_consumed_processing_approval_after_running_tool_becomes_uncertain(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+async def test_startup_terminalizes_consumed_processing_approval_after_running_tool_becomes_uncertain(  # noqa: E501
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One startup classifies RUNNING->UNCERTAIN, then finalizes approval state."""
     harness = build_harness(tmp_path)
@@ -567,6 +572,69 @@ async def test_startup_terminalizes_consumed_processing_approval_after_running_t
     approval_record = harness.approvals.get(approval.approval_id)
     assert approval_record is not None
     assert approval_record.status.value == "consumed"
+    assert approval_record.downstream_status is ApprovalDownstreamStatus.FAILED
+    assert approval_record.downstream_error_code == "tool_call_uncertain"
+
+
+@pytest.mark.asyncio
+async def test_startup_terminalizes_decided_running_approval_after_tool_becomes_uncertain(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A decided-but-unconsumed running dangerous tool is finalized locally."""
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(harness)
+    _make_run(harness)
+    approval = await harness.approvals.request(
+        {"kind": "shell", "target_id": TARGET_ID},
+        target_id=TARGET_ID,
+        service=SERVICE,
+        investigation_id="inv-1",
+        agent_run_id="run-1",
+        tool_call_id="call-1",
+    )
+    await harness.approvals.approve(approval.approval_id)
+    _make_tool_call(
+        harness,
+        tool_call_id="call-1",
+        tool_name="shell_exec",
+        status=ToolCallStatus.PLANNED,
+    )
+    harness.investigations.transition_tool_call_status(
+        "call-1",
+        ToolCallStatus.RUNNING,
+        now=NOW,
+        approval_id=approval.approval_id,
+    )
+
+    _, service, recovery = build_recovery(harness, registry)
+    calls: list[str] = []
+
+    async def _none(*args, **kwargs):
+        calls.append(kwargs.get("approval_id", args[0] if args else ""))
+        return ApprovalDecisionOutcome(
+            approval_id=approval.approval_id,
+            matched="none",
+            tool_call_id=None,
+            run_id="run-1",
+            action="none",
+            applied=False,
+            consumed=False,
+        )
+
+    monkeypatch.setattr(service, "handle_approval_decision", _none)
+
+    summary = await recovery.startup()
+
+    assert calls == [approval.approval_id]
+    assert summary.dangerous_parked == 1
+    assert summary.reconciled_approvals == 1
+    assert harness.factory.transports == []
+    tool_call = harness.investigations.get_tool_call("call-1")
+    assert tool_call.status is ToolCallStatus.UNCERTAIN
+    approval_record = harness.approvals.get(approval.approval_id)
+    assert approval_record is not None
+    assert approval_record.status is ApprovalStatus.APPROVED
     assert approval_record.downstream_status is ApprovalDownstreamStatus.FAILED
     assert approval_record.downstream_error_code == "tool_call_uncertain"
 

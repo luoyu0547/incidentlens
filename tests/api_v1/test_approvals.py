@@ -302,6 +302,33 @@ def test_list_get_and_decide_resolve_facade_target_authorization(client: TestCli
     assert decide_hidden.json()["error"]["code"] == "resource_not_found"
 
 
+def test_missing_facade_binding_fails_closed_for_list_get_and_decision(
+    client: TestClient,
+) -> None:
+    orphan = _seed_approval(
+        client,
+        approval_id_target="default",
+        project_id="proj-orphan",
+    )
+    visible = _seed_approval(client, approval_id_target="tgt-a")
+
+    list_response = client.get(ROUTE, headers=_auth(OPERATOR_A_TOKEN))
+    assert list_response.status_code == 200, list_response.text
+    assert [item["approval_id"] for item in list_response.json()["items"]] == [visible]
+
+    get_response = client.get(f"{ROUTE}/{orphan}", headers=_auth(OPERATOR_A_TOKEN))
+    assert get_response.status_code == 404
+    assert get_response.json()["error"]["code"] == "resource_not_found"
+
+    decide_response = client.post(
+        f"{ROUTE}/{orphan}/approve",
+        headers=_idem(OPERATOR_A_TOKEN, "approve-orphan"),
+        json={"reason": "Approved."},
+    )
+    assert decide_response.status_code == 404
+    assert decide_response.json()["error"]["code"] == "resource_not_found"
+
+
 def test_get_and_decide_hide_unauthorized_target(client: TestClient) -> None:
     approval_id = _seed_approval(client, approval_id_target="tgt-a")
 
@@ -372,9 +399,9 @@ def test_approve_is_idempotent_and_persists_actor_reason(client: TestClient) -> 
     assert replay.headers.get("Idempotency-Replayed") == "true"
 
 
-def test_list_accepts_timezone_naive_cursor_created_at(client: TestClient) -> None:
+def test_list_rejects_timezone_naive_cursor_created_at(client: TestClient) -> None:
     first = _seed_approval(client, approval_id_target="tgt-a")
-    second = _seed_approval(client, approval_id_target="tgt-a")
+    _seed_approval(client, approval_id_target="tgt-a")
 
     first_page = client.get(
         ROUTE,
@@ -398,9 +425,8 @@ def test_list_accepts_timezone_naive_cursor_created_at(client: TestClient) -> No
         headers=_auth(OPERATOR_A_TOKEN),
     )
 
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["items"][0]["approval_id"] == second
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "cursor_invalid"
 
 
 def test_contradictory_decision_is_conflict(client: TestClient) -> None:
@@ -468,6 +494,21 @@ def test_shell_gateway_created_approval_preserves_linkage_for_v1_decision(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime = client.app.state.runtime
+    now = datetime.now(UTC)
+    runtime.target_store.create(
+        TargetBinding(
+            target_id="tgt-a",
+            project_id="proj-shell",
+            registry_target_id="tgt-a",
+            name="Shell Target",
+            authentication_ref="",
+            host_key_policy="strict",
+            pinned_host_key_sha256=None,
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+    )
     request = ShellRequest(
         operation_id="call-1",
         incident_id="inc-1",
