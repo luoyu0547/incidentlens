@@ -6,21 +6,30 @@ from datetime import datetime
 from typing import Literal
 
 from incidentlens_control_plane.api.models import JsonValue
-from pydantic import BaseModel, ConfigDict
+from incidentlens_control_plane.events.types import RuntimeEventType
+from pydantic import BaseModel, ConfigDict, Field
+
+CliControlEventType = Literal[
+    "stream.hello",
+    "stream.heartbeat",
+    "stream.gap",
+    "stream.slow_consumer",
+]
+CliEventType = CliControlEventType | RuntimeEventType
 
 
 class StreamEventEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
-    event_id: str
-    sequence: int
-    event_type: str
+    schema_version: Literal[1]
+    event_id: str | None = None
+    sequence: int | None = Field(default=None, ge=0)
+    event_type: CliEventType
     session_id: str | None = None
     target_id: str | None = None
     investigation_id: str | None = None
     occurred_at: datetime
-    payload: dict[str, JsonValue]
+    payload: dict[str, JsonValue] | None = None
 
 
 class EventPage(BaseModel):

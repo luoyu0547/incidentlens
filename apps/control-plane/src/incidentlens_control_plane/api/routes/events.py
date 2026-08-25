@@ -85,6 +85,7 @@ async def list_product_events(
 def _to_envelope(event) -> StreamEventEnvelope:
     payload = event.payload
     return StreamEventEnvelope(
+        schema_version=1,
         event_id=event.event_id,
         sequence=event.sequence,
         event_type=event.event_type.value,

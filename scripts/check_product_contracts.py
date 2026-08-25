@@ -35,8 +35,10 @@ def _walk(value: Any) -> set[str]:
 
 
 def _response_schemas(document: dict[str, Any]) -> list[Any]:
-    """Return response schemas, resolving local component references."""
-    components = document.get("components", {}).get("schemas", {})
+    """Return response schemas, resolving local refs and preserving siblings."""
+    components = document.get("components", {})
+    schemas = components.get("schemas", {})
+    responses = components.get("responses", {})
     values: list[Any] = []
     seen: set[str] = set()
 
@@ -44,15 +46,27 @@ def _response_schemas(document: dict[str, Any]) -> list[Any]:
         if not isinstance(value, dict):
             return value
         ref = value.get("$ref")
-        if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+        if not isinstance(ref, str):
+            return {key: resolve(child) for key, child in value.items()}
+        if ref.startswith("#/components/schemas/"):
             name = ref.rsplit("/", 1)[-1]
-            if name in seen:
-                return {}
-            seen.add(name)
-            resolved = resolve(components.get(name, {}))
-            seen.remove(name)
-            return resolved
-        return {key: resolve(child) for key, child in value.items()}
+            target = schemas.get(name)
+        elif ref.startswith("#/components/responses/"):
+            name = ref.rsplit("/", 1)[-1]
+            target = responses.get(name)
+        else:
+            raise ValueError(f"unsupported response reference: {ref}")
+        if not isinstance(target, dict):
+            raise ValueError(f"unresolved response reference: {ref}")
+        if ref in seen:
+            raise ValueError(f"cyclic response reference: {ref}")
+        seen.add(ref)
+        resolved = resolve(target)
+        seen.remove(ref)
+        siblings = {key: resolve(child) for key, child in value.items() if key != "$ref"}
+        if isinstance(resolved, dict):
+            return {**resolved, **siblings}
+        return siblings
 
     for methods in document.get("paths", {}).values():
         for operation in methods.values():
@@ -60,8 +74,9 @@ def _response_schemas(document: dict[str, Any]) -> list[Any]:
                 continue
             for response in operation.get("responses", {}).values():
                 if not isinstance(response, dict):
-                    continue
-                for media in response.get("content", {}).values():
+                    raise ValueError("invalid response object")
+                resolved_response = resolve(response)
+                for media in resolved_response.get("content", {}).values():
                     if isinstance(media, dict) and "schema" in media:
                         values.append(resolve(media["schema"]))
     return values

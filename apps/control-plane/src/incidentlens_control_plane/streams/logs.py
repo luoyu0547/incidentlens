@@ -9,6 +9,7 @@ from typing import Any
 
 from incidentlens_control_plane.logs.cursors import decode_log_cursor, encode_log_cursor
 from incidentlens_control_plane.logs.types import LogRecord
+from incidentlens_control_plane.logs.views import LogRecordView
 
 PAGE_SIZE = 500
 MAX_UNACKED = 500
@@ -29,6 +30,17 @@ def envelope(
     if payload is not None:
         frame["payload"] = payload
     return frame
+
+
+def _record_payload(record: LogRecord) -> dict[str, Any]:
+    return LogRecordView(
+        log_id=record.log_id,
+        cursor=record.cursor,
+        occurred_at=record.observed_at,
+        severity=record.severity,
+        message=record.message_redacted,
+        fields={},
+    ).model_dump(mode="json")
 
 
 class CursorLogStream:
@@ -94,7 +106,7 @@ class CursorLogStream:
                 await send(
                     envelope(
                         "log.record",
-                        record.model_dump(mode="json"),
+                        _record_payload(record),
                         cursor=encode_log_cursor(record.stream_sequence),
                     )
                 )
@@ -184,7 +196,7 @@ class CursorLogStream:
                 await send(
                     envelope(
                         "log.record",
-                        record.model_dump(mode="json"),
+                        _record_payload(record),
                         cursor=encode_log_cursor(record.stream_sequence),
                     )
                 )

@@ -3122,12 +3122,32 @@
         "additionalProperties": false,
         "properties": {
           "event_id": {
-            "title": "Event Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
           },
           "event_type": {
-            "title": "Event Type",
-            "type": "string"
+            "anyOf": [
+              {
+                "enum": [
+                  "stream.hello",
+                  "stream.heartbeat",
+                  "stream.gap",
+                  "stream.slow_consumer"
+                ],
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/RuntimeEventType"
+              }
+            ],
+            "title": "Event Type"
           },
           "investigation_id": {
             "anyOf": [
@@ -3146,21 +3166,35 @@
             "type": "string"
           },
           "payload": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/JsonValue"
-            },
-            "title": "Payload",
-            "type": "object"
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payload"
           },
           "schema_version": {
             "const": 1,
-            "default": 1,
             "title": "Schema Version",
             "type": "integer"
           },
           "sequence": {
-            "title": "Sequence",
-            "type": "integer"
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sequence"
           },
           "session_id": {
             "anyOf": [
@@ -3186,11 +3220,9 @@
           }
         },
         "required": [
-          "event_id",
-          "sequence",
+          "schema_version",
           "event_type",
-          "occurred_at",
-          "payload"
+          "occurred_at"
         ],
         "title": "StreamEventEnvelope",
         "type": "object"

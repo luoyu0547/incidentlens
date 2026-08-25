@@ -37,7 +37,7 @@ class LogStreamEnvelope(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1]
     event_type: str
     occurred_at: datetime
     cursor: str | None = None
