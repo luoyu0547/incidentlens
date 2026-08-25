@@ -270,13 +270,13 @@ def test_overview_projection_derives_counts_statuses_and_recent_resolutions(
     healthy_target = _register_target(
         runtime, project_id="payments", target_id="dev-a", service_name="payment-api"
     )
-    degraded_target = _register_target(
+    _register_target(
         runtime, project_id="orders", target_id="dev-b", service_name="orders-api"
     )
     unreachable_target = _register_target(
         runtime, project_id="billing", target_id="dev-c", service_name="billing-api"
     )
-    unknown_target = _register_target(
+    _register_target(
         runtime, project_id="auth", target_id="dev-d", service_name="auth-api"
     )
 
@@ -334,9 +334,9 @@ def test_overview_projection_derives_counts_statuses_and_recent_resolutions(
     _seed_investigation(
         runtime,
         investigation_id="inv-failed-1",
-        project_id="payments",
-        target_id="dev-a",
-        service_name="payment-api",
+        project_id="orders",
+        target_id="dev-b",
+        service_name="orders-api",
         status=InvestigationStatus.FAILED,
         created_at=NOW - timedelta(minutes=12),
     )

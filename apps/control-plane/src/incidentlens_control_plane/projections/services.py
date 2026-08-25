@@ -14,7 +14,7 @@ from incidentlens_control_plane.approvals.types import ApprovalRecord, ApprovalS
 from incidentlens_control_plane.investigation.state_machine import InvestigationStatus
 from incidentlens_control_plane.investigation.store import InvestigationStore
 from incidentlens_control_plane.investigation.types import Investigation
-from incidentlens_control_plane.logs.store import LogSearchFilters, LogStore
+from incidentlens_control_plane.logs.store import LogStore, _record_from_row
 from incidentlens_control_plane.logs.types import (
     LogRecord,
     LogSeverity,
@@ -38,6 +38,7 @@ from incidentlens_control_plane.targets.types import TargetBinding, TargetView
 _REACHABLE_RE = re.compile(r"\breachable=(True|False)\b")
 _NEGATIVE_INVESTIGATION_STATUSES = frozenset(
     {
+        InvestigationStatus.FAILED,
         InvestigationStatus.PAUSED_UNCERTAIN_STATE,
     }
 )
@@ -85,7 +86,7 @@ def _aggregate_status(statuses: tuple[HealthStatus, ...]) -> HealthStatus:
         return HealthStatus.UNREACHABLE
     if any(status is HealthStatus.DEGRADED for status in statuses):
         return HealthStatus.DEGRADED
-    if any(status is HealthStatus.HEALTHY for status in statuses):
+    if statuses and all(status is HealthStatus.HEALTHY for status in statuses):
         return HealthStatus.HEALTHY
     return HealthStatus.UNKNOWN
 
@@ -94,12 +95,14 @@ def _approval_matches_target(
     record: ApprovalRecord,
     *,
     facade_target_id: str,
-    registry_target_id: str,
     service_name: str,
+    investigation_ids: frozenset[str],
 ) -> bool:
     if record.service not in {None, service_name}:
         return False
-    return record.target_id in {facade_target_id, registry_target_id}
+    if record.target_id == facade_target_id:
+        return True
+    return record.investigation_id in investigation_ids
 
 
 def _parse_reachable(progress_summary: str | None) -> bool | None:
@@ -147,6 +150,80 @@ def _latest_target_tests(
     return latest
 
 
+def _recent_error_records(
+    store: LogStore,
+    *,
+    project_id: str,
+    target_id: str,
+    service_name: str,
+    observed_after: datetime,
+) -> tuple[LogRecord, ...]:
+    connection_factory: Callable[[], sqlite3.Connection] = store._connection_factory
+    with connection_factory() as conn:
+        rows = conn.execute(
+            """
+            SELECT log_id, subscription_id, project_id, target_id, service_name,
+                   source_kind, scope, source_ref, cursor, dedupe_key,
+                   observed_at, event_time, severity, message_redacted,
+                   redaction_summary_json, normal_signal, correlation_key,
+                   evidence_ref_id, created_at
+            FROM log_records
+            WHERE project_id = ?
+              AND target_id = ?
+              AND service_name = ?
+              AND observed_at >= ?
+              AND severity IN (?, ?)
+            ORDER BY observed_at DESC
+            """,
+            (
+                project_id,
+                target_id,
+                service_name,
+                observed_after.isoformat(),
+                LogSeverity.ERROR.value,
+                LogSeverity.CRITICAL.value,
+            ),
+        ).fetchall()
+    return tuple(_record_from_row(row) for row in rows)
+
+
+def _latest_log_observed_at(
+    store: LogStore,
+    *,
+    project_id: str,
+    target_id: str,
+    service_name: str,
+    source_kind: str | None = None,
+    scope: str | None = None,
+) -> datetime | None:
+    connection_factory: Callable[[], sqlite3.Connection] = store._connection_factory
+    clauses = [
+        "project_id = ?",
+        "target_id = ?",
+        "service_name = ?",
+    ]
+    params: list[object] = [project_id, target_id, service_name]
+    if source_kind is not None:
+        clauses.append("source_kind = ?")
+        params.append(source_kind)
+    if scope is not None:
+        clauses.append("scope = ?")
+        params.append(scope)
+    where_sql = " AND ".join(clauses)
+    with connection_factory() as conn:
+        row = conn.execute(
+            f"""
+            SELECT MAX(observed_at)
+            FROM log_records
+            WHERE {where_sql}
+            """,
+            tuple(params),
+        ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return datetime.fromisoformat(str(row[0])).astimezone(UTC)
+
+
 def _derive_service_status(
     *,
     generated_at: datetime,
@@ -158,7 +235,6 @@ def _derive_service_status(
 ) -> HealthStatus:
     target_cutoff = generated_at - windows.target_test_lookback
     subscription_cutoff = generated_at - windows.subscription_lookback
-    error_cutoff = generated_at - windows.error_lookback
 
     if target_test is not None and target_test.observed_at >= target_cutoff:
         if target_test.status in {"failed", "uncertain"} or target_test.reachable is False:
@@ -175,11 +251,7 @@ def _derive_service_status(
         for subscription in subscriptions
     ):
         return HealthStatus.DEGRADED
-    if any(
-        record.observed_at >= error_cutoff
-        and record.severity in {LogSeverity.ERROR, LogSeverity.CRITICAL}
-        for record in records
-    ):
+    if records:
         return HealthStatus.DEGRADED
 
     if (
@@ -242,13 +314,16 @@ def build_service_instances(
                 target_id=binding.registry_target_id,
                 service_name=registration.compose_service,
             )
-            records = logs.search(
-                LogSearchFilters(
-                    project_id=binding.project_id,
-                    target_id=binding.registry_target_id,
-                    service_name=registration.compose_service,
-                ),
-                limit=1000,
+            recent_errors = _recent_error_records(
+                logs,
+                project_id=binding.project_id,
+                target_id=binding.registry_target_id,
+                service_name=registration.compose_service,
+                observed_after=generated_at - windows.error_lookback,
+            )
+            investigation_ids = frozenset(
+                investigation.investigation_id
+                for investigation in matching_investigations
             )
             pending_approval_ids = tuple(
                 record.approval_id
@@ -256,8 +331,8 @@ def build_service_instances(
                 if _approval_matches_target(
                     record,
                     facade_target_id=target.target_id,
-                    registry_target_id=binding.registry_target_id,
                     service_name=registration.compose_service,
+                    investigation_ids=investigation_ids,
                 )
             )
             issue_ids = tuple(
@@ -271,8 +346,14 @@ def build_service_instances(
                 windows=windows,
                 target_test=latest_tests.get(target.target_id),
                 subscriptions=subscriptions,
-                records=records,
+                records=recent_errors,
                 investigations=matching_investigations,
+            )
+            latest_log_at = _latest_log_observed_at(
+                logs,
+                project_id=binding.project_id,
+                target_id=binding.registry_target_id,
+                service_name=registration.compose_service,
             )
             projections.append(
                 _ServiceInstanceProjection(
@@ -288,7 +369,7 @@ def build_service_instances(
                             latest_tests.get(target.target_id).observed_at
                             if target.target_id in latest_tests
                             else None,
-                            max((record.observed_at for record in records), default=None),
+                            latest_log_at,
                             max(
                                 (
                                     subscription.updated_at
@@ -311,7 +392,7 @@ def build_service_instances(
                     ),
                     pending_approval_ids=pending_approval_ids,
                     subscriptions=subscriptions,
-                    records=records,
+                    records=recent_errors,
                 )
             )
     projections.sort(key=lambda item: (item.registration.compose_service, item.target.target_id))
@@ -383,11 +464,19 @@ class ServiceProjectionService:
                 for subscription in instance.subscriptions
                 if subscription.source_kind is source_kind and subscription.scope is scope
             )
-            matching_records = tuple(
-                record
-                for instance in source_instances
-                for record in instance.records
-                if record.source_kind is source_kind and record.scope is scope
+            latest_source_at = max(
+                (
+                    _latest_log_observed_at(
+                        self._logs,
+                        project_id=instance.binding.project_id,
+                        target_id=instance.binding.registry_target_id,
+                        service_name=instance.registration.compose_service,
+                        source_kind=source_kind.value,
+                        scope=scope.value,
+                    )
+                    for instance in source_instances
+                ),
+                default=None,
             )
             log_sources.append(
                 LogSourceSummary(
@@ -403,14 +492,7 @@ class ServiceProjectionService:
                         for subscription in subscriptions
                         if subscription.status is LogSubscriptionStatus.ERROR
                     ),
-                    last_observed_at=_max_datetime(
-                        (
-                            max(
-                                (record.observed_at for record in matching_records),
-                                default=None,
-                            ),
-                        )
-                    ),
+                    last_observed_at=_max_datetime((latest_source_at,)),
                 )
             )
 
@@ -423,7 +505,7 @@ class ServiceProjectionService:
                 container_names=instance.registration.container_names,
                 issue_ids=instance.issue_ids,
                 investigation_ids=instance.investigation_ids,
-                pending_approval_ids=instance.pending_approval_ids,
+                pending_approval_count=len(instance.pending_approval_ids),
                 last_tested_at=instance.last_tested_at,
                 last_observed_at=instance.last_observed_at,
             )
@@ -448,12 +530,12 @@ class ServiceProjectionService:
                     for investigation_id in instance.investigation_ids
                 )
             ),
-            pending_approval_ids=tuple(
-                dict.fromkeys(
+            pending_approval_count=len(
+                {
                     approval_id
                     for instance in instances
                     for approval_id in instance.pending_approval_ids
-                )
+                }
             ),
             instances=view_instances,
             log_sources=tuple(log_sources),

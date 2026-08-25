@@ -105,7 +105,7 @@ class ServiceInstanceView(BaseModel):
     container_names: tuple[str, ...]
     issue_ids: tuple[str, ...]
     investigation_ids: tuple[str, ...]
-    pending_approval_ids: tuple[str, ...]
+    pending_approval_count: int = Field(ge=0)
     last_tested_at: datetime | None = None
     last_observed_at: datetime | None = None
 
@@ -119,7 +119,7 @@ class ServiceDetailView(BaseModel):
     target_ids: tuple[str, ...]
     issue_ids: tuple[str, ...]
     investigation_ids: tuple[str, ...]
-    pending_approval_ids: tuple[str, ...]
+    pending_approval_count: int = Field(ge=0)
     instances: tuple[ServiceInstanceView, ...]
     log_sources: tuple[LogSourceSummary, ...]
     last_observed_at: datetime | None = None

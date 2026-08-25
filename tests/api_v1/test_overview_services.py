@@ -16,7 +16,6 @@ from incidentlens_control_plane.investigation.types import (
 )
 from incidentlens_control_plane.logs.types import LogScope, LogSourceKind
 from incidentlens_control_plane.main import create_app
-from incidentlens_control_plane.project_registry.types import ProjectRegistration
 from incidentlens_control_plane.remote_ops.fakes import FakeTransportFactory
 
 NOW = datetime(2026, 8, 25, 14, 0, tzinfo=UTC)
@@ -153,9 +152,11 @@ def test_overview_and_service_routes_filter_targets_and_stay_safe(client: TestCl
     detail = service.json()
     assert detail["target_ids"] == ["dev-a"]
     assert detail["issue_ids"] == ["iss_inv-1"]
+    assert detail["pending_approval_count"] == 0
     assert "approve" not in service.text
     assert "reject" not in service.text
     assert "/var/log/payments/api.log" not in service.text
+    assert "pending_approval_ids" not in service.text
 
 
 def test_service_route_hides_unauthorized_existence(client: TestClient) -> None:
