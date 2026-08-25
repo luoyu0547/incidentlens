@@ -512,6 +512,66 @@ async def test_startup_terminalizes_consumed_processing_approval_from_tool_state
 
 
 @pytest.mark.asyncio
+async def test_startup_terminalizes_consumed_processing_approval_after_running_tool_becomes_uncertain(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One startup classifies RUNNING->UNCERTAIN, then finalizes approval state."""
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(harness)
+    _make_run(harness)
+    approval = await harness.approvals.request(
+        {"kind": "shell", "target_id": TARGET_ID},
+        target_id=TARGET_ID,
+        service=SERVICE,
+        investigation_id="inv-1",
+        agent_run_id="run-1",
+        tool_call_id="call-1",
+    )
+    await harness.approvals.approve(approval.approval_id)
+    await harness.approvals.consume(
+        approval.approval_id,
+        {"kind": "shell", "target_id": TARGET_ID},
+    )
+    harness.approvals.mark_downstream(
+        approval.approval_id,
+        ApprovalDownstreamStatus.PROCESSING,
+        now=NOW,
+    )
+    _make_tool_call(
+        harness,
+        tool_call_id="call-1",
+        tool_name="shell_exec",
+        status=ToolCallStatus.PLANNED,
+    )
+    harness.investigations.transition_tool_call_status(
+        "call-1",
+        ToolCallStatus.RUNNING,
+        now=NOW,
+        approval_id=approval.approval_id,
+    )
+
+    _, service, recovery = build_recovery(harness, registry)
+
+    async def _unexpected(*_args, **_kwargs):
+        raise AssertionError("startup must not invoke approval decision handling")
+
+    monkeypatch.setattr(service, "handle_approval_decision", _unexpected)
+
+    summary = await recovery.startup()
+
+    assert summary.dangerous_parked == 1
+    assert summary.reconciled_approvals == 1
+    tool_call = harness.investigations.get_tool_call("call-1")
+    assert tool_call.status is ToolCallStatus.UNCERTAIN
+    approval_record = harness.approvals.get(approval.approval_id)
+    assert approval_record is not None
+    assert approval_record.status.value == "consumed"
+    assert approval_record.downstream_status is ApprovalDownstreamStatus.FAILED
+    assert approval_record.downstream_error_code == "tool_call_uncertain"
+
+
+@pytest.mark.asyncio
 async def test_startup_leaves_pending_approvals_for_the_operator(tmp_path: Any) -> None:
     harness = build_harness(tmp_path)
     registry = FakeProviderRegistry()

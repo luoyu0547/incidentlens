@@ -176,11 +176,12 @@ class RecoveryService:
         # handling may execute a tool and resume provider-loop activity, while
         # receipt delivery is a store-only recovery action with no provider turn.
         reconciled_receipts = await self._reconcile_child_report_receipts()
-        reconciled = await self._reconcile_decided_approvals()
+        reconciled_ids = await self._reconcile_decided_approvals()
         scanned = self._classify_in_flight_runs()
+        reconciled_ids.update(self._reconcile_consumed_processing_approvals())
         scanned = replace(
             scanned,
-            reconciled_approvals=reconciled,
+            reconciled_approvals=len(reconciled_ids),
             reconciled_child_receipts=reconciled_receipts,
             cancel_finalised=cancel_finalised,
         )
@@ -188,7 +189,7 @@ class RecoveryService:
         # Only audit a recovery that actually did something; an empty startup
         # is a no-op and must not inject recovery.* events into the stream.
         if self._events_pub is not None and (
-            pending or reconciled or reconciled_receipts or cancel_finalised
+            pending or reconciled_ids or reconciled_receipts or cancel_finalised
         ):
             self._events_pub.recovery_started(count=pending, occurred_at=self._now())
             self._events_pub.recovery_completed(
@@ -253,7 +254,7 @@ class RecoveryService:
                     count += 1
         return count
 
-    async def _reconcile_decided_approvals(self) -> int:
+    async def _reconcile_decided_approvals(self) -> set[str]:
         """Resolve approvals decided before the restart but never handled.
 
         An approval that was granted/rejected while the process was down has no
@@ -262,42 +263,17 @@ class RecoveryService:
         proposal, executes/rejects the exact single-use intent, and resumes the
         parked run.  PENDING approvals are left for the operator.
         """
-        reconciled = 0
+        reconciled: set[str] = set()
         waiting_approval_ids = {
             tool_call.approval_id
             for tool_call in self._store.list_waiting_approval_tool_calls()
             if tool_call.approval_id is not None
         }
-        terminal_tool_calls_by_approval = {
-            tool_call.approval_id: tool_call
-            for tool_call in self._store.list_tool_calls()
-            if tool_call.approval_id is not None and tool_call.status in TOOL_CALL_TERMINAL
-        }
         pending_proposal_hashes = {
             proposal.approval_intent_sha256
             for proposal in self._store.list_pending_proposals()
         }
-        proposals_by_id = {
-            proposal.proposal_id: proposal for proposal in self._store.list_proposals()
-        }
         for approval in self._approvals.list():
-            if approval.status is ApprovalStatus.CONSUMED:
-                if approval.downstream_status not in _CONSUMED_RECOVERY_STATUSES:
-                    continue
-                if self._terminalize_consumed_processing_approval(
-                    approval,
-                    terminal_tool_call=terminal_tool_calls_by_approval.get(
-                        approval.approval_id
-                    ),
-                    proposal=(
-                        proposals_by_id.get(approval.proposal_id)
-                        if approval.proposal_id is not None
-                        else None
-                    ),
-                ):
-                    reconciled += 1
-                continue
-
             if approval.status not in _DECIDED_APPROVAL_STATUSES:
                 continue
             if (
@@ -317,7 +293,42 @@ class RecoveryService:
                 )
                 continue
             if outcome.matched != "none":
-                reconciled += 1
+                reconciled.add(approval.approval_id)
+        return reconciled
+
+    def _reconcile_consumed_processing_approvals(self) -> set[str]:
+        """Terminalize consumed approvals from already-durable local state only.
+
+        This pass runs after in-flight tool classification so a crash-left
+        RUNNING dangerous tool has already been persisted as UNCERTAIN/FAILED.
+        It never calls ``handle_approval_decision`` or touches remote state.
+        """
+        reconciled: set[str] = set()
+        terminal_tool_calls_by_approval = {
+            tool_call.approval_id: tool_call
+            for tool_call in self._store.list_tool_calls()
+            if tool_call.approval_id is not None and tool_call.status in TOOL_CALL_TERMINAL
+        }
+        proposals_by_id = {
+            proposal.proposal_id: proposal for proposal in self._store.list_proposals()
+        }
+        for approval in self._approvals.list():
+            if approval.status is not ApprovalStatus.CONSUMED:
+                continue
+            if approval.downstream_status not in _CONSUMED_RECOVERY_STATUSES:
+                continue
+            if self._terminalize_consumed_processing_approval(
+                approval,
+                terminal_tool_call=terminal_tool_calls_by_approval.get(
+                    approval.approval_id
+                ),
+                proposal=(
+                    proposals_by_id.get(approval.proposal_id)
+                    if approval.proposal_id is not None
+                    else None
+                ),
+            ):
+                reconciled.add(approval.approval_id)
         return reconciled
 
     def _terminalize_consumed_processing_approval(
