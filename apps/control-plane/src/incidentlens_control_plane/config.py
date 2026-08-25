@@ -125,6 +125,12 @@ class RuntimeSettings(BaseModel):
     secure_cookies: bool = True
     legacy_api_enabled: bool = True
 
+    # -- product streams -------------------------------------------------------
+    # Bounded outbound queue for a versioned stream subscriber before the broker
+    # treats it as a slow consumer and the stream closes the connection.
+    stream_subscriber_queue_size: int = Field(default=256, ge=16, le=4096)
+    stream_heartbeat_seconds: float = Field(default=15.0, ge=1.0, le=120.0)
+
     @classmethod
     def from_environment(cls) -> RuntimeSettings:
         """Create local runtime settings from ``INCIDENTLENS_*`` environment variables."""

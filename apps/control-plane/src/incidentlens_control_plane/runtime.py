@@ -125,6 +125,7 @@ class RuntimeServices:
     dispatcher: OperationDispatcher
     agent_session_store: AgentSessionStore
     agent_sessions: AgentSessionService
+    settings: RuntimeSettings
 
 
 def build_runtime(
@@ -177,7 +178,7 @@ def build_runtime(
     target_store.migrate()
     agent_session_store.migrate()
 
-    broker = RuntimeEventBroker()
+    broker = RuntimeEventBroker(queue_size=settings.stream_subscriber_queue_size)
     approvals = ApprovalService(
         approvals=approval_store,
         events=events,
@@ -473,4 +474,5 @@ def build_runtime(
         dispatcher=dispatcher,
         agent_session_store=agent_session_store,
         agent_sessions=agent_sessions,
+        settings=settings,
     )
