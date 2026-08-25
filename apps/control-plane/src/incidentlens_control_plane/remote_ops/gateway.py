@@ -172,7 +172,18 @@ class Gateway:
             )
 
         # No approval ID provided - request one
-        record = await self._approvals.request(intent, now=now)
+        record = await self._approvals.request(
+            intent,
+            now=now,
+            target_id=request.target_id,
+            service=request.service,
+            session_id=request.session_id,
+            risk=request.risk.value,
+            preview={
+                "preview": "Shell action requires explicit approval.",
+                "impact": "Runs a guarded shell action against the target service.",
+            },
+        )
         return ShellResult(
             command=request.command,
             approved=False,
@@ -552,7 +563,19 @@ class RemoteToolGateway:
         if approval_id is None:
             if self._approvals is None:
                 raise DockerActionError("approval service is not configured")
-            record = await self._approvals.request(intent)
+            record = await self._approvals.request(
+                intent,
+                target_id=request.target_id,
+                service=request.service,
+                risk="approval_required",
+                preview={
+                    "preview": "Container action requires explicit approval.",
+                    "impact": (
+                        f"Runs docker action {request.action.value} "
+                        f"against {request.container or request.service}."
+                    ),
+                },
+            )
             await self._emit_docker_event(
                 RuntimeEventType.DOCKER_ACTION_REQUESTED,
                 request,

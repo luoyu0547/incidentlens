@@ -15,6 +15,7 @@ from incidentlens_control_plane.api.errors import install_error_handlers
 from incidentlens_control_plane.api.request_id import RequestIdMiddleware
 from incidentlens_control_plane.api.router import router as v1_router
 from incidentlens_control_plane.api.routes import agent_sessions as agent_sessions_routes
+from incidentlens_control_plane.api.routes import approvals as approvals_v1_routes
 from incidentlens_control_plane.api.routes import changes as changes_routes
 from incidentlens_control_plane.api.routes import events as v1_events_routes
 from incidentlens_control_plane.api.routes import operations as operations_routes
@@ -169,6 +170,7 @@ def create_app(
     application.include_router(session_router)
     application.include_router(targets_routes.router)
     application.include_router(agent_sessions_routes.router)
+    application.include_router(approvals_v1_routes.router)
     application.include_router(v1_events_routes.router)
     application.include_router(operations_routes.router)
     application.include_router(changes_routes.router)

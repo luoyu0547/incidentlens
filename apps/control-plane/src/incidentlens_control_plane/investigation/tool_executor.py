@@ -1526,7 +1526,22 @@ class ToolExecutor:
         # Approvals are real-time artifacts: request them against the wall clock
         # so the TTL and the later approve/consume decision stay consistent,
         # independent of the investigation's simulated ``now``.
-        record = await self._approvals.request(intent)
+        record = await self._approvals.request(
+            intent,
+            target_id=ctx.run.scope.target_id,
+            service=service_name,
+            investigation_id=ctx.run.investigation_id,
+            agent_run_id=ctx.run.agent_run_id,
+            changeset_id=changeset_id,
+            risk="approval_required",
+            preview={
+                "preview": "Protected path change requires explicit approval.",
+                "impact": (
+                    f"Changeset {changeset_id} touches protected paths on "
+                    f"{service_name}."
+                ),
+            },
+        )
         return ToolResult(
             status=ToolCallStatus.WAITING_APPROVAL,
             approval_id=record.approval_id,

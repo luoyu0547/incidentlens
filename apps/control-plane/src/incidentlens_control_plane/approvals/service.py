@@ -7,12 +7,18 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 
 from incidentlens_control_plane.approvals.store import (
+    ApprovalAlreadyDecided,
+    ApprovalExpired,
     ApprovalNotFound,
     ApprovalStore,
     ApprovalUnavailable,
     intent_sha256,
 )
-from incidentlens_control_plane.approvals.types import ApprovalRecord, ApprovalStatus
+from incidentlens_control_plane.approvals.types import (
+    ApprovalDownstreamStatus,
+    ApprovalRecord,
+    ApprovalStatus,
+)
 from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.events.types import JsonValue, RuntimeEvent, RuntimeEventType
@@ -24,6 +30,8 @@ class ApprovalMismatch(Exception):
 
 # Re-export for test convenience
 ApprovalUnavailable = ApprovalUnavailable  # noqa: F811
+ApprovalExpired = ApprovalExpired  # noqa: F811
+ApprovalAlreadyDecided = ApprovalAlreadyDecided  # noqa: F811
 
 
 def _redact_summary(intent: Mapping[str, JsonValue]) -> str:
@@ -50,10 +58,45 @@ class ApprovalService:
         self._broker = broker
 
     def list(
-        self, status: ApprovalStatus | None = None
+        self,
+        status: ApprovalStatus | None = None,
+        *,
+        target_id: str | None = None,
+        session_id: str | None = None,
+        investigation_id: str | None = None,
+        allowed_target_ids: frozenset[str] | None = None,
     ) -> tuple[ApprovalRecord, ...]:
         """List approval records, optionally filtered by status."""
-        return self._approvals.list(status)
+        return self._approvals.list(
+            status,
+            target_id=target_id,
+            session_id=session_id,
+            investigation_id=investigation_id,
+            allowed_target_ids=allowed_target_ids,
+        )
+
+    def list_page(
+        self,
+        *,
+        status: ApprovalStatus | None,
+        target_id: str | None,
+        session_id: str | None,
+        investigation_id: str | None,
+        allowed_target_ids: frozenset[str] | None,
+        limit: int,
+        after_created_at: datetime | None,
+        after_approval_id: str | None,
+    ) -> tuple[tuple[ApprovalRecord, ...], bool]:
+        return self._approvals.list_page(
+            status=status,
+            target_id=target_id,
+            session_id=session_id,
+            investigation_id=investigation_id,
+            allowed_target_ids=allowed_target_ids,
+            limit=limit,
+            after_created_at=after_created_at,
+            after_approval_id=after_approval_id,
+        )
 
     def get(self, approval_id: str) -> ApprovalRecord | None:
         """Return the persisted approval record by id, or ``None``.
@@ -69,6 +112,16 @@ class ApprovalService:
         intent: dict[str, JsonValue],
         *,
         now: datetime | None = None,
+        target_id: str | None = None,
+        service: str | None = None,
+        session_id: str | None = None,
+        investigation_id: str | None = None,
+        agent_run_id: str | None = None,
+        tool_call_id: str | None = None,
+        changeset_id: str | None = None,
+        proposal_id: str | None = None,
+        risk: str = "approval_required",
+        preview: Mapping[str, JsonValue] | None = None,
     ) -> ApprovalRecord:
         """Create a new approval request and emit APPROVAL_REQUESTED event."""
         now = now or datetime.now(UTC)
@@ -83,6 +136,16 @@ class ApprovalService:
             intent=intent,
             intent_summary=summary,
             now=now,
+            target_id=target_id,
+            service=service,
+            session_id=session_id,
+            investigation_id=investigation_id,
+            agent_run_id=agent_run_id,
+            tool_call_id=tool_call_id,
+            changeset_id=changeset_id,
+            proposal_id=proposal_id,
+            risk=risk,
+            preview=preview,
         )
 
         event = RuntimeEvent(
@@ -102,17 +165,35 @@ class ApprovalService:
 
         return record
 
+    def mark_downstream(
+        self,
+        approval_id: str,
+        status: ApprovalDownstreamStatus,
+        *,
+        error_code: str | None = None,
+        now: datetime | None = None,
+    ) -> ApprovalRecord:
+        """Persist downstream processing state independent of the decision."""
+        return self._approvals.mark_downstream(
+            approval_id,
+            status,
+            error_code=error_code,
+            now=now,
+        )
+
     async def approve(
         self,
         approval_id: str,
         *,
         now: datetime | None = None,
+        actor: str | None = None,
+        reason: str | None = None,
     ) -> ApprovalRecord:
         """Approve a pending request and emit APPROVAL_APPROVED event."""
         now = now or datetime.now(UTC)
         now = now.astimezone(UTC)
 
-        record = self._approvals.approve(approval_id, now)
+        record = self._approvals.approve(approval_id, now, actor=actor, reason=reason)
 
         event = RuntimeEvent(
             event_id=f"evt-{uuid.uuid4().hex[:12]}",
@@ -136,12 +217,14 @@ class ApprovalService:
         approval_id: str,
         *,
         now: datetime | None = None,
+        actor: str | None = None,
+        reason: str | None = None,
     ) -> ApprovalRecord:
         """Reject a pending request and emit APPROVAL_REJECTED event."""
         now = now or datetime.now(UTC)
         now = now.astimezone(UTC)
 
-        record = self._approvals.reject(approval_id, now)
+        record = self._approvals.reject(approval_id, now, actor=actor, reason=reason)
 
         event = RuntimeEvent(
             event_id=f"evt-{uuid.uuid4().hex[:12]}",
@@ -166,6 +249,8 @@ class ApprovalService:
         intent: dict[str, JsonValue],
         *,
         now: datetime | None = None,
+        actor: str | None = None,
+        reason: str | None = None,
     ) -> ApprovalRecord:
         """Consume an approval after verifying the canonical intent matches.
 

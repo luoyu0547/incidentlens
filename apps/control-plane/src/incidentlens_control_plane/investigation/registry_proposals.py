@@ -202,7 +202,22 @@ class RegistryProposalService:
             created_at=now,
         )
         intent = registry_update_intent(proposal)
-        approval = await self._approvals.request(intent)
+        approval = await self._approvals.request(
+            intent,
+            target_id=run.scope.target_id,
+            service=service_name,
+            investigation_id=run.investigation_id,
+            agent_run_id=run.agent_run_id,
+            proposal_id=proposal.proposal_id,
+            risk="approval_required",
+            preview={
+                "preview": "Registry update requires operator approval.",
+                "impact": (
+                    f"Would widen registry scope for service {service_name} "
+                    f"on target {run.scope.target_id}."
+                ),
+            },
+        )
         proposal = proposal.model_copy(
             update={"approval_intent_sha256": approval.intent_sha256}
         )
