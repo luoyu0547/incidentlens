@@ -120,7 +120,20 @@ INCIDENTLENS_LLM_API_KEY=your_key
 | 高风险变更 | 审批精确、单次使用；写入前必须完成双重备份。 |
 | 故障恢复 | 危险的在途调用重启后标记为 `UNCERTAIN`，绝不自动重放。 |
 
-## 验证
+## 部署与产品契约约束
+
+产品 API 的稳定契约位于 `packages/protocol/`，由 `scripts/export_product_contracts.py` 生成，并由 `scripts/check_product_contracts.py` 在 CI 或发布前检查漂移。客户端必须先通过 `/api/v1/version` 协商 API/stream schema 版本；未知版本必须显式失败，不能静默降级。
+
+当前控制面是本地单用户运行时，部署时必须使用**单个 Uvicorn worker**，并挂载持久化本地数据卷（SQLite、加密备份、运行时检查点和报告）。生产环境必须配置认证 profile 与 session signing key，并在 TLS 反向代理后运行以保证 secure cookie；不能把签名密钥或 bearer token 放入 API 请求体、日志或公开 schema。旧 `/api/*` 路由仅作为临时兼容层共存，可通过 `INCIDENTLENS_LEGACY_API_ENABLED` 关闭，不得作为新客户端依赖。CLI/Web stream 连接必须携带并校验 schema version，断线后使用 cursor/sequence 恢复并处理 gap/backpressure 信号。
+
+契约与后端验收：
+
+```bash
+uv run python scripts/check_product_contracts.py
+uv run pytest tests/contracts tests/acceptance/test_product_api_foundation.py -q
+uv run ruff check apps/control-plane/src tests scripts
+```
+
 
 ```bash
 # 全量离线测试与静态检查

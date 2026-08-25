@@ -1,0 +1,926 @@
+{
+  "components": {
+    "schemas": {
+      "AgentBudget": {
+        "additionalProperties": false,
+        "description": "Budgets that bound a single parent or child run.",
+        "properties": {
+          "max_evidence": {
+            "default": 100,
+            "maximum": 5000.0,
+            "minimum": 1.0,
+            "title": "Max Evidence",
+            "type": "integer"
+          },
+          "max_no_new_evidence_rounds": {
+            "default": 3,
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Max No New Evidence Rounds",
+            "type": "integer"
+          },
+          "max_output_bytes_per_tool": {
+            "default": 524288,
+            "maximum": 67108864.0,
+            "minimum": 1.0,
+            "title": "Max Output Bytes Per Tool",
+            "type": "integer"
+          },
+          "max_rounds": {
+            "default": 8,
+            "maximum": 200.0,
+            "minimum": 1.0,
+            "title": "Max Rounds",
+            "type": "integer"
+          },
+          "max_tool_calls": {
+            "default": 16,
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Max Tool Calls",
+            "type": "integer"
+          },
+          "max_total_output_bytes": {
+            "default": 4194304,
+            "maximum": 134217728.0,
+            "minimum": 1.0,
+            "title": "Max Total Output Bytes",
+            "type": "integer"
+          },
+          "max_wall_clock_seconds": {
+            "default": 1800,
+            "maximum": 43200.0,
+            "minimum": 1.0,
+            "title": "Max Wall Clock Seconds",
+            "type": "integer"
+          }
+        },
+        "title": "AgentBudget",
+        "type": "object"
+      },
+      "AgentRunStatus": {
+        "enum": [
+          "created",
+          "running",
+          "waiting_tool",
+          "waiting_children",
+          "waiting_approval",
+          "paused_budget",
+          "paused_missing_evidence",
+          "paused_uncertain_state",
+          "cancel_requested",
+          "cancelled",
+          "failed",
+          "completed"
+        ],
+        "title": "AgentRunStatus",
+        "type": "string"
+      },
+      "AgentScope": {
+        "additionalProperties": false,
+        "description": "Host or container-scoped bounds that isolate a parent or child run.",
+        "properties": {
+          "allowed_container_paths": {
+            "default": [],
+            "items": {
+              "format": "path",
+              "type": "string"
+            },
+            "title": "Allowed Container Paths",
+            "type": "array"
+          },
+          "allowed_host_paths": {
+            "default": [],
+            "items": {
+              "format": "path",
+              "type": "string"
+            },
+            "title": "Allowed Host Paths",
+            "type": "array"
+          },
+          "container_name": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Container Name"
+          },
+          "project_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Project Id",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/LogScope"
+          },
+          "service_name": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Service Name"
+          },
+          "target_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "target_id",
+          "scope"
+        ],
+        "title": "AgentScope",
+        "type": "object"
+      },
+      "ApprovalStatus": {
+        "enum": [
+          "pending",
+          "approved",
+          "rejected",
+          "consumed"
+        ],
+        "title": "ApprovalStatus",
+        "type": "string"
+      },
+      "ConnectRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "project_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Project Id",
+            "type": "string"
+          },
+          "target_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "target_id"
+        ],
+        "title": "ConnectRequest",
+        "type": "object"
+      },
+      "ContainerSessionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "container": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+            "title": "Container",
+            "type": "string"
+          },
+          "project_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Project Id",
+            "type": "string"
+          },
+          "service": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Service",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "service",
+          "container"
+        ],
+        "title": "ContainerSessionRequest",
+        "type": "object"
+      },
+      "CreateEvidenceFromLogRecordsRequest": {
+        "additionalProperties": false,
+        "description": "Body naming a stored incident and the redacted records to cite.",
+        "properties": {
+          "created_by": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Created By",
+            "type": "string"
+          },
+          "incident_id": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Incident Id",
+            "type": "string"
+          },
+          "log_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Log Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "incident_id",
+          "log_ids",
+          "created_by"
+        ],
+        "title": "CreateEvidenceFromLogRecordsRequest",
+        "type": "object"
+      },
+      "CreateInvestigationRequest": {
+        "additionalProperties": false,
+        "description": "Body to create a new investigation.  No host/user/credential fields.",
+        "properties": {
+          "budget": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InvestigationBudget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "incident_id": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Incident Id"
+          },
+          "project_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Project Id",
+            "type": "string"
+          },
+          "service": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Service",
+            "type": "string"
+          },
+          "symptom": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Symptom",
+            "type": "string"
+          },
+          "target_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "target_id",
+          "service",
+          "symptom"
+        ],
+        "title": "CreateInvestigationRequest",
+        "type": "object"
+      },
+      "CreateLogSubscriptionRequest": {
+        "additionalProperties": false,
+        "description": "Request body for creating a persistent log subscription.\n\n``extra=\"forbid\"`` rejects connection fields (host, ssh_user, credentials)\nthat must only ever be resolved from the project registry.",
+        "properties": {
+          "created_by": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Created By",
+            "type": "string"
+          },
+          "opt_in_streaming": {
+            "title": "Opt In Streaming",
+            "type": "boolean"
+          },
+          "project_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Project Id",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/LogScope"
+          },
+          "service_name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Service Name",
+            "type": "string"
+          },
+          "source_kind": {
+            "$ref": "#/components/schemas/LogSourceKind"
+          },
+          "source_ref": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Source Ref",
+            "type": "string"
+          },
+          "target_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "target_id",
+          "service_name",
+          "source_kind",
+          "scope",
+          "source_ref",
+          "opt_in_streaming",
+          "created_by"
+        ],
+        "title": "CreateLogSubscriptionRequest",
+        "type": "object"
+      },
+      "EvidenceKind": {
+        "enum": [
+          "log_record",
+          "command_output",
+          "file_snapshot",
+          "diff",
+          "validation_result",
+          "child_report",
+          "registry_discovery",
+          "approval_decision",
+          "uncertain_state"
+        ],
+        "title": "EvidenceKind",
+        "type": "string"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "InvestigationBudget": {
+        "additionalProperties": false,
+        "description": "Global budgets that bound the whole investigation across all runs.",
+        "properties": {
+          "max_children": {
+            "default": 4,
+            "maximum": 32.0,
+            "minimum": 0.0,
+            "title": "Max Children",
+            "type": "integer"
+          },
+          "max_evidence": {
+            "default": 300,
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Max Evidence",
+            "type": "integer"
+          },
+          "max_no_new_evidence_rounds": {
+            "default": 3,
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Max No New Evidence Rounds",
+            "type": "integer"
+          },
+          "max_rounds": {
+            "default": 32,
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Max Rounds",
+            "type": "integer"
+          },
+          "max_tool_calls": {
+            "default": 64,
+            "maximum": 2000.0,
+            "minimum": 1.0,
+            "title": "Max Tool Calls",
+            "type": "integer"
+          },
+          "max_total_output_bytes": {
+            "default": 16777216,
+            "maximum": 536870912.0,
+            "minimum": 1.0,
+            "title": "Max Total Output Bytes",
+            "type": "integer"
+          },
+          "max_wall_clock_seconds": {
+            "default": 7200,
+            "maximum": 86400.0,
+            "minimum": 1.0,
+            "title": "Max Wall Clock Seconds",
+            "type": "integer"
+          }
+        },
+        "title": "InvestigationBudget",
+        "type": "object"
+      },
+      "InvestigationStatus": {
+        "enum": [
+          "created",
+          "running",
+          "waiting_approval",
+          "waiting_registry_update",
+          "paused_budget",
+          "paused_missing_evidence",
+          "paused_uncertain_state",
+          "cancel_requested",
+          "cancelled",
+          "failed",
+          "completed"
+        ],
+        "title": "InvestigationStatus",
+        "type": "string"
+      },
+      "LogQueryRequestModel": {
+        "additionalProperties": false,
+        "description": "Request body mirroring the ``LogQueryRequest`` domain model.\n\n``extra=\"forbid\"`` rejects connection fields (host, ssh_user, credentials)\nthat must only ever be resolved from the project registry.",
+        "properties": {
+          "create_evidence": {
+            "default": false,
+            "title": "Create Evidence",
+            "type": "boolean"
+          },
+          "incident_id": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Incident Id"
+          },
+          "persist": {
+            "default": false,
+            "title": "Persist",
+            "type": "boolean"
+          },
+          "project_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Project Id",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/LogScope"
+          },
+          "service_name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Service Name",
+            "type": "string"
+          },
+          "source_kind": {
+            "$ref": "#/components/schemas/LogSourceKind"
+          },
+          "source_ref": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Source Ref",
+            "type": "string"
+          },
+          "tail_lines": {
+            "default": 100,
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Tail Lines",
+            "type": "integer"
+          },
+          "target_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "target_id",
+          "service_name",
+          "source_kind",
+          "scope",
+          "source_ref"
+        ],
+        "title": "LogQueryRequestModel",
+        "type": "object"
+      },
+      "LogScope": {
+        "enum": [
+          "host",
+          "container"
+        ],
+        "title": "LogScope",
+        "type": "string"
+      },
+      "LogSeverity": {
+        "enum": [
+          "trace",
+          "debug",
+          "info",
+          "notice",
+          "warn",
+          "error",
+          "critical",
+          "unknown"
+        ],
+        "title": "LogSeverity",
+        "type": "string"
+      },
+      "LogSourceKind": {
+        "enum": [
+          "file",
+          "docker"
+        ],
+        "title": "LogSourceKind",
+        "type": "string"
+      },
+      "ProjectRegistration": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "local_source_paths": {
+            "default": [],
+            "items": {
+              "format": "path",
+              "type": "string"
+            },
+            "title": "Local Source Paths",
+            "type": "array"
+          },
+          "project_id": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,79}$",
+            "title": "Project Id",
+            "type": "string"
+          },
+          "services": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ServiceRegistration"
+            },
+            "title": "Services",
+            "type": "array"
+          },
+          "targets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TargetRegistration"
+            },
+            "title": "Targets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "project_id",
+          "display_name"
+        ],
+        "title": "ProjectRegistration",
+        "type": "object"
+      },
+      "RegistryProposalStatus": {
+        "enum": [
+          "pending",
+          "approved",
+          "rejected",
+          "stale"
+        ],
+        "title": "RegistryProposalStatus",
+        "type": "string"
+      },
+      "ResumeInvestigationRequest": {
+        "additionalProperties": false,
+        "description": "Body naming the agent run to resume.",
+        "properties": {
+          "agent_run_id": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Agent Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_run_id"
+        ],
+        "title": "ResumeInvestigationRequest",
+        "type": "object"
+      },
+      "RollbackRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Id"
+          }
+        },
+        "title": "RollbackRequest",
+        "type": "object"
+      },
+      "ServiceRegistration": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_container_paths": {
+            "default": [],
+            "items": {
+              "format": "path",
+              "type": "string"
+            },
+            "title": "Allowed Container Paths",
+            "type": "array"
+          },
+          "allowed_host_paths": {
+            "default": [],
+            "items": {
+              "format": "path",
+              "type": "string"
+            },
+            "title": "Allowed Host Paths",
+            "type": "array"
+          },
+          "allowed_log_paths": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Log Paths",
+            "type": "array"
+          },
+          "compose_service": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Compose Service",
+            "type": "string"
+          },
+          "container_names": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Container Names",
+            "type": "array"
+          },
+          "container_path_hints": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Container Path Hints",
+            "type": "array"
+          },
+          "local_source_path": {
+            "anyOf": [
+              {
+                "format": "path",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Source Path"
+          },
+          "protected_remote_paths": {
+            "default": [],
+            "items": {
+              "format": "path",
+              "type": "string"
+            },
+            "title": "Protected Remote Paths",
+            "type": "array"
+          }
+        },
+        "required": [
+          "compose_service"
+        ],
+        "title": "ServiceRegistration",
+        "type": "object"
+      },
+      "StartInvestigationRequest": {
+        "additionalProperties": false,
+        "description": "Body to start (or resume) an investigation with a parent-run scope.",
+        "properties": {
+          "budget": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentBudget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scope": {
+            "$ref": "#/components/schemas/AgentScope"
+          }
+        },
+        "required": [
+          "scope"
+        ],
+        "title": "StartInvestigationRequest",
+        "type": "object"
+      },
+      "TargetRegistration": {
+        "additionalProperties": false,
+        "properties": {
+          "compose_project_name": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compose Project Name"
+          },
+          "compose_working_directory": {
+            "anyOf": [
+              {
+                "format": "path",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compose Working Directory"
+          },
+          "host": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Host",
+            "type": "string"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "maximum": 65535.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Port"
+          },
+          "ssh_config_alias": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ssh Config Alias"
+          },
+          "ssh_user": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Ssh User",
+            "type": "string"
+          },
+          "target_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_id",
+          "host",
+          "ssh_user"
+        ],
+        "title": "TargetRegistration",
+        "type": "object"
+      },
+      "ToolCallStatus": {
+        "enum": [
+          "planned",
+          "waiting_approval",
+          "running",
+          "succeeded",
+          "failed",
+          "uncertain",
+          "cancelled"
+        ],
+        "title": "ToolCallStatus",
+        "type": "string"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "VerifyRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "VerifyRequest",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "IncidentLens Product API",
+    "version": "v1"
+  },
+  "openapi": "3.1.0",
+  "paths": {}
+}
