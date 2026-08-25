@@ -37,6 +37,7 @@ class ApprovalRecord(BaseModel):
     intent: dict[str, object]
     intent_summary: str = Field(min_length=1, max_length=1000)
     status: ApprovalStatus
+    project_id: str | None = Field(default=None, min_length=1, max_length=80)
     target_id: str | None = Field(default=None, min_length=1, max_length=120)
     service: str | None = Field(default=None, min_length=1, max_length=120)
     session_id: str | None = Field(default=None, min_length=1, max_length=120)

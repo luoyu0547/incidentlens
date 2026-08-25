@@ -751,6 +751,47 @@ def test_docker_action_requests_approval_when_no_id(
     asyncio.run(scenario())
 
 
+def test_docker_action_requested_approval_preserves_linkage(
+    docker_gateway: RemoteToolGateway,
+) -> None:
+    """Pending docker approvals retain their downstream linkage metadata."""
+    from incidentlens_control_plane.remote_ops.types import (
+        DockerActionKind,
+        DockerActionRequest,
+        HostScope,
+    )
+
+    request = DockerActionRequest(
+        operation_id="op-dk-link",
+        incident_id="inc-1",
+        project_id="myproj",
+        target_id="dev-host",
+        service="web",
+        scope=HostScope(),
+        session_id="sess-1",
+        investigation_id="inv-1",
+        agent_run_id="run-1",
+        tool_call_id="call-1",
+        action=DockerActionKind.RESTART,
+        container="web-1",
+        reason="restart the web service",
+    )
+
+    async def scenario() -> None:
+        result = await docker_gateway.docker_action(request)
+        assert result.approved is False
+        assert result.approval_id is not None
+        record = docker_gateway._approvals.get(result.approval_id)
+        assert record is not None
+        assert record.project_id == "myproj"
+        assert record.session_id == "sess-1"
+        assert record.investigation_id == "inv-1"
+        assert record.agent_run_id == "run-1"
+        assert record.tool_call_id == "call-1"
+
+    asyncio.run(scenario())
+
+
 def test_docker_action_consumes_approval_and_executes(
     docker_gateway: RemoteToolGateway,
     tmp_path: Path,

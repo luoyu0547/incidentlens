@@ -155,6 +155,10 @@ def _decode_cursor(value: str | None) -> tuple[datetime, str] | None:
         payload = base64.urlsafe_b64decode(value[4:].encode("ascii")).decode("utf-8")
         body = json.loads(payload)
         created_at = datetime.fromisoformat(str(body["created_at"]))
+        if created_at.tzinfo is None or created_at.utcoffset() is None:
+            created_at = created_at.replace(tzinfo=UTC)
+        else:
+            created_at = created_at.astimezone(UTC)
         approval_id = str(body["approval_id"])
     except Exception as exc:  # noqa: BLE001
         raise ApiProblem(
@@ -225,7 +229,7 @@ def _detail_view(request: Request, record: ApprovalRecord) -> ApprovalDetailView
         kind=str(record.intent.get("kind", "unknown")),
         intent_summary=record.intent_summary,
         linkage=ApprovalLinkageView(
-            target_id=record.target_id,
+            target_id=_resolved_target_id(request, record),
             service=record.service,
             session_id=record.session_id,
             investigation_id=record.investigation_id,
@@ -254,8 +258,20 @@ def _detail_view(request: Request, record: ApprovalRecord) -> ApprovalDetailView
     )
 
 
-def _authorized(principal: Principal, record: ApprovalRecord) -> bool:
-    target_id = record.target_id or ""
+def _resolved_target_id(request: Request, record: ApprovalRecord) -> str | None:
+    target_id = record.target_id
+    if record.project_id and target_id:
+        binding = request.app.state.runtime.target_store.find_by_registry(
+            record.project_id,
+            target_id,
+        )
+        if binding is not None:
+            return binding.target_id
+    return target_id
+
+
+def _authorized(request: Request, principal: Principal, record: ApprovalRecord) -> bool:
+    target_id = _resolved_target_id(request, record) or ""
     return bool(target_id) and principal.authorized_for(target_id)
 
 
@@ -424,7 +440,7 @@ async def get_approval(
     principal: Annotated[Principal, Depends(require_scopes(PrincipalScope.READ))],
 ) -> ApprovalDetailView:
     record = _service(request).get(approval_id)
-    if record is None or not _authorized(principal, record):
+    if record is None or not _authorized(request, principal, record):
         raise HTTPException(status_code=404, detail="Approval not found")
     return _detail_view(request, record)
 
@@ -452,7 +468,7 @@ async def approve_approval(
     principal: Annotated[Principal, Depends(require_scopes(PrincipalScope.APPROVE))],
 ) -> ApprovalDetailView:
     existing = _service(request).get(approval_id)
-    if existing is None or not _authorized(principal, existing):
+    if existing is None or not _authorized(request, principal, existing):
         raise HTTPException(status_code=404, detail="Approval not found")
 
     canonical_body = json.dumps(
@@ -539,7 +555,7 @@ async def reject_approval(
     principal: Annotated[Principal, Depends(require_scopes(PrincipalScope.APPROVE))],
 ) -> ApprovalDetailView:
     existing = _service(request).get(approval_id)
-    if existing is None or not _authorized(principal, existing):
+    if existing is None or not _authorized(request, principal, existing):
         raise HTTPException(status_code=404, detail="Approval not found")
 
     canonical_body = json.dumps(

@@ -204,6 +204,7 @@ class RegistryProposalService:
         intent = registry_update_intent(proposal)
         approval = await self._approvals.request(
             intent,
+            project_id=run.scope.project_id,
             target_id=run.scope.target_id,
             service=service_name,
             investigation_id=run.investigation_id,

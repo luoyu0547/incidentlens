@@ -95,6 +95,23 @@ class TargetStore:
             raise TargetNotFound(f"target '{target_id}' not found")
         return self._row_to_binding(row)
 
+    def find_by_registry(
+        self, project_id: str, registry_target_id: str
+    ) -> TargetBinding | None:
+        """Return the facade binding for one authoritative target, if present."""
+        with self._connection_factory() as conn:
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(_TARGET_BINDING_COLUMNS)}
+                FROM target_facade_bindings
+                WHERE project_id = ? AND registry_target_id = ?
+                """,
+                (project_id, registry_target_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_binding(row)
+
     def list(self) -> tuple[TargetBinding, ...]:
         """Return all facade bindings, ordered by target_id."""
         with self._connection_factory() as conn:

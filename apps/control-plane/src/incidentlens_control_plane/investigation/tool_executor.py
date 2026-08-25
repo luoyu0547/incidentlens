@@ -1107,6 +1107,9 @@ class ToolExecutor:
             target_id=ctx.run.scope.target_id,
             service=service_name,
             scope=HostScope(),
+            investigation_id=ctx.run.investigation_id,
+            agent_run_id=ctx.run.agent_run_id,
+            tool_call_id=ctx.operation_id,
             command=command,
             reason="agent investigation shell command",
         )
@@ -1305,6 +1308,9 @@ class ToolExecutor:
             target_id=ctx.run.scope.target_id,
             service=service_name,
             scope=HostScope(),
+            investigation_id=ctx.run.investigation_id,
+            agent_run_id=ctx.run.agent_run_id,
+            tool_call_id=ctx.operation_id,
             action=action,
             container=container,
             reason=reason,
@@ -1528,10 +1534,12 @@ class ToolExecutor:
         # independent of the investigation's simulated ``now``.
         record = await self._approvals.request(
             intent,
+            project_id=ctx.run.scope.project_id,
             target_id=ctx.run.scope.target_id,
             service=service_name,
             investigation_id=ctx.run.investigation_id,
             agent_run_id=ctx.run.agent_run_id,
+            tool_call_id=ctx.operation_id,
             changeset_id=changeset_id,
             risk="approval_required",
             preview={

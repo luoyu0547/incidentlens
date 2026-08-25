@@ -282,6 +282,11 @@ class RecoveryService:
                 and approval.intent_sha256 not in pending_proposal_hashes
             ):
                 continue
+            self._approvals.mark_downstream(
+                approval.approval_id,
+                ApprovalDownstreamStatus.PROCESSING,
+                now=self._now(),
+            )
             try:
                 outcome = await self._investigations.handle_approval_decision(
                     approval.approval_id, now=self._now()
@@ -291,9 +296,24 @@ class RecoveryService:
                     "startup reconciliation failed for approval %s",
                     approval.approval_id,
                 )
+                self._approvals.mark_downstream(
+                    approval.approval_id,
+                    ApprovalDownstreamStatus.FAILED,
+                    error_code="internal_error",
+                    now=self._now(),
+                )
                 continue
-            if outcome.matched != "none":
-                reconciled.add(approval.approval_id)
+            final_status = (
+                ApprovalDownstreamStatus.PROCESSED
+                if outcome.matched != "none"
+                else ApprovalDownstreamStatus.NOT_APPLICABLE
+            )
+            self._approvals.mark_downstream(
+                approval.approval_id,
+                final_status,
+                now=self._now(),
+            )
+            reconciled.add(approval.approval_id)
         return reconciled
 
     def _reconcile_consumed_processing_approvals(self) -> set[str]:

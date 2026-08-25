@@ -48,35 +48,49 @@ def intent_sha256(intent: Mapping[str, object]) -> str:
 
 DEFAULT_TTL_MINUTES = 15
 
-_SELECT_COLUMNS = """
-    approval_id,
-    intent_sha256,
-    intent_json,
-    intent_summary,
-    status,
-    target_id,
-    service,
-    session_id,
-    investigation_id,
-    agent_run_id,
-    tool_call_id,
-    changeset_id,
-    proposal_id,
-    risk,
-    preview_json,
-    created_at,
-    expires_at,
-    decided_at,
-    consumed_at,
-    decision_actor,
-    decision_reason,
-    decision_route_key,
-    decision_idempotency_key,
-    decision_request_sha256,
-    downstream_status,
-    downstream_error_code,
-    downstream_updated_at
-"""
+_SELECT_COLUMN_NAMES = (
+    "approval_id",
+    "intent_sha256",
+    "intent_json",
+    "intent_summary",
+    "status",
+    "project_id",
+    "target_id",
+    "service",
+    "session_id",
+    "investigation_id",
+    "agent_run_id",
+    "tool_call_id",
+    "changeset_id",
+    "proposal_id",
+    "risk",
+    "preview_json",
+    "created_at",
+    "expires_at",
+    "decided_at",
+    "consumed_at",
+    "decision_actor",
+    "decision_reason",
+    "decision_route_key",
+    "decision_idempotency_key",
+    "decision_request_sha256",
+    "downstream_status",
+    "downstream_error_code",
+    "downstream_updated_at",
+)
+
+
+def _select_columns(table: str | None = None) -> str:
+    prefix = f"{table}." if table else ""
+    return ", ".join(f"{prefix}{name}" for name in _SELECT_COLUMN_NAMES)
+
+
+def _has_table(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
 
 
 def _string(value: object) -> str | None:
@@ -197,6 +211,7 @@ class ApprovalStore:
                     intent_json TEXT NOT NULL,
                     intent_summary TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    project_id TEXT,
                     target_id TEXT,
                     service TEXT,
                     session_id TEXT,
@@ -227,6 +242,7 @@ class ApprovalStore:
                 for row in conn.execute("PRAGMA table_info(approvals)").fetchall()
             }
             additions = {
+                "project_id": "TEXT",
                 "target_id": "TEXT",
                 "service": "TEXT",
                 "session_id": "TEXT",
@@ -272,7 +288,7 @@ class ApprovalStore:
     def _backfill_rows(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute(
             """
-            SELECT approval_id, intent_json, target_id, service, session_id,
+            SELECT approval_id, intent_json, project_id, target_id, service, session_id,
                    investigation_id, agent_run_id, tool_call_id, changeset_id,
                    proposal_id, risk, preview_json, downstream_status,
                    downstream_updated_at
@@ -282,16 +298,17 @@ class ApprovalStore:
         for row in rows:
             approval_id = str(row[0])
             intent = json.loads(str(row[1]))
-            target_id = _string(row[2]) or _string(intent.get("target_id"))
-            service = _string(row[3]) or _string(intent.get("service"))
-            session_id = _string(row[4]) or _string(intent.get("session_id"))
-            investigation_id = _string(row[5]) or _string(intent.get("investigation_id"))
-            agent_run_id = _string(row[6]) or _string(intent.get("agent_run_id"))
-            tool_call_id = _string(row[7]) or _string(intent.get("tool_call_id"))
-            changeset_id = _string(row[8]) or _string(intent.get("changeset_id"))
-            proposal_id = _string(row[9]) or _string(intent.get("proposal_id"))
-            risk = _derive_risk(intent, _string(row[10]))
-            preview = _string(row[11])
+            project_id = _string(row[2]) or _string(intent.get("project_id"))
+            target_id = _string(row[3]) or _string(intent.get("target_id"))
+            service = _string(row[4]) or _string(intent.get("service"))
+            session_id = _string(row[5]) or _string(intent.get("session_id"))
+            investigation_id = _string(row[6]) or _string(intent.get("investigation_id"))
+            agent_run_id = _string(row[7]) or _string(intent.get("agent_run_id"))
+            tool_call_id = _string(row[8]) or _string(intent.get("tool_call_id"))
+            changeset_id = _string(row[9]) or _string(intent.get("changeset_id"))
+            proposal_id = _string(row[10]) or _string(intent.get("proposal_id"))
+            risk = _derive_risk(intent, _string(row[11]))
+            preview = _string(row[12])
             if preview is None or preview == "{}":
                 preview = _preview_json(_safe_preview_from_intent(intent))
             downstream_status = _derive_downstream_status(
@@ -302,18 +319,19 @@ class ApprovalStore:
                 tool_call_id=tool_call_id,
                 changeset_id=changeset_id,
                 proposal_id=proposal_id,
-                stored_status=_string(row[12]),
-                downstream_updated_at=_string(row[13]),
+                stored_status=_string(row[13]),
+                downstream_updated_at=_string(row[14]),
             )
             conn.execute(
                 """
                 UPDATE approvals
-                SET target_id = ?, service = ?, session_id = ?, investigation_id = ?,
-                    agent_run_id = ?, tool_call_id = ?, changeset_id = ?,
+                SET project_id = ?, target_id = ?, service = ?, session_id = ?,
+                    investigation_id = ?, agent_run_id = ?, tool_call_id = ?, changeset_id = ?,
                     proposal_id = ?, risk = ?, preview_json = ?, downstream_status = ?
                 WHERE approval_id = ?
                 """,
                 (
+                    project_id,
                     target_id,
                     service,
                     session_id,
@@ -338,6 +356,7 @@ class ApprovalStore:
         now: datetime,
         ttl_minutes: int = DEFAULT_TTL_MINUTES,
         *,
+        project_id: str | None = None,
         target_id: str | None = None,
         service: str | None = None,
         session_id: str | None = None,
@@ -366,6 +385,7 @@ class ApprovalStore:
             intent=dict(intent),
             intent_summary=intent_summary,
             status=ApprovalStatus.PENDING,
+            project_id=project_id or _string(intent.get("project_id")),
             target_id=target_id or _string(intent.get("target_id")),
             service=service or _string(intent.get("service")),
             session_id=session_id or _string(intent.get("session_id")),
@@ -387,7 +407,7 @@ class ApprovalStore:
                 INSERT INTO approvals
                     (
                         approval_id, intent_sha256, intent_json, intent_summary, status,
-                        target_id, service, session_id, investigation_id, agent_run_id,
+                        project_id, target_id, service, session_id, investigation_id, agent_run_id,
                         tool_call_id, changeset_id, proposal_id, risk, preview_json,
                         created_at, expires_at, decided_at, consumed_at, decision_actor,
                         decision_reason, decision_route_key, decision_idempotency_key,
@@ -395,7 +415,7 @@ class ApprovalStore:
                         downstream_error_code, downstream_updated_at
                     )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
@@ -410,6 +430,7 @@ class ApprovalStore:
                     ),
                     record.intent_summary,
                     record.status.value,
+                    record.project_id,
                     record.target_id,
                     record.service,
                     record.session_id,
@@ -442,7 +463,7 @@ class ApprovalStore:
         """Retrieve an approval record by ID."""
         with self._connection_factory() as conn:
             cursor = conn.execute(
-                f"SELECT {_SELECT_COLUMNS} FROM approvals WHERE approval_id = ?",
+                f"SELECT {_select_columns('approvals')} FROM approvals WHERE approval_id = ?",
                 (approval_id,),
             )
             row = cursor.fetchone()
@@ -496,36 +517,51 @@ class ApprovalStore:
     ) -> tuple[tuple[ApprovalRecord, ...], bool]:
         where: list[str] = []
         params: list[object] = []
+        resolved_target_sql = "COALESCE(tfb.target_id, a.target_id)"
         if status is not None:
-            where.append("status = ?")
+            where.append("a.status = ?")
             params.append(status.value)
         if target_id is not None:
-            where.append("target_id = ?")
+            where.append(f"{resolved_target_sql} = ?")
             params.append(target_id)
         if session_id is not None:
-            where.append("session_id = ?")
+            where.append("a.session_id = ?")
             params.append(session_id)
         if investigation_id is not None:
-            where.append("investigation_id = ?")
+            where.append("a.investigation_id = ?")
             params.append(investigation_id)
         if allowed_target_ids is not None:
             if not allowed_target_ids:
                 return (), False
             placeholders = ",".join("?" for _ in allowed_target_ids)
-            where.append(f"target_id IN ({placeholders})")
+            where.append(f"{resolved_target_sql} IN ({placeholders})")
             params.extend(sorted(allowed_target_ids))
         if after_created_at is not None and after_approval_id is not None:
-            where.append("(created_at > ? OR (created_at = ? AND approval_id > ?))")
+            where.append(
+                "(a.created_at > ? OR (a.created_at = ? AND a.approval_id > ?))"
+            )
             stamp = after_created_at.astimezone(UTC).isoformat()
             params.extend((stamp, stamp, after_approval_id))
 
-        query = f"SELECT {_SELECT_COLUMNS} FROM approvals"
-        if where:
-            query += " WHERE " + " AND ".join(where)
-        query += " ORDER BY created_at, approval_id LIMIT ?"
-        params.append(limit + 1)
-
         with self._connection_factory() as conn:
+            has_target_bindings = _has_table(conn, "target_facade_bindings")
+            where_sql = list(where)
+            query = f"SELECT {_select_columns('a')} FROM approvals a"
+            if has_target_bindings:
+                query += (
+                    " LEFT JOIN target_facade_bindings tfb "
+                    "ON tfb.project_id = a.project_id "
+                    "AND tfb.registry_target_id = a.target_id"
+                )
+            else:
+                where_sql = [
+                    clause.replace("COALESCE(tfb.target_id, a.target_id)", "a.target_id")
+                    for clause in where_sql
+                ]
+            if where_sql:
+                query += " WHERE " + " AND ".join(where_sql)
+            query += " ORDER BY a.created_at, a.approval_id LIMIT ?"
+            params.append(limit + 1)
             rows = conn.execute(query, tuple(params)).fetchall()
 
         has_more = len(rows) > limit
@@ -535,21 +571,21 @@ class ApprovalStore:
     @staticmethod
     def _record_from_row(row: Sequence[object]) -> ApprovalRecord:
         intent = json.loads(str(row[2]))
-        preview_raw = _string(row[14]) or "{}"
+        preview_raw = _string(row[15]) or "{}"
         try:
             preview = json.loads(preview_raw)
         except json.JSONDecodeError:
             preview = {}
-        downstream_updated_at = datetime.fromisoformat(str(row[26])) if row[26] else None
+        downstream_updated_at = datetime.fromisoformat(str(row[27])) if row[27] else None
         downstream_status = _derive_downstream_status(
             intent=intent,
-            session_id=_string(row[7]) or _string(intent.get("session_id")),
-            investigation_id=_string(row[8]) or _string(intent.get("investigation_id")),
-            agent_run_id=_string(row[9]) or _string(intent.get("agent_run_id")),
-            tool_call_id=_string(row[10]) or _string(intent.get("tool_call_id")),
-            changeset_id=_string(row[11]) or _string(intent.get("changeset_id")),
-            proposal_id=_string(row[12]) or _string(intent.get("proposal_id")),
-            stored_status=_string(row[24]),
+            session_id=_string(row[8]) or _string(intent.get("session_id")),
+            investigation_id=_string(row[9]) or _string(intent.get("investigation_id")),
+            agent_run_id=_string(row[10]) or _string(intent.get("agent_run_id")),
+            tool_call_id=_string(row[11]) or _string(intent.get("tool_call_id")),
+            changeset_id=_string(row[12]) or _string(intent.get("changeset_id")),
+            proposal_id=_string(row[13]) or _string(intent.get("proposal_id")),
+            stored_status=_string(row[25]),
             downstream_updated_at=(
                 downstream_updated_at.isoformat() if downstream_updated_at else None
             ),
@@ -565,27 +601,28 @@ class ApprovalStore:
             intent=intent,
             intent_summary=str(row[3]),
             status=ApprovalStatus(str(row[4])),
-            target_id=_string(row[5]) or _string(intent.get("target_id")),
-            service=_string(row[6]) or _string(intent.get("service")),
-            session_id=_string(row[7]) or _string(intent.get("session_id")),
-            investigation_id=_string(row[8]) or _string(intent.get("investigation_id")),
-            agent_run_id=_string(row[9]) or _string(intent.get("agent_run_id")),
-            tool_call_id=_string(row[10]) or _string(intent.get("tool_call_id")),
-            changeset_id=_string(row[11]) or _string(intent.get("changeset_id")),
-            proposal_id=_string(row[12]) or _string(intent.get("proposal_id")),
-            risk=_derive_risk(intent, _string(row[13])),
+            project_id=_string(row[5]) or _string(intent.get("project_id")),
+            target_id=_string(row[6]) or _string(intent.get("target_id")),
+            service=_string(row[7]) or _string(intent.get("service")),
+            session_id=_string(row[8]) or _string(intent.get("session_id")),
+            investigation_id=_string(row[9]) or _string(intent.get("investigation_id")),
+            agent_run_id=_string(row[10]) or _string(intent.get("agent_run_id")),
+            tool_call_id=_string(row[11]) or _string(intent.get("tool_call_id")),
+            changeset_id=_string(row[12]) or _string(intent.get("changeset_id")),
+            proposal_id=_string(row[13]) or _string(intent.get("proposal_id")),
+            risk=_derive_risk(intent, _string(row[14])),
             preview=preview if isinstance(preview, dict) else {},
-            created_at=datetime.fromisoformat(str(row[15])),
-            expires_at=datetime.fromisoformat(str(row[16])),
-            decided_at=datetime.fromisoformat(str(row[17])) if row[17] else None,
-            consumed_at=datetime.fromisoformat(str(row[18])) if row[18] else None,
-            decision_actor=_string(row[19]),
-            decision_reason=_string(row[20]),
-            decision_route_key=_string(row[21]),
-            decision_idempotency_key=_string(row[22]),
-            decision_request_sha256=_string(row[23]),
+            created_at=datetime.fromisoformat(str(row[16])),
+            expires_at=datetime.fromisoformat(str(row[17])),
+            decided_at=datetime.fromisoformat(str(row[18])) if row[18] else None,
+            consumed_at=datetime.fromisoformat(str(row[19])) if row[19] else None,
+            decision_actor=_string(row[20]),
+            decision_reason=_string(row[21]),
+            decision_route_key=_string(row[22]),
+            decision_idempotency_key=_string(row[23]),
+            decision_request_sha256=_string(row[24]),
             downstream_status=parsed_downstream_status,
-            downstream_error_code=_string(row[25]),
+            downstream_error_code=_string(row[26]),
             downstream_updated_at=downstream_updated_at,
         )
 

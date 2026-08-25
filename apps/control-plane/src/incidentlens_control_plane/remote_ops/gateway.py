@@ -175,9 +175,13 @@ class Gateway:
         record = await self._approvals.request(
             intent,
             now=now,
+            project_id=request.project_id,
             target_id=request.target_id,
             service=request.service,
             session_id=request.session_id,
+            investigation_id=request.investigation_id,
+            agent_run_id=request.agent_run_id,
+            tool_call_id=request.tool_call_id,
             risk=request.risk.value,
             preview={
                 "preview": "Shell action requires explicit approval.",
@@ -565,8 +569,13 @@ class RemoteToolGateway:
                 raise DockerActionError("approval service is not configured")
             record = await self._approvals.request(
                 intent,
+                project_id=request.project_id,
                 target_id=request.target_id,
                 service=request.service,
+                session_id=request.session_id,
+                investigation_id=request.investigation_id,
+                agent_run_id=request.agent_run_id,
+                tool_call_id=request.tool_call_id,
                 risk="approval_required",
                 preview={
                     "preview": "Container action requires explicit approval.",

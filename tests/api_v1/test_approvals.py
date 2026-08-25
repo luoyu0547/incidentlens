@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
@@ -14,6 +15,9 @@ from incidentlens_control_plane.config import RuntimeSettings
 from incidentlens_control_plane.investigation.service import ApprovalDecisionOutcome
 from incidentlens_control_plane.main import create_app
 from incidentlens_control_plane.remote_ops.fakes import FakeTransportFactory
+from incidentlens_control_plane.remote_ops.gateway import Gateway
+from incidentlens_control_plane.remote_ops.types import HostScope, OperationRisk, ShellRequest
+from incidentlens_control_plane.targets.types import TargetBinding
 
 ROUTE = "/api/v1/approvals"
 
@@ -125,6 +129,7 @@ def _seed_approval(
     client: TestClient,
     *,
     approval_id_target: str,
+    project_id: str | None = None,
     now: datetime | None = None,
     linked: bool = False,
     changeset_id: str | None = None,
@@ -148,6 +153,7 @@ def _seed_approval(
                 "changeset_id": changeset_id,
             },
             now=now or datetime.now(UTC),
+            project_id=project_id,
             target_id=approval_id_target,
             service="payment-api",
             investigation_id="inv-1" if linked else None,
@@ -232,6 +238,70 @@ def test_list_filters_to_authorized_targets(client: TestClient) -> None:
     assert [item["approval_id"] for item in items] == [visible]
 
 
+def test_list_get_and_decide_resolve_facade_target_authorization(client: TestClient) -> None:
+    runtime = client.app.state.runtime
+    now = datetime.now(UTC)
+    runtime.target_store.create(
+        TargetBinding(
+            target_id="tgt-a-collision",
+            project_id="proj-a",
+            registry_target_id="default",
+            name="Project A",
+            authentication_ref="",
+            host_key_policy="strict",
+            pinned_host_key_sha256=None,
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    runtime.target_store.create(
+        TargetBinding(
+            target_id="tgt-b",
+            project_id="proj-b",
+            registry_target_id="default",
+            name="Project B",
+            authentication_ref="",
+            host_key_policy="strict",
+            pinned_host_key_sha256=None,
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    hidden = _seed_approval(
+        client,
+        approval_id_target="default",
+        project_id="proj-a",
+    )
+    visible = _seed_approval(
+        client,
+        approval_id_target="default",
+        project_id="proj-b",
+    )
+
+    list_response = client.get(ROUTE, headers=_auth(SCOPED_B_TOKEN))
+    assert list_response.status_code == 200, list_response.text
+    assert [item["approval_id"] for item in list_response.json()["items"]] == [visible]
+    assert list_response.json()["items"][0]["linkage"]["target_id"] == "tgt-b"
+
+    get_visible = client.get(f"{ROUTE}/{visible}", headers=_auth(SCOPED_B_TOKEN))
+    assert get_visible.status_code == 200
+    assert get_visible.json()["linkage"]["target_id"] == "tgt-b"
+
+    get_hidden = client.get(f"{ROUTE}/{hidden}", headers=_auth(SCOPED_B_TOKEN))
+    assert get_hidden.status_code == 404
+    assert get_hidden.json()["error"]["code"] == "resource_not_found"
+
+    decide_hidden = client.post(
+        f"{ROUTE}/{hidden}/approve",
+        headers=_idem(SCOPED_B_TOKEN, "approve-hidden-collision"),
+        json={"reason": "Looks fine."},
+    )
+    assert decide_hidden.status_code == 404
+    assert decide_hidden.json()["error"]["code"] == "resource_not_found"
+
+
 def test_get_and_decide_hide_unauthorized_target(client: TestClient) -> None:
     approval_id = _seed_approval(client, approval_id_target="tgt-a")
 
@@ -302,6 +372,37 @@ def test_approve_is_idempotent_and_persists_actor_reason(client: TestClient) -> 
     assert replay.headers.get("Idempotency-Replayed") == "true"
 
 
+def test_list_accepts_timezone_naive_cursor_created_at(client: TestClient) -> None:
+    first = _seed_approval(client, approval_id_target="tgt-a")
+    second = _seed_approval(client, approval_id_target="tgt-a")
+
+    first_page = client.get(
+        ROUTE,
+        params={"status": "pending", "limit": 1},
+        headers=_auth(OPERATOR_A_TOKEN),
+    )
+    assert first_page.status_code == 200, first_page.text
+    payload = first_page.json()
+    assert payload["items"][0]["approval_id"] == first
+    encoded = payload["next_cursor"]
+    assert encoded is not None
+    raw = json.loads(base64.urlsafe_b64decode(encoded[4:].encode("ascii")).decode("utf-8"))
+    raw["created_at"] = raw["created_at"].replace("+00:00", "")
+    naive_cursor = "ap1_" + base64.urlsafe_b64encode(
+        json.dumps(raw, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+
+    response = client.get(
+        ROUTE,
+        params={"after": naive_cursor, "limit": 1},
+        headers=_auth(OPERATOR_A_TOKEN),
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["items"][0]["approval_id"] == second
+
+
 def test_contradictory_decision_is_conflict(client: TestClient) -> None:
     approval_id = _seed_approval(client, approval_id_target="tgt-a")
     approved = client.post(
@@ -361,6 +462,77 @@ def test_decision_remains_committed_when_downstream_fails(
     stored = runtime.approvals.get(approval_id)
     assert stored is not None
     assert stored.status.value == "approved"
+
+
+def test_shell_gateway_created_approval_preserves_linkage_for_v1_decision(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = client.app.state.runtime
+    request = ShellRequest(
+        operation_id="call-1",
+        incident_id="inc-1",
+        project_id="proj-shell",
+        target_id="tgt-a",
+        service="payment-api",
+        scope=HostScope(),
+        session_id="sess-1",
+        investigation_id="inv-1",
+        agent_run_id="run-1",
+        tool_call_id="call-1",
+        risk=OperationRisk.APPROVAL_REQUIRED,
+        command="systemctl restart payments",
+        reason="restart the service",
+    )
+
+    result = asyncio.run(Gateway(runtime.approvals).shell(request))
+    assert result.approved is False
+    approval_id = result.approval_id
+    assert approval_id is not None
+
+    calls: list[str] = []
+
+    async def _resume(*args, **kwargs):
+        calls.append(kwargs.get("approval_id", args[0] if args else ""))
+        return ApprovalDecisionOutcome(
+            approval_id=approval_id,
+            matched="tool_call",
+            tool_call_id="call-1",
+            run_id="run-1",
+            action="re-executed",
+            applied=True,
+            consumed=True,
+        )
+
+    monkeypatch.setattr(runtime.investigations, "handle_approval_decision", _resume)
+
+    response = client.post(
+        f"{ROUTE}/{approval_id}/approve",
+        headers=_idem(OPERATOR_A_TOKEN, "approve-shell-linkage"),
+        json={"reason": "Approved exact shell action."},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["downstream_status"] == "processed"
+    assert body["linkage"] == {
+        "target_id": "tgt-a",
+        "service": "payment-api",
+        "session_id": "sess-1",
+        "investigation_id": "inv-1",
+        "agent_run_id": "run-1",
+        "tool_call_id": "call-1",
+        "changeset_id": None,
+        "proposal_id": None,
+    }
+    assert calls == [approval_id]
+
+    stored = runtime.approvals.get(approval_id)
+    assert stored is not None
+    assert stored.project_id == "proj-shell"
+    assert stored.session_id == "sess-1"
+    assert stored.investigation_id == "inv-1"
+    assert stored.agent_run_id == "run-1"
+    assert stored.tool_call_id == "call-1"
 
 
 def test_same_key_retry_resumes_matching_decision_after_crash_window(

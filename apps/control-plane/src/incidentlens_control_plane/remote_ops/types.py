@@ -59,6 +59,9 @@ class OperationContext(BaseModel):
     service: str = Field(min_length=1, max_length=120)
     scope: RemoteScope
     session_id: str | None = Field(default=None, min_length=1, max_length=120)
+    investigation_id: str | None = Field(default=None, min_length=1, max_length=120)
+    agent_run_id: str | None = Field(default=None, min_length=1, max_length=120)
+    tool_call_id: str | None = Field(default=None, min_length=1, max_length=120)
 
 
 class FileOperationRequest(OperationContext):
