@@ -84,6 +84,9 @@ class OperationEventPublisher:
             operation_id=operation.operation_id,
             kind=operation.kind.value,
             status=operation.status.value,
+            target_id=operation.target_id,
+            session_id=operation.session_id,
+            investigation_id=operation.investigation_id,
             summary_preview=self._preview(operation.progress_summary),
         )
 
