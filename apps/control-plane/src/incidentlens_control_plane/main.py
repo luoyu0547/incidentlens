@@ -18,7 +18,9 @@ from incidentlens_control_plane.api.routes import agent_sessions as agent_sessio
 from incidentlens_control_plane.api.routes import approvals as approvals_v1_routes
 from incidentlens_control_plane.api.routes import changes as changes_routes
 from incidentlens_control_plane.api.routes import events as v1_events_routes
+from incidentlens_control_plane.api.routes import overview as overview_routes
 from incidentlens_control_plane.api.routes import operations as operations_routes
+from incidentlens_control_plane.api.routes import services as services_routes
 from incidentlens_control_plane.api.routes import targets as targets_routes
 from incidentlens_control_plane.api.routes.auth import (
     auth_router,
@@ -174,6 +176,8 @@ def create_app(
     application.include_router(v1_events_routes.router)
     application.include_router(operations_routes.router)
     application.include_router(changes_routes.router)
+    application.include_router(overview_routes.router)
+    application.include_router(services_routes.router)
 
     from incidentlens_control_plane.api.routes.service_logs import (
         router as service_logs_router,

@@ -77,6 +77,8 @@ from incidentlens_control_plane.project_memory.openai_adapter import (
 from incidentlens_control_plane.project_memory.service import ProjectMemoryService
 from incidentlens_control_plane.project_memory.store import ProjectMemoryStore
 from incidentlens_control_plane.project_registry.store import ProjectRegistryStore
+from incidentlens_control_plane.projections.overview import OverviewProjectionService
+from incidentlens_control_plane.projections.services import ServiceProjectionService
 from incidentlens_control_plane.remote_ops.asyncssh_adapter import (
     AsyncSshTransportFactory,
 )
@@ -119,6 +121,8 @@ class RuntimeServices:
     idempotency: IdempotencyService
     target_store: TargetStore
     target_service: TargetService
+    overview_projection: OverviewProjectionService
+    service_projection: ServiceProjectionService
     operation_store: OperationStore
     operation_service: OperationService
     operation_recovery: OperationRecovery
@@ -389,6 +393,25 @@ def build_runtime(
         target_store=target_store,
         investigations=investigation_store,
     )
+    service_projection = ServiceProjectionService(
+        target_service=target_service,
+        target_store=target_store,
+        projects=projects,
+        approvals=approval_store,
+        investigations=investigation_store,
+        operations=operation_store,
+        logs=log_store,
+    )
+    overview_projection = OverviewProjectionService(
+        target_service=target_service,
+        target_store=target_store,
+        projects=projects,
+        approvals=approval_store,
+        investigations=investigation_store,
+        operations=operation_store,
+        logs=log_store,
+        evidence=evidence,
+    )
 
     operation_service = OperationService(
         store=operation_store,
@@ -468,6 +491,8 @@ def build_runtime(
         idempotency=idempotency,
         target_store=target_store,
         target_service=target_service,
+        overview_projection=overview_projection,
+        service_projection=service_projection,
         operation_store=operation_store,
         operation_service=operation_service,
         operation_recovery=operation_recovery,
