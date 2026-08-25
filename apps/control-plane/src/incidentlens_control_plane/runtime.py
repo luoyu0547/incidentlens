@@ -78,6 +78,11 @@ from incidentlens_control_plane.project_memory.service import ProjectMemoryServi
 from incidentlens_control_plane.project_memory.store import ProjectMemoryStore
 from incidentlens_control_plane.project_registry.store import ProjectRegistryStore
 from incidentlens_control_plane.projections.overview import OverviewProjectionService
+from incidentlens_control_plane.projections.evidence import EvidenceProjectionService
+from incidentlens_control_plane.projections.investigations import (
+    InvestigationSummaryProjectionService,
+)
+from incidentlens_control_plane.projections.issues import IssueProjectionService
 from incidentlens_control_plane.projections.services import ServiceProjectionService
 from incidentlens_control_plane.remote_ops.asyncssh_adapter import (
     AsyncSshTransportFactory,
@@ -123,6 +128,9 @@ class RuntimeServices:
     target_service: TargetService
     overview_projection: OverviewProjectionService
     service_projection: ServiceProjectionService
+    issue_projection: IssueProjectionService
+    investigation_summary_projection: InvestigationSummaryProjectionService
+    evidence_projection: EvidenceProjectionService
     operation_store: OperationStore
     operation_service: OperationService
     operation_recovery: OperationRecovery
@@ -412,6 +420,31 @@ def build_runtime(
         logs=log_store,
         evidence=evidence,
     )
+    issue_projection = IssueProjectionService(
+        target_service=target_service,
+        target_store=target_store,
+        investigations=investigation_store,
+        approvals=approval_store,
+        changes=change_store,
+        evidence=evidence,
+        logs=log_store,
+    )
+    investigation_summary_projection = InvestigationSummaryProjectionService(
+        target_service=target_service,
+        target_store=target_store,
+        investigations=investigation_store,
+        approvals=approval_store,
+        changes=change_store,
+        evidence=evidence,
+        logs=log_store,
+        events=events,
+    )
+    evidence_projection = EvidenceProjectionService(
+        target_service=target_service,
+        target_store=target_store,
+        evidence=evidence,
+        logs=log_store,
+    )
 
     operation_service = OperationService(
         store=operation_store,
@@ -493,6 +526,9 @@ def build_runtime(
         target_service=target_service,
         overview_projection=overview_projection,
         service_projection=service_projection,
+        issue_projection=issue_projection,
+        investigation_summary_projection=investigation_summary_projection,
+        evidence_projection=evidence_projection,
         operation_store=operation_store,
         operation_service=operation_service,
         operation_recovery=operation_recovery,
