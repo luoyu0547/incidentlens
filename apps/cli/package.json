@@ -1,0 +1,31 @@
+{
+  "name": "@incidentlens/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "incidentlens": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:pty": "echo 'pty test placeholder'"
+  },
+  "dependencies": {
+    "ink": "^5.1.0",
+    "react": "^19.0.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.7",
+    "ink-testing-library": "^4.0.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

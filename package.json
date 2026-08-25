@@ -1,0 +1,33 @@
+{
+  "name": "incidentlens",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "format:check": "prettier --check .",
+    "test": "npm run test --workspaces --if-present",
+    "protocol:generate": "npm run generate --workspace @incidentlens/protocol",
+    "protocol:check": "npm run check --workspace @incidentlens/protocol",
+    "test:pty": "npm run test:pty --workspace @incidentlens/cli",
+    "verify:cli": "npm run protocol:check && npm run lint && npm run format:check && npm run typecheck && npm test && npm run build && npm run test:pty"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "tsup": "^8.4.0",
+    "vitest": "^2.1.8",
+    "eslint": "^9.18.0",
+    "prettier": "^3.4.2",
+    "typescript-eslint": "^8.21.0",
+    "eslint-plugin-react-hooks": "^5.0.0",
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.0.7"
+  }
+}

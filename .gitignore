@@ -8,3 +8,6 @@ data/
 artifacts/
 .claude/
 .incidentlens-data/
+node_modules/
+dist/
+*.tsbuildinfo
