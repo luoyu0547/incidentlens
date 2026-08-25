@@ -855,6 +855,25 @@ def test_issue_projection_omits_sibling_and_legacy_artifacts_for_shared_scope_in
             created_at=NOW - timedelta(minutes=4, seconds=30),
         ),
     )
+    _seed_changeset(
+        runtime,
+        incident_id="inc-shared-scope",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        changeset_id="chs-legacy-claimed",
+        final_status=ChangeSetStatus.VERIFIED,
+    )
+    _seed_changeset_approval(
+        runtime,
+        investigation_id="inv-bravo",
+        run_id="run-bravo",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        changeset_id="chs-legacy-claimed",
+        created_at=NOW - timedelta(minutes=4, seconds=15),
+    )
     _seed_validation_evidence(
         runtime,
         incident_id="inc-shared-scope",
@@ -892,6 +911,7 @@ def test_issue_projection_omits_sibling_and_legacy_artifacts_for_shared_scope_in
     assert bravo_issue.status is IssueStatus.RESOLVED
     assert bravo_issue.resolution is not None
     assert bravo_issue.resolution.changeset_id == "chs-bravo"
+    assert bravo_issue.resolution.changeset_id != "chs-legacy-claimed"
     assert bravo_issue.verification is not None
     assert bravo_issue.verification.passed is True
     assert bravo_issue.severity is LogSeverity.CRITICAL

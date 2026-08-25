@@ -466,6 +466,56 @@ def test_investigation_summary_projection_omits_sibling_and_legacy_artifacts(
         ChangeSetStatus.VERIFIED,
     ):
         runtime.change_store.transition("chs-bravo", status)
+    legacy_claimed_approval = asyncio.run(
+        runtime.approvals.request(
+            {
+                "kind": "file.write",
+                "target_id": "dev-a",
+                "service": "payment-api",
+                "changeset_id": "chs-legacy-claimed",
+            },
+            now=NOW - timedelta(minutes=4, seconds=15),
+            project_id="payments",
+            target_id="dev-a",
+            service="payment-api",
+            investigation_id="inv-bravo",
+            agent_run_id="run-bravo",
+            changeset_id="chs-legacy-claimed",
+        )
+    )
+    asyncio.run(
+        runtime.approvals.approve(
+            legacy_claimed_approval.approval_id,
+            now=NOW - timedelta(minutes=4, seconds=14),
+            actor="tester",
+            reason="legacy claimed changeset remains unlinked",
+        )
+    )
+    runtime.change_store.create_changeset(
+        changeset_id="chs-legacy-claimed",
+        incident_id="inc-shared",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        files=(
+            FileChange(
+                file_change_id="fc-legacy-claimed",
+                scope="host",
+                remote_path="/srv/payments/app.py",
+                expected_sha256="e" * 64,
+                replacement_sha256="f" * 64,
+            ),
+        ),
+    )
+    for status in (
+        ChangeSetStatus.PREFLIGHTED,
+        ChangeSetStatus.LOCALLY_BACKED_UP,
+        ChangeSetStatus.REMOTELY_BACKED_UP,
+        ChangeSetStatus.APPLIED,
+        ChangeSetStatus.VALIDATED,
+        ChangeSetStatus.VERIFIED,
+    ):
+        runtime.change_store.transition("chs-legacy-claimed", status)
     runtime.evidence_service.record_validation_result(
         agent_run_id="run-bravo",
         incident_id="inc-shared",
@@ -508,6 +558,10 @@ def test_investigation_summary_projection_omits_sibling_and_legacy_artifacts(
         bravo_summary.verification_summaries[0].evidence_ref_id,
     }
     assert [item.changeset_id for item in bravo_summary.change_summaries] == ["chs-bravo"]
+    assert all(
+        item.changeset_id != "chs-legacy-claimed"
+        for item in bravo_summary.change_summaries
+    )
     assert [item.passed for item in bravo_summary.verification_summaries] == [True]
 
 

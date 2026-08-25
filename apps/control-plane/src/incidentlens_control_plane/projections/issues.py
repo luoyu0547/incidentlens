@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
-from collections import Counter
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Callable
@@ -272,11 +271,6 @@ def _matching_changes(
         service_name=service_name,
     )
     approvals_by_id = {record.approval_id: record for record in owned_approvals}
-    changeset_counts = Counter(
-        record.changeset_id
-        for record in owned_approvals
-        if record.changeset_id is not None
-    )
     return tuple(
         changeset
         for changeset in changes.list_for_incident(incident_id, limit=200)
@@ -285,8 +279,13 @@ def _matching_changes(
         and changeset.service_name == service_name
         and _changeset_is_owned(
             changeset,
+            investigations=investigations,
+            investigation_id=investigation_id,
+            incident_id=incident_id,
+            project_id=project_id,
+            registry_target_id=registry_target_id,
+            service_name=service_name,
             approvals_by_id=approvals_by_id,
-            changeset_counts=changeset_counts,
         )
     )
 
@@ -363,15 +362,47 @@ def _owned_changeset_approvals(
 def _changeset_is_owned(
     changeset: ChangeSet,
     *,
+    investigations: InvestigationStore,
+    investigation_id: str,
+    incident_id: str,
+    project_id: str,
+    registry_target_id: str,
+    service_name: str,
     approvals_by_id: dict[str, ApprovalRecord],
-    changeset_counts: Counter[str],
 ) -> bool:
     if changeset.approval_id is not None:
         record = approvals_by_id.get(changeset.approval_id)
         if record is None:
             return False
         return record.changeset_id in {None, changeset.changeset_id}
-    return changeset_counts[changeset.changeset_id] == 1
+    return _unlinked_changeset_has_single_claimant(
+        investigations,
+        investigation_id=investigation_id,
+        incident_id=incident_id,
+        project_id=project_id,
+        registry_target_id=registry_target_id,
+        service_name=service_name,
+    )
+
+
+def _unlinked_changeset_has_single_claimant(
+    investigations: InvestigationStore,
+    *,
+    investigation_id: str,
+    incident_id: str,
+    project_id: str,
+    registry_target_id: str,
+    service_name: str,
+) -> bool:
+    candidates = tuple(
+        record.investigation_id
+        for record in investigations.list_investigations()
+        if record.incident_id == incident_id
+        and record.project_id == project_id
+        and record.target_id == registry_target_id
+        and record.service == service_name
+    )
+    return candidates == (investigation_id,)
 
 
 def _matching_pending_approvals(
