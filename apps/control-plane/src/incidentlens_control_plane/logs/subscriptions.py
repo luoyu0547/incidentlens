@@ -122,6 +122,10 @@ class LogSubscriptionManager:
         # tasks) to have live subscribers; the WebSocket handler registers here
         # before replaying durable records so no live record is missed.
         self._live_queues: dict[str, list[asyncio.Queue[LogRecord]]] = {}
+        # Product log streams can filter by service/target rather than a single
+        # durable subscription.  Keep a separate bounded fan-out registry.
+        self._all_live_queues: list[asyncio.Queue[LogRecord]] = []
+        self._live_drops: dict[int, int] = {}
 
     def running_subscription_ids(self) -> set[str]:
         """Return the ids of subscriptions with live reader/writer tasks."""
@@ -194,9 +198,7 @@ class LogSubscriptionManager:
                 return
             await self._start(subscription.subscription_id)
 
-    async def pause(
-        self, subscription_id: str, *, now: datetime | None = None
-    ) -> LogSubscription:
+    async def pause(self, subscription_id: str, *, now: datetime | None = None) -> LogSubscription:
         """Stop the reader/writer tasks and mark the subscription paused.
 
         The stored cursor is intentionally preserved so ``resume`` continues
@@ -205,14 +207,10 @@ class LogSubscriptionManager:
         now = now or datetime.now(UTC)
         await self._stop(subscription_id)
         subscription = self._store.pause_subscription(subscription_id, now=now)
-        await self._emit_safe_event(
-            RuntimeEventType.LOG_SUBSCRIPTION_PAUSED, subscription
-        )
+        await self._emit_safe_event(RuntimeEventType.LOG_SUBSCRIPTION_PAUSED, subscription)
         return subscription
 
-    async def resume(
-        self, subscription_id: str, *, now: datetime | None = None
-    ) -> LogSubscription:
+    async def resume(self, subscription_id: str, *, now: datetime | None = None) -> LogSubscription:
         """Mark the subscription active and restart its reader/writer tasks."""
         now = now or datetime.now(UTC)
         subscription = self._store.resume_subscription(subscription_id, now=now)
@@ -222,16 +220,12 @@ class LogSubscriptionManager:
         )
         return subscription
 
-    async def delete(
-        self, subscription_id: str, *, now: datetime | None = None
-    ) -> LogSubscription:
+    async def delete(self, subscription_id: str, *, now: datetime | None = None) -> LogSubscription:
         """Stop the reader/writer tasks and mark the subscription deleted."""
         now = now or datetime.now(UTC)
         await self._stop(subscription_id)
         subscription = self._store.delete_subscription(subscription_id, now=now)
-        await self._emit_safe_event(
-            RuntimeEventType.LOG_SUBSCRIPTION_DELETED, subscription
-        )
+        await self._emit_safe_event(RuntimeEventType.LOG_SUBSCRIPTION_DELETED, subscription)
         return subscription
 
     async def close_all(self) -> None:
@@ -332,9 +326,7 @@ class LogSubscriptionManager:
                         subscription.subscription_id,
                         _summarize_error(exc),
                     )
-                    reached = await self._record_failure(
-                        subscription.subscription_id, exc
-                    )
+                    reached = await self._record_failure(subscription.subscription_id, exc)
                     if reached:
                         return
                     await asyncio.sleep(backoff)
@@ -359,9 +351,7 @@ class LogSubscriptionManager:
                 "log source rotated for subscription %s; restarting at offset 0",
                 subscription.subscription_id,
             )
-            await self._emit_safe_event(
-                RuntimeEventType.LOG_SOURCE_ROTATED, subscription
-            )
+            await self._emit_safe_event(RuntimeEventType.LOG_SOURCE_ROTATED, subscription)
         for raw in result.lines:
             await queue.put(_QueuedLine(raw=raw, generation=result.generation))
 
@@ -385,9 +375,7 @@ class LogSubscriptionManager:
                 async for line in source.stream(subscription, target, cursor):
                     item = _QueuedLine(raw=line, generation=line.cursor)
                     try:
-                        await asyncio.wait_for(
-                            queue.put(item), timeout=self._queue_put_timeout
-                        )
+                        await asyncio.wait_for(queue.put(item), timeout=self._queue_put_timeout)
                     except asyncio.TimeoutError:
                         await self._emit_safe_event(
                             RuntimeEventType.LOG_BACKPRESSURE,
@@ -448,15 +436,11 @@ class LogSubscriptionManager:
         except asyncio.CancelledError:
             pass
 
-    async def _write_batch(
-        self, subscription: LogSubscription, batch: list[_QueuedLine]
-    ) -> None:
+    async def _write_batch(self, subscription: LogSubscription, batch: list[_QueuedLine]) -> None:
         """Process, persist, and only then advance the stored cursor."""
         now = datetime.now(UTC)
         raw_lines = tuple(item.raw for item in batch)
-        records = self._service.process_raw_lines(
-            raw_lines, now=now, subscription=subscription
-        )
+        records = self._service.process_raw_lines(raw_lines, now=now, subscription=subscription)
         self._store.append_batch(records)
         # Notify live WebSocket subscribers only AFTER the durable write so a
         # subscriber that receives a live record can always find it in the
@@ -554,12 +538,26 @@ class LogSubscriptionManager:
                 if not queues:
                     self._live_queues.pop(subscription_id, None)
 
-    def live_subscriber_count(self, subscription_id: str) -> int:
-        """Return the number of live WebSocket queues registered for a subscription.
+    @asynccontextmanager
+    async def subscribe_all_records(self) -> AsyncIterator[asyncio.Queue[LogRecord]]:
+        """Register a bounded queue for product-wide live records."""
+        queue: asyncio.Queue[LogRecord] = asyncio.Queue(maxsize=256)
+        self._all_live_queues.append(queue)
+        self._live_drops[id(queue)] = 0
+        try:
+            yield queue
+        finally:
+            try:
+                self._all_live_queues.remove(queue)
+            except ValueError:
+                pass
+            self._live_drops.pop(id(queue), None)
 
-        Exposed for tests to assert that a disconnect unregisters the session's
-        queue.
-        """
+    def live_drop_count(self, queue: asyncio.Queue[LogRecord]) -> int:
+        return self._live_drops.get(id(queue), 0)
+
+    def live_subscriber_count(self, subscription_id: str) -> int:
+        """Return number of legacy subscription queues."""
         return len(self._live_queues.get(subscription_id, ()))
 
     def _publish_live(self, record: LogRecord) -> None:
@@ -583,6 +581,17 @@ class LogSubscriptionManager:
                 queue.put_nowait(record)
             except asyncio.QueueFull:
                 pass
+        for queue in self._all_live_queues:
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                self._live_drops[id(queue)] = self._live_drops.get(id(queue), 0) + 1
+            try:
+                queue.put_nowait(record)
+            except asyncio.QueueFull:
+                self._live_drops[id(queue)] = self._live_drops.get(id(queue), 0) + 1
 
     # --- test hooks and failure recording ---
 
@@ -609,15 +618,11 @@ class LogSubscriptionManager:
             RuntimeEventType.LOG_BACKPRESSURE, subscription, reason="queue full"
         )
 
-    async def record_failure_for_test(
-        self, subscription_id: str, error: Exception
-    ) -> None:
+    async def record_failure_for_test(self, subscription_id: str, error: Exception) -> None:
         """Test hook: record a reader failure (see ``_record_failure``)."""
         await self._record_failure(subscription_id, error)
 
-    async def _record_failure(
-        self, subscription_id: str, error: BaseException
-    ) -> bool:
+    async def _record_failure(self, subscription_id: str, error: BaseException) -> bool:
         """Count a reader failure; at ``max_failures`` error the subscription.
 
         Returns True when the subscription was moved to status ``error`` (the
@@ -650,9 +655,7 @@ class LogSubscriptionManager:
         await self._teardown_running(subscription_id, error=error_summary)
         return True
 
-    async def _teardown_running(
-        self, subscription_id: str, *, error: str | None = None
-    ) -> None:
+    async def _teardown_running(self, subscription_id: str, *, error: str | None = None) -> None:
         """Drop the running entry and stop its tasks after an error transition.
 
         Called when a subscription moves to status ``error`` so the entry does

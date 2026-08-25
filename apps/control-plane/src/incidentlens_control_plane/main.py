@@ -57,10 +57,7 @@ async def _lifespan(
                 "legacy /api/* routes are enabled (INCIDENTLENS_LEGACY_API_ENABLED=true); "
                 "migrate clients to the authenticated /api/v1 surface before disabling"
             )
-        if (
-            settings.session_signing_key.get_secret_value()
-            == DEFAULT_SESSION_SIGNING_KEY
-        ):
+        if settings.session_signing_key.get_secret_value() == DEFAULT_SESSION_SIGNING_KEY:
             logger.warning(
                 "session signing key is the documented non-production dev default; "
                 "set INCIDENTLENS_SESSION_SIGNING_KEY before deploying"
@@ -88,9 +85,7 @@ async def _lifespan(
         # dangerous calls to UNCERTAIN, then close investigations/children, then
         # log subscriptions, and only then the host sessions.
         try:
-            await services.dispatcher.stop(
-                grace_seconds=settings.shutdown_grace_seconds
-            )
+            await services.dispatcher.stop(grace_seconds=settings.shutdown_grace_seconds)
         except Exception:
             logger.exception("failed to stop operation dispatcher")
         try:
@@ -178,12 +173,14 @@ def create_app(
     application.include_router(operations_routes.router)
     application.include_router(changes_routes.router)
 
-    from incidentlens_control_plane.api.ws.cli_events import router as cli_ws_router
     from incidentlens_control_plane.api.routes.service_logs import (
         router as service_logs_router,
     )
+    from incidentlens_control_plane.api.ws.cli_events import router as cli_ws_router
+    from incidentlens_control_plane.api.ws.logs import router as logs_ws_router
 
     application.include_router(cli_ws_router)
+    application.include_router(logs_ws_router)
     application.include_router(service_logs_router)
 
     if settings.legacy_api_enabled:
