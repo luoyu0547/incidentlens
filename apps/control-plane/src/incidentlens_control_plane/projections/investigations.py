@@ -316,6 +316,8 @@ class InvestigationSummaryProjectionService:
     def _build_summary(self, investigation, *, facade_target_id: str) -> InvestigationSummaryView:
         evidence_refs = _matching_evidence(
             self._evidence,
+            self._investigations,
+            investigation_id=investigation.investigation_id,
             incident_id=investigation.incident_id,
             project_id=investigation.project_id,
             registry_target_id=investigation.target_id,
@@ -323,8 +325,12 @@ class InvestigationSummaryProjectionService:
         )
         change_sets = _matching_changes(
             self._changes,
+            self._investigations,
+            self._approvals,
+            investigation_id=investigation.investigation_id,
             incident_id=investigation.incident_id,
             project_id=investigation.project_id,
+            facade_target_id=facade_target_id,
             registry_target_id=investigation.target_id,
             service_name=investigation.service,
         )

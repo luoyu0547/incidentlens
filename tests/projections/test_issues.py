@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -104,7 +105,14 @@ def _create_investigation(
     )
 
 
-def _create_run(runtime, *, investigation_id: str, run_id: str, target_id: str) -> None:
+def _create_run(
+    runtime,
+    *,
+    investigation_id: str,
+    run_id: str,
+    target_id: str,
+    project_id: str = "payments",
+) -> None:
     runtime.investigation_store.create_agent_run(
         AgentRun(
             agent_run_id=run_id,
@@ -112,10 +120,10 @@ def _create_run(runtime, *, investigation_id: str, run_id: str, target_id: str) 
             parent_run_id=None,
             kind=AgentRunKind.PARENT,
             scope=AgentScope(
-                project_id="payments",
+                project_id=project_id,
                 target_id=target_id,
                 scope=LogScope.HOST,
-                allowed_host_paths=(PurePosixPath("/srv/payments"),),
+                allowed_host_paths=(PurePosixPath(f"/srv/{project_id}"),),
             ),
             status=AgentRunStatus.COMPLETED,
             budget=AgentBudget(),
@@ -203,6 +211,7 @@ def _seed_changeset(
     service_name: str,
     changeset_id: str,
     final_status: ChangeSetStatus,
+    approval_id: str | None = None,
 ) -> None:
     runtime.change_store.create_changeset(
         changeset_id=changeset_id,
@@ -222,6 +231,7 @@ def _seed_changeset(
         ),
         verification_plan="run health check",
         rollback_plan="restore previous build",
+        approval_id=approval_id,
     )
     sequence = (
         ChangeSetStatus.PREFLIGHTED,
@@ -271,6 +281,45 @@ def _seed_conclusion(
         conclusion=Conclusion(summary=summary, evidence_ids=evidence_ids),
         now=NOW,
     )
+
+
+def _seed_changeset_approval(
+    runtime,
+    *,
+    investigation_id: str,
+    run_id: str,
+    project_id: str,
+    target_id: str,
+    service_name: str,
+    changeset_id: str,
+    created_at: datetime,
+) -> str:
+    approval = asyncio.run(
+        runtime.approvals.request(
+            {
+                "kind": "file.write",
+                "target_id": target_id,
+                "service": service_name,
+                "changeset_id": changeset_id,
+            },
+            now=created_at,
+            project_id=project_id,
+            target_id=target_id,
+            service=service_name,
+            investigation_id=investigation_id,
+            agent_run_id=run_id,
+            changeset_id=changeset_id,
+        )
+    )
+    asyncio.run(
+        runtime.approvals.approve(
+            approval.approval_id,
+            now=created_at + timedelta(seconds=1),
+            actor="tester",
+            reason="link changeset to investigation",
+        )
+    )
+    return approval.approval_id
 
 
 def test_issue_projection_uses_investigation_ids_and_never_creates_issues_table(
@@ -426,6 +475,16 @@ def test_issue_projection_maps_statuses_and_requires_grounded_conclusion(
         service_name="payment-api",
         changeset_id="chs-mitigated",
         final_status=ChangeSetStatus.APPLIED,
+        approval_id=_seed_changeset_approval(
+            runtime,
+            investigation_id="inv-mitigated",
+            run_id="run-mitigated",
+            project_id="payments",
+            target_id="dev-a",
+            service_name="payment-api",
+            changeset_id="chs-mitigated",
+            created_at=NOW - timedelta(minutes=5, seconds=30),
+        ),
     )
     _seed_changeset(
         runtime,
@@ -435,6 +494,16 @@ def test_issue_projection_maps_statuses_and_requires_grounded_conclusion(
         service_name="payment-api",
         changeset_id="chs-resolved",
         final_status=ChangeSetStatus.VERIFIED,
+        approval_id=_seed_changeset_approval(
+            runtime,
+            investigation_id="inv-resolved",
+            run_id="run-resolved",
+            project_id="payments",
+            target_id="dev-a",
+            service_name="payment-api",
+            changeset_id="chs-resolved",
+            created_at=NOW - timedelta(minutes=4, seconds=30),
+        ),
     )
     _seed_validation_evidence(
         runtime,
@@ -523,7 +592,13 @@ def test_issue_projection_scopes_changes_and_evidence_to_exact_ownership(
         run_id="run-payments",
         target_id="dev-a",
     )
-    _create_run(runtime, investigation_id="inv-ops", run_id="run-ops", target_id="dev-b")
+    _create_run(
+        runtime,
+        investigation_id="inv-ops",
+        run_id="run-ops",
+        target_id="dev-b",
+        project_id="ops",
+    )
     _seed_changeset(
         runtime,
         incident_id="inc-shared",
@@ -532,6 +607,16 @@ def test_issue_projection_scopes_changes_and_evidence_to_exact_ownership(
         service_name="payment-api",
         changeset_id="chs-payments",
         final_status=ChangeSetStatus.APPLIED,
+        approval_id=_seed_changeset_approval(
+            runtime,
+            investigation_id="inv-payments",
+            run_id="run-payments",
+            project_id="payments",
+            target_id="dev-a",
+            service_name="payment-api",
+            changeset_id="chs-payments",
+            created_at=NOW - timedelta(minutes=3, seconds=30),
+        ),
     )
     _seed_changeset(
         runtime,
@@ -541,6 +626,16 @@ def test_issue_projection_scopes_changes_and_evidence_to_exact_ownership(
         service_name="worker-api",
         changeset_id="chs-ops",
         final_status=ChangeSetStatus.VERIFIED,
+        approval_id=_seed_changeset_approval(
+            runtime,
+            investigation_id="inv-ops",
+            run_id="run-ops",
+            project_id="ops",
+            target_id="dev-b",
+            service_name="worker-api",
+            changeset_id="chs-ops",
+            created_at=NOW - timedelta(minutes=2, seconds=30),
+        ),
     )
     payments_evidence = _seed_log_evidence(
         runtime,
@@ -623,6 +718,16 @@ def test_issue_projection_does_not_resolve_on_failed_or_inconclusive_validation(
         service_name="payment-api",
         changeset_id="chs-failed-validation",
         final_status=ChangeSetStatus.VERIFIED,
+        approval_id=_seed_changeset_approval(
+            runtime,
+            investigation_id="inv-failed-validation",
+            run_id="run-failed-validation",
+            project_id="payments",
+            target_id="dev-a",
+            service_name="payment-api",
+            changeset_id="chs-failed-validation",
+            created_at=NOW - timedelta(minutes=4, seconds=30),
+        ),
     )
     failed_validation = _seed_validation_evidence(
         runtime,
@@ -674,3 +779,123 @@ def test_issue_projection_does_not_resolve_on_failed_or_inconclusive_validation(
     assert issue.verification.passed is None
 
     runtime.evidence.get(failed_validation.evidence_ref_id)
+
+
+def test_issue_projection_omits_sibling_and_legacy_artifacts_for_shared_scope_investigations(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    _register_target(
+        runtime,
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+    )
+    for investigation_id, created_at in (
+        ("inv-alpha", NOW - timedelta(minutes=6)),
+        ("inv-bravo", NOW - timedelta(minutes=5)),
+    ):
+        _create_investigation(
+            runtime,
+            investigation_id=investigation_id,
+            incident_id="inc-shared-scope",
+            project_id="payments",
+            registry_target_id="dev-a",
+            service_name="payment-api",
+            status=InvestigationStatus.RUNNING,
+            created_at=created_at,
+        )
+    _create_run(runtime, investigation_id="inv-alpha", run_id="run-alpha", target_id="dev-a")
+    _create_run(runtime, investigation_id="inv-bravo", run_id="run-bravo", target_id="dev-a")
+
+    alpha_log = _seed_log_evidence(
+        runtime,
+        incident_id="inc-shared-scope",
+        run_id="run-alpha",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        cursor="offset:31",
+    )
+    bravo_log = _seed_log_evidence(
+        runtime,
+        incident_id="inc-shared-scope",
+        run_id="run-bravo",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        cursor="offset:32",
+        severity=LogSeverity.CRITICAL,
+    )
+    _seed_changeset(
+        runtime,
+        incident_id="inc-shared-scope",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        changeset_id="chs-legacy-shared",
+        final_status=ChangeSetStatus.VERIFIED,
+    )
+    _seed_changeset(
+        runtime,
+        incident_id="inc-shared-scope",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        changeset_id="chs-bravo",
+        final_status=ChangeSetStatus.VERIFIED,
+        approval_id=_seed_changeset_approval(
+            runtime,
+            investigation_id="inv-bravo",
+            run_id="run-bravo",
+            project_id="payments",
+            target_id="dev-a",
+            service_name="payment-api",
+            changeset_id="chs-bravo",
+            created_at=NOW - timedelta(minutes=4, seconds=30),
+        ),
+    )
+    _seed_validation_evidence(
+        runtime,
+        incident_id="inc-shared-scope",
+        run_id="run-bravo",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        passed=True,
+    )
+
+    projection = IssueProjectionService(
+        target_service=runtime.target_service,
+        target_store=runtime.target_store,
+        investigations=runtime.investigation_store,
+        approvals=runtime.approvals._approvals,
+        changes=runtime.change_store,
+        evidence=runtime.evidence,
+        logs=runtime.log_store,
+        now=lambda: NOW,
+    )
+
+    alpha_issue = projection.get_issue("iss_inv-alpha")
+    bravo_issue = projection.get_issue("iss_inv-bravo")
+
+    assert alpha_issue is not None
+    assert alpha_issue.status is IssueStatus.OPEN
+    assert alpha_issue.resolution is None
+    assert alpha_issue.verification is None
+    assert alpha_issue.severity is LogSeverity.ERROR
+    assert [item.evidence_ref_id for item in alpha_issue.evidence] == [
+        alpha_log.evidence_ref_id
+    ]
+
+    assert bravo_issue is not None
+    assert bravo_issue.status is IssueStatus.RESOLVED
+    assert bravo_issue.resolution is not None
+    assert bravo_issue.resolution.changeset_id == "chs-bravo"
+    assert bravo_issue.verification is not None
+    assert bravo_issue.verification.passed is True
+    assert bravo_issue.severity is LogSeverity.CRITICAL
+    assert {item.evidence_ref_id for item in bravo_issue.evidence} == {
+        bravo_log.evidence_ref_id,
+        bravo_issue.verification.evidence_ref_id,
+    }

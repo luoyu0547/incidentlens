@@ -157,6 +157,31 @@ def _seed_investigation(runtime) -> tuple[str, str]:
         ),
         now=NOW - timedelta(minutes=11),
     )
+    changeset_approval = asyncio.run(
+        runtime.approvals.request(
+            {
+                "kind": "file.write",
+                "target_id": "dev-a",
+                "service": "payment-api",
+                "changeset_id": "chs-1",
+            },
+            now=NOW - timedelta(minutes=10, seconds=30),
+            project_id="payments",
+            target_id="dev-a",
+            service="payment-api",
+            investigation_id="inv-1",
+            agent_run_id="run-1",
+            changeset_id="chs-1",
+        )
+    )
+    asyncio.run(
+        runtime.approvals.approve(
+            changeset_approval.approval_id,
+            now=NOW - timedelta(minutes=10, seconds=29),
+            actor="tester",
+            reason="link changeset to investigation",
+        )
+    )
     runtime.change_store.create_changeset(
         changeset_id="chs-1",
         incident_id="inc-1",
@@ -175,7 +200,7 @@ def _seed_investigation(runtime) -> tuple[str, str]:
         ),
         verification_plan="run health check",
         rollback_plan="restore last build",
-        approval_id="apr-1",
+        approval_id=changeset_approval.approval_id,
     )
     for status in (
         ChangeSetStatus.PREFLIGHTED,
@@ -260,6 +285,230 @@ def _seed_investigation(runtime) -> tuple[str, str]:
             )
         )
     return approval.approval_id, validation.evidence_ref_id
+
+
+def test_investigation_summary_projection_omits_sibling_and_legacy_artifacts(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    _register_target(runtime)
+    for investigation_id, run_id, created_at in (
+        ("inv-alpha", "run-alpha", NOW - timedelta(minutes=8)),
+        ("inv-bravo", "run-bravo", NOW - timedelta(minutes=7)),
+    ):
+        runtime.investigation_store.create_investigation(
+            Investigation(
+                investigation_id=investigation_id,
+                incident_id="inc-shared",
+                project_id="payments",
+                target_id="dev-a",
+                service="payment-api",
+                symptom="checkout errors",
+                status=InvestigationStatus.RUNNING,
+                budget=InvestigationBudget(),
+                usage=UsageCounters(),
+                created_at=created_at,
+                updated_at=NOW,
+            )
+        )
+        runtime.investigation_store.create_agent_run(
+            AgentRun(
+                agent_run_id=run_id,
+                investigation_id=investigation_id,
+                parent_run_id=None,
+                kind=AgentRunKind.PARENT,
+                scope=AgentScope(
+                    project_id="payments",
+                    target_id="dev-a",
+                    scope=LogScope.HOST,
+                    allowed_host_paths=(PurePosixPath("/srv/payments"),),
+                ),
+                status=AgentRunStatus.COMPLETED,
+                budget=AgentBudget(),
+                usage=UsageCounters(),
+                created_at=created_at + timedelta(minutes=1),
+                updated_at=NOW,
+                completed_at=NOW,
+            )
+        )
+
+    alpha_record = LogRecord(
+        log_id="log-alpha",
+        subscription_id=None,
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.FILE,
+        scope=LogScope.HOST,
+        source_ref="/var/log/payments/api.log",
+        cursor="offset:41",
+        dedupe_key=hashlib.sha256(b"log-alpha").hexdigest(),
+        observed_at=NOW - timedelta(minutes=6),
+        event_time=None,
+        severity=LogSeverity.ERROR,
+        message_redacted="ERROR alpha checkout failed",
+        redaction_summary={},
+        normal_signal=None,
+        correlation_key=None,
+        evidence_ref_id=None,
+        created_at=NOW - timedelta(minutes=6),
+    )
+    bravo_record = LogRecord(
+        log_id="log-bravo",
+        subscription_id=None,
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_kind=LogSourceKind.FILE,
+        scope=LogScope.HOST,
+        source_ref="/var/log/payments/api.log",
+        cursor="offset:42",
+        dedupe_key=hashlib.sha256(b"log-bravo").hexdigest(),
+        observed_at=NOW - timedelta(minutes=5),
+        event_time=None,
+        severity=LogSeverity.CRITICAL,
+        message_redacted="CRITICAL bravo checkout failed",
+        redaction_summary={},
+        normal_signal=None,
+        correlation_key=None,
+        evidence_ref_id=None,
+        created_at=NOW - timedelta(minutes=5),
+    )
+    runtime.log_store.append_batch((alpha_record, bravo_record))
+    alpha_evidence = runtime.evidence.create_from_log_record(
+        alpha_record,
+        incident_id="inc-shared",
+        created_by="tester",
+        now=NOW - timedelta(minutes=6),
+        agent_run_id="run-alpha",
+    )
+    bravo_evidence = runtime.evidence.create_from_log_record(
+        bravo_record,
+        incident_id="inc-shared",
+        created_by="tester",
+        now=NOW - timedelta(minutes=5),
+        agent_run_id="run-bravo",
+    )
+    legacy_changeset = "chs-legacy-shared"
+    runtime.change_store.create_changeset(
+        changeset_id=legacy_changeset,
+        incident_id="inc-shared",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        files=(
+            FileChange(
+                file_change_id="fc-legacy",
+                scope="host",
+                remote_path="/srv/payments/app.py",
+                expected_sha256="a" * 64,
+                replacement_sha256="b" * 64,
+            ),
+        ),
+    )
+    for status in (
+        ChangeSetStatus.PREFLIGHTED,
+        ChangeSetStatus.LOCALLY_BACKED_UP,
+        ChangeSetStatus.REMOTELY_BACKED_UP,
+        ChangeSetStatus.APPLIED,
+        ChangeSetStatus.VALIDATED,
+        ChangeSetStatus.VERIFIED,
+    ):
+        runtime.change_store.transition(legacy_changeset, status)
+    bravo_approval = asyncio.run(
+        runtime.approvals.request(
+            {
+                "kind": "file.write",
+                "target_id": "dev-a",
+                "service": "payment-api",
+                "changeset_id": "chs-bravo",
+            },
+            now=NOW - timedelta(minutes=4, seconds=30),
+            project_id="payments",
+            target_id="dev-a",
+            service="payment-api",
+            investigation_id="inv-bravo",
+            agent_run_id="run-bravo",
+            changeset_id="chs-bravo",
+        )
+    )
+    asyncio.run(
+        runtime.approvals.approve(
+            bravo_approval.approval_id,
+            now=NOW - timedelta(minutes=4, seconds=29),
+            actor="tester",
+            reason="link changeset to investigation",
+        )
+    )
+    runtime.change_store.create_changeset(
+        changeset_id="chs-bravo",
+        incident_id="inc-shared",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        files=(
+            FileChange(
+                file_change_id="fc-bravo",
+                scope="host",
+                remote_path="/srv/payments/app.py",
+                expected_sha256="c" * 64,
+                replacement_sha256="d" * 64,
+            ),
+        ),
+        approval_id=bravo_approval.approval_id,
+    )
+    for status in (
+        ChangeSetStatus.PREFLIGHTED,
+        ChangeSetStatus.LOCALLY_BACKED_UP,
+        ChangeSetStatus.REMOTELY_BACKED_UP,
+        ChangeSetStatus.APPLIED,
+        ChangeSetStatus.VALIDATED,
+        ChangeSetStatus.VERIFIED,
+    ):
+        runtime.change_store.transition("chs-bravo", status)
+    runtime.evidence_service.record_validation_result(
+        agent_run_id="run-bravo",
+        incident_id="inc-shared",
+        project_id="payments",
+        target_id="dev-a",
+        service_name="payment-api",
+        source_ref="validator:health",
+        validator="health",
+        passed=True,
+        detail="health endpoint returned 200",
+        created_by="tester",
+        now=NOW - timedelta(minutes=4),
+    )
+
+    projection = InvestigationSummaryProjectionService(
+        target_service=runtime.target_service,
+        target_store=runtime.target_store,
+        investigations=runtime.investigation_store,
+        approvals=runtime.approvals._approvals,
+        changes=runtime.change_store,
+        evidence=runtime.evidence,
+        logs=runtime.log_store,
+        events=runtime.events,
+        now=lambda: NOW,
+    )
+
+    alpha_summary = projection.get_summary("inv-alpha")
+    bravo_summary = projection.get_summary("inv-bravo")
+
+    assert alpha_summary is not None
+    assert alpha_summary.change_summaries == ()
+    assert alpha_summary.verification_summaries == ()
+    assert [item.evidence_ref_id for item in alpha_summary.evidence] == [
+        alpha_evidence.evidence_ref_id
+    ]
+
+    assert bravo_summary is not None
+    assert {item.evidence_ref_id for item in bravo_summary.evidence} == {
+        bravo_evidence.evidence_ref_id,
+        bravo_summary.verification_summaries[0].evidence_ref_id,
+    }
+    assert [item.changeset_id for item in bravo_summary.change_summaries] == ["chs-bravo"]
+    assert [item.passed for item in bravo_summary.verification_summaries] == [True]
 
 
 def test_investigation_summary_projection_derives_milestones_and_safe_details(

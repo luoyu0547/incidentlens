@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
+from collections import Counter
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Callable
@@ -12,7 +13,7 @@ from typing import Callable
 from pydantic import BaseModel, ConfigDict, Field
 
 from incidentlens_control_plane.approvals.store import ApprovalStore
-from incidentlens_control_plane.approvals.types import ApprovalStatus
+from incidentlens_control_plane.approvals.types import ApprovalRecord, ApprovalStatus
 from incidentlens_control_plane.changes.store import ChangeSetStore
 from incidentlens_control_plane.changes.types import ChangeSet, ChangeSetStatus
 from incidentlens_control_plane.evidence.store import EvidenceStore
@@ -244,36 +245,133 @@ def _target_lookup(
 
 def _matching_changes(
     changes: ChangeSetStore,
+    investigations: InvestigationStore,
+    approvals: ApprovalStore,
     *,
+    investigation_id: str,
     incident_id: str,
     project_id: str,
+    facade_target_id: str,
     registry_target_id: str,
     service_name: str,
 ) -> tuple[ChangeSet, ...]:
+    owned_runs = _owned_agent_run_ids(
+        investigations,
+        investigation_id=investigation_id,
+        project_id=project_id,
+        registry_target_id=registry_target_id,
+        service_name=service_name,
+    )
+    owned_approvals = _owned_changeset_approvals(
+        approvals,
+        investigation_id=investigation_id,
+        owned_agent_run_ids=owned_runs,
+        project_id=project_id,
+        facade_target_id=facade_target_id,
+        registry_target_id=registry_target_id,
+        service_name=service_name,
+    )
+    approvals_by_id = {record.approval_id: record for record in owned_approvals}
+    changeset_counts = Counter(
+        record.changeset_id
+        for record in owned_approvals
+        if record.changeset_id is not None
+    )
     return tuple(
         changeset
         for changeset in changes.list_for_incident(incident_id, limit=200)
         if changeset.project_id == project_id
         and changeset.target_id == registry_target_id
         and changeset.service_name == service_name
+        and _changeset_is_owned(
+            changeset,
+            approvals_by_id=approvals_by_id,
+            changeset_counts=changeset_counts,
+        )
     )
 
 
 def _matching_evidence(
     evidence: EvidenceStore,
+    investigations: InvestigationStore,
     *,
+    investigation_id: str,
     incident_id: str,
     project_id: str,
     registry_target_id: str,
     service_name: str,
 ) -> tuple[EvidenceRef, ...]:
+    owned_runs = _owned_agent_run_ids(
+        investigations,
+        investigation_id=investigation_id,
+        project_id=project_id,
+        registry_target_id=registry_target_id,
+        service_name=service_name,
+    )
+    if not owned_runs:
+        return ()
     return tuple(
         ref
         for ref in evidence.list_for_incident(incident_id, limit=500)
-        if ref.project_id == project_id
+        if ref.agent_run_id in owned_runs
+        and ref.project_id == project_id
         and ref.target_id == registry_target_id
         and ref.service_name == service_name
     )
+
+
+def _owned_agent_run_ids(
+    investigations: InvestigationStore,
+    *,
+    investigation_id: str,
+    project_id: str,
+    registry_target_id: str,
+    service_name: str,
+) -> frozenset[str]:
+    return frozenset(
+        run.agent_run_id
+        for run in investigations.list_agent_runs(investigation_id=investigation_id)
+        if run.scope.project_id == project_id
+        and run.scope.target_id == registry_target_id
+        and run.scope.service_name in {None, service_name}
+    )
+
+
+def _owned_changeset_approvals(
+    approvals: ApprovalStore,
+    *,
+    investigation_id: str,
+    owned_agent_run_ids: frozenset[str],
+    project_id: str,
+    facade_target_id: str,
+    registry_target_id: str,
+    service_name: str,
+) -> tuple[ApprovalRecord, ...]:
+    return tuple(
+        record
+        for record in approvals.list(None, investigation_id=investigation_id)
+        if record.project_id == project_id
+        and record.target_id in {registry_target_id, facade_target_id}
+        and record.service == service_name
+        and (
+            record.agent_run_id is None or record.agent_run_id in owned_agent_run_ids
+        )
+        and record.changeset_id is not None
+    )
+
+
+def _changeset_is_owned(
+    changeset: ChangeSet,
+    *,
+    approvals_by_id: dict[str, ApprovalRecord],
+    changeset_counts: Counter[str],
+) -> bool:
+    if changeset.approval_id is not None:
+        record = approvals_by_id.get(changeset.approval_id)
+        if record is None:
+            return False
+        return record.changeset_id in {None, changeset.changeset_id}
+    return changeset_counts[changeset.changeset_id] == 1
 
 
 def _matching_pending_approvals(
@@ -478,6 +576,8 @@ class IssueProjectionService:
     def _build_issue(self, investigation, *, facade_target_id: str) -> IssueView:
         evidence_refs = _matching_evidence(
             self._evidence,
+            self._investigations,
+            investigation_id=investigation.investigation_id,
             incident_id=investigation.incident_id,
             project_id=investigation.project_id,
             registry_target_id=investigation.target_id,
@@ -485,8 +585,12 @@ class IssueProjectionService:
         )
         change_sets = _matching_changes(
             self._changes,
+            self._investigations,
+            self._approvals,
+            investigation_id=investigation.investigation_id,
             incident_id=investigation.incident_id,
             project_id=investigation.project_id,
+            facade_target_id=facade_target_id,
             registry_target_id=investigation.target_id,
             service_name=investigation.service,
         )
