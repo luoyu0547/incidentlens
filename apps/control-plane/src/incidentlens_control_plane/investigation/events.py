@@ -390,7 +390,45 @@ class InvestigationEventPublisher:
     def _preview(value: object, width: int = 600) -> str:
         return redact_message(str(value), max_length=width).message_redacted
 
-    # -- tool calls -----------------------------------------------------------
+    # -- product session projection --------------------------------------------
+
+    def agent_text_delta(
+        self,
+        *,
+        session_id: str,
+        message_id: str,
+        run_id: str,
+        text: str,
+        occurred_at: datetime,
+    ) -> RuntimeEvent:
+        """Emit one redacted assistant text projection delta."""
+        return self.emit(
+            RuntimeEventType.AGENT_TEXT_DELTA,
+            occurred_at=occurred_at,
+            session_id=session_id,
+            message_id=message_id,
+            run_id=run_id,
+            text=self._preview(text, width=20_000),
+        )
+
+    def agent_message_completed(
+        self,
+        *,
+        session_id: str,
+        message_id: str,
+        run_id: str,
+        transcript_sequence: int,
+        occurred_at: datetime,
+    ) -> RuntimeEvent:
+        """Emit completion after the projected message is durable."""
+        return self.emit(
+            RuntimeEventType.AGENT_MESSAGE_COMPLETED,
+            occurred_at=occurred_at,
+            session_id=session_id,
+            message_id=message_id,
+            run_id=run_id,
+            transcript_sequence=transcript_sequence,
+        )
 
     def tool_call_started(
         self, tool_call: ToolCall, *, occurred_at: datetime | None = None

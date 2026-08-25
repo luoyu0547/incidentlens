@@ -20,8 +20,17 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
+from incidentlens_control_plane.agent_sessions.store import AgentSessionStore
+from incidentlens_control_plane.agent_sessions.types import AgentSessionStatus
 from incidentlens_control_plane.changes.manager import ChangeManager
+from incidentlens_control_plane.investigation.service import InvestigationService
+from incidentlens_control_plane.investigation.state_machine import (
+    INVESTIGATION_STATE_MACHINE,
+)
+from incidentlens_control_plane.investigation.types import AgentScope
+from incidentlens_control_plane.logs.types import LogScope
 from incidentlens_control_plane.operations.types import Operation
 from incidentlens_control_plane.project_registry.store import (
     ProjectNotFound,
@@ -29,6 +38,9 @@ from incidentlens_control_plane.project_registry.store import (
 )
 from incidentlens_control_plane.remote_ops.sessions import SessionManager
 from incidentlens_control_plane.targets.store import TargetNotFound, TargetStore
+
+if TYPE_CHECKING:
+    from incidentlens_control_plane.agent_sessions.service import AgentSessionService
 
 
 class OperationHandlerError(Exception):
@@ -49,6 +61,96 @@ class OperationResult:
 
 
 OperationHandler = Callable[[Operation], Awaitable[OperationResult]]
+
+
+def build_agent_message_handler(
+    *,
+    sessions: AgentSessionStore,
+    session_service: AgentSessionService,
+    investigations: InvestigationService,
+    projects: ProjectRegistryStore,
+    target_store: TargetStore,
+) -> OperationHandler:
+    """Run one accepted message through the existing investigation services."""
+
+    async def handler(operation: Operation) -> OperationResult:
+        payload = _payload(operation)
+        message_id = payload.get("message_id")
+        action = payload.get("action", "message")
+        if not isinstance(message_id, str) or not message_id:
+            raise OperationHandlerError("agent message payload is malformed")
+        session_id = operation.session_id
+        if not session_id:
+            raise OperationHandlerError("agent message operation has no session")
+        session = sessions.get_session(session_id)
+        message = sessions.get_message(message_id)
+        if message.session_id != session_id:
+            raise OperationHandlerError("agent message does not belong to session")
+        try:
+            binding = target_store.get(session.target_id)
+            record = projects.get(binding.project_id)
+        except (TargetNotFound, ProjectNotFound) as exc:
+            raise OperationHandlerError("session target is unavailable") from exc
+        service_name = session.service_id or (
+            record.services[0].compose_service if record.services else "host"
+        )
+        investigation_id = session.investigation_id
+        if investigation_id is None:
+            if action != "message":
+                raise OperationHandlerError("resume requires an investigation")
+        else:
+            try:
+                existing_investigation = investigations.get_investigation(investigation_id)
+            except Exception as exc:  # noqa: BLE001 - domain lookup becomes safe handler failure
+                raise OperationHandlerError("session investigation is unavailable") from exc
+            if INVESTIGATION_STATE_MACHINE.is_terminal(existing_investigation.status):
+                if action != "message":
+                    raise OperationHandlerError("resume requires a non-terminal investigation")
+                investigation_id = None
+        if investigation_id is None:
+            investigation = investigations.create_investigation(
+                project_id=binding.project_id,
+                target_id=binding.registry_target_id,
+                service=service_name,
+                symptom=message.content_redacted,
+            )
+            investigation_id = investigation.investigation_id
+            session = sessions.bind_investigation(
+                session_id,
+                investigation_id,
+                now=operation.updated_at,
+                status=AgentSessionStatus.ACTIVE,
+            )
+            sessions.bind_message(
+                message_id,
+                investigation_id=investigation_id,
+                agent_run_id=None,
+                transcript_sequence=None,
+            )
+        if investigation_id is None:
+            raise OperationHandlerError("session investigation binding failed")
+        scope = AgentScope(
+            project_id=binding.project_id,
+            target_id=binding.registry_target_id,
+            scope=LogScope.HOST,
+            service_name=None,
+        )
+        run = await investigations.start(investigation_id, scope)
+        session_service.bind_investigation(
+            session_id,
+            investigation_id,
+            now=operation.updated_at,
+            status=AgentSessionStatus.ACTIVE,
+        )
+        session_service.project_run(
+            session_id,
+            run,
+            user_message_id=message_id,
+            now=operation.updated_at,
+        )
+        return OperationResult(summary="agent message execution completed")
+
+    return handler
 
 
 def build_rollback_handler(changes: ChangeManager) -> OperationHandler:
@@ -134,6 +236,7 @@ __all__ = [
     "OperationHandler",
     "OperationHandlerError",
     "OperationResult",
+    "build_agent_message_handler",
     "build_rollback_handler",
     "build_target_test_handler",
 ]

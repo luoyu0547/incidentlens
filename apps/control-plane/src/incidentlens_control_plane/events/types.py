@@ -61,6 +61,9 @@ class RuntimeEventType(StrEnum):
     AGENT_RUN_CANCELLED = "agent_run.cancelled"
     AGENT_HOOK = "agent_hook"
 
+    AGENT_TEXT_DELTA = "agent.text.delta"
+    AGENT_MESSAGE_COMPLETED = "agent.message.completed"
+
     MODEL_ROUND_STARTED = "model_round.started"
     MODEL_ROUND_COMPLETED = "model_round.completed"
     TOOL_PROPOSED = "tool.proposed"

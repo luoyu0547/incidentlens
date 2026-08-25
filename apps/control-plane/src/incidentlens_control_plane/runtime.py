@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
+from incidentlens_control_plane.agent_sessions.service import AgentSessionService
+from incidentlens_control_plane.agent_sessions.store import AgentSessionStore
 from incidentlens_control_plane.approvals.service import ApprovalService
 from incidentlens_control_plane.approvals.store import ApprovalStore
 from incidentlens_control_plane.auth.service import AuthService, profiles_from_json
@@ -60,6 +62,7 @@ from incidentlens_control_plane.logs.subscriptions import LogSubscriptionManager
 from incidentlens_control_plane.operations.dispatcher import OperationDispatcher
 from incidentlens_control_plane.operations.events import OperationEventPublisher
 from incidentlens_control_plane.operations.handlers import (
+    build_agent_message_handler,
     build_rollback_handler,
     build_target_test_handler,
 )
@@ -120,6 +123,8 @@ class RuntimeServices:
     operation_service: OperationService
     operation_recovery: OperationRecovery
     dispatcher: OperationDispatcher
+    agent_session_store: AgentSessionStore
+    agent_sessions: AgentSessionService
 
 
 def build_runtime(
@@ -158,6 +163,7 @@ def build_runtime(
     project_memory_store = ProjectMemoryStore(connect)
     idempotency_store = IdempotencyStore(connect)
     target_store = TargetStore(connect)
+    agent_session_store = AgentSessionStore(connect)
     projects.migrate()
     events.migrate()
     operation_store.migrate()
@@ -169,6 +175,7 @@ def build_runtime(
     project_memory_store.migrate()
     idempotency_store.migrate()
     target_store.migrate()
+    agent_session_store.migrate()
 
     broker = RuntimeEventBroker()
     approvals = ApprovalService(
@@ -387,6 +394,14 @@ def build_runtime(
         publisher=OperationEventPublisher(events, broker),
     )
 
+    agent_sessions = AgentSessionService(
+        sessions=agent_session_store,
+        operations=operation_service,
+        investigations=investigation_service,
+        events=events,
+        broker=broker,
+    )
+
     # Task 7: classify leftovers after a restart and dispatch queued durable
     # work.  Recovery runs before the dispatcher's first claim (start()), and
     # only queued (never started) dangerous work is ever executed by a worker.
@@ -399,6 +414,16 @@ def build_runtime(
         store=operation_store,
         operations=operation_service,
         recovery=operation_recovery,
+    )
+    dispatcher.register(
+        OperationKind.AGENT_MESSAGE,
+        build_agent_message_handler(
+            sessions=agent_session_store,
+            session_service=agent_sessions,
+            investigations=investigation_service,
+            projects=projects,
+            target_store=target_store,
+        ),
     )
     dispatcher.register(
         OperationKind.ROLLBACK,
@@ -446,4 +471,6 @@ def build_runtime(
         operation_service=operation_service,
         operation_recovery=operation_recovery,
         dispatcher=dispatcher,
+        agent_session_store=agent_session_store,
+        agent_sessions=agent_sessions,
     )
