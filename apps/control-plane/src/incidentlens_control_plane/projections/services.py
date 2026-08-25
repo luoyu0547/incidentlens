@@ -464,8 +464,8 @@ class ServiceProjectionService:
                 for subscription in instance.subscriptions
                 if subscription.source_kind is source_kind and subscription.scope is scope
             )
-            latest_source_at = max(
-                (
+            latest_source_at = _max_datetime(
+                tuple(
                     _latest_log_observed_at(
                         self._logs,
                         project_id=instance.binding.project_id,
@@ -475,8 +475,7 @@ class ServiceProjectionService:
                         scope=scope.value,
                     )
                     for instance in source_instances
-                ),
-                default=None,
+                )
             )
             log_sources.append(
                 LogSourceSummary(
@@ -492,7 +491,7 @@ class ServiceProjectionService:
                         for subscription in subscriptions
                         if subscription.status is LogSubscriptionStatus.ERROR
                     ),
-                    last_observed_at=_max_datetime((latest_source_at,)),
+                    last_observed_at=latest_source_at,
                 )
             )
 

@@ -29,3 +29,8 @@
 - Replaced the capped ascending log scan with direct error-window / latest-observation queries so recent errors and timestamps are found even when older INFO history exceeds 1000 rows.
 - Updated health semantics so failed investigations degrade service health, and mixed `(healthy, unknown)` aggregates now resolve to `unknown` instead of `healthy`.
 - Added focused regressions for approval-target collisions, deep old-log history with a recent error, failed-investigation degradation, and mixed healthy/unknown aggregation.
+
+## Re-review Fix
+
+- Made shared-service source timestamp aggregation ignore missing per-target observations, preventing `datetime` vs `None` comparisons when only some targets have source evidence.
+- Added a regression covering a multi-target shared service where one target has a source subscription but no observed log yet.

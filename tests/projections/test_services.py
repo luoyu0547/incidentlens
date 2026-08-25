@@ -473,3 +473,104 @@ def test_service_projection_finds_recent_errors_beyond_old_info_history(
     assert view is not None
     assert view.status is HealthStatus.DEGRADED
     assert view.last_observed_at == recent_error_at
+
+
+def test_service_projection_handles_partial_source_evidence_across_targets(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    runtime.projects.create(
+        ProjectRegistration(
+            project_id="fleet",
+            display_name="Fleet",
+            local_source_paths=(Path("/srv/fleet"),),
+            targets=(
+                TargetRegistration(
+                    target_id="dev-a",
+                    host="dev-a.example.test",
+                    ssh_user="deploy",
+                    port=22,
+                ),
+                TargetRegistration(
+                    target_id="dev-b",
+                    host="dev-b.example.test",
+                    ssh_user="deploy",
+                    port=22,
+                ),
+            ),
+            services=(
+                ServiceRegistration(
+                    compose_service="shared-api",
+                    container_names=("shared-api-1",),
+                    allowed_host_paths=(PurePosixPath("/srv/fleet"),),
+                    protected_remote_paths=(PurePosixPath("/srv/fleet/.env"),),
+                ),
+            ),
+        ),
+        now=NOW,
+    )
+    runtime.log_store.create_subscription(
+        project_id="fleet",
+        target_id="dev-a",
+        service_name="shared-api",
+        source_kind=LogSourceKind.FILE,
+        scope=LogScope.HOST,
+        source_ref="/var/log/fleet/shared-api.log",
+        opt_in_streaming=True,
+        created_by="tester",
+        now=NOW - timedelta(minutes=3),
+    )
+    runtime.log_store.create_subscription(
+        project_id="fleet",
+        target_id="dev-b",
+        service_name="shared-api",
+        source_kind=LogSourceKind.FILE,
+        scope=LogScope.HOST,
+        source_ref="/var/log/fleet/shared-api.log",
+        opt_in_streaming=True,
+        created_by="tester",
+        now=NOW - timedelta(minutes=3),
+    )
+    observed_at = NOW - timedelta(minutes=2)
+    runtime.log_store.append_batch(
+        (
+            LogRecord(
+                log_id="fleet-log-1",
+                subscription_id=None,
+                project_id="fleet",
+                target_id="dev-a",
+                service_name="shared-api",
+                source_kind=LogSourceKind.FILE,
+                scope=LogScope.HOST,
+                source_ref="/var/log/fleet/shared-api.log",
+                cursor="offset:1",
+                dedupe_key=hashlib.sha256(b"fleet-log-1").hexdigest(),
+                observed_at=observed_at,
+                event_time=None,
+                severity=LogSeverity.INFO,
+                message_redacted="INFO shared api ok",
+                redaction_summary={},
+                normal_signal=None,
+                correlation_key=None,
+                evidence_ref_id=None,
+                created_at=observed_at,
+            ),
+        )
+    )
+    projection = ServiceProjectionService(
+        target_service=runtime.target_service,
+        target_store=runtime.target_store,
+        projects=runtime.projects,
+        approvals=runtime.approvals._approvals,
+        investigations=runtime.investigation_store,
+        operations=runtime.operation_store,
+        logs=runtime.log_store,
+        now=lambda: NOW,
+        windows=ProjectionWindows(),
+    )
+
+    view = projection.read_service("shared-api")
+
+    assert view is not None
+    assert len(view.log_sources) == 1
+    assert view.log_sources[0].last_observed_at == observed_at
