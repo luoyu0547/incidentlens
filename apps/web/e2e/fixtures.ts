@@ -2,8 +2,21 @@ import { expect, type Page, type WebSocketRoute } from '@playwright/test';
 
 export const ids = { service: 'svc-web', target: 'tgt-host-a', issue: 'iss-1', evidence: 'ev-1' } as const;
 
-export const log = (n: number, message = `c${n}`, extra: Record<string, unknown> = {}) => ({
-  cursor: `c${n}`,
+export const cursors = {
+  1: 'lc1_AAAAAAAAAAE',
+  2: 'lc1_AAAAAAAAAAI',
+  3: 'lc1_AAAAAAAAAAM',
+  10: 'lc1_AAAAAAAAAAo',
+  11: 'lc1_AAAAAAAAAAs',
+  12: 'lc1_AAAAAAAAAAw',
+  13: 'lc1_AAAAAAAAAA0',
+  14: 'lc1_AAAAAAAAAA4',
+  15: 'lc1_AAAAAAAAAA8',
+  16: 'lc1_AAAAAAAAABA',
+} as const;
+
+export const log = (n: keyof typeof cursors, message = `c${n}`, extra: Record<string, unknown> = {}) => ({
+  cursor: cursors[n],
   log_id: `log-${n}`,
   message,
   occurred_at: `2026-08-26T00:00:${String(n).padStart(2, '0')}Z`,
@@ -41,7 +54,7 @@ export const issue = {
 };
 
 export const logPage = (items: unknown[], next_cursor: string | null = null) => ({
-  has_more: Boolean(next_cursor), next_cursor, previous_cursor: null, snapshot_cursor: 'c10', items,
+  has_more: Boolean(next_cursor), next_cursor, previous_cursor: null, snapshot_cursor: cursors[10], items,
 });
 
 export async function routeJson(page: Page, path: string, body: unknown) {

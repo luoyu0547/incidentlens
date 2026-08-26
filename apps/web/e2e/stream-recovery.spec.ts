@@ -1,17 +1,18 @@
 import { expect, test } from '@playwright/test';
-import { installCommonRoutes, ids, installLogSocket, log, logEvent, logPage, routeJson } from './fixtures';
+import { cursors, installCommonRoutes, ids, installLogSocket, log, logEvent, logPage } from './fixtures';
 
 test.describe('日志流恢复', () => {
-  test('断线后回补 gap，重连并避免重复记录', async ({ page }) => {
+  test('断线后以合法 opaque cursor 回补、重连并避免重复记录', async ({ page }) => {
     let socketCount = 0;
-    let disconnected = false;
-    const backfillRequests: string[] = [];
+    let closeFirstSocket!: () => void;
+    const socketClosed = new Promise<void>((resolve) => { closeFirstSocket = resolve; });
+    const historyRequests: URL[] = [];
     await installCommonRoutes(page);
-    await routeJson(page, `/services/${ids.service}/logs`, logPage([log(10)], null));
-    await page.route('**/api/v1/services/*/logs**', async (route) => {
+    await page.route('**/api/v1/services/svc-web/logs**', async (route) => {
       const url = new URL(route.request().url());
-      backfillRequests.push(url.search);
-      const items = url.searchParams.get('before') === 'c10' ? [log(11), log(12), log(13), log(14), log(15)] : [log(10)];
+      historyRequests.push(url);
+      const items = url.searchParams.get('before') === cursors[10]
+        ? [log(11), log(12), log(13), log(14), log(15)] : [log(10)];
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(logPage(items, null)) });
     });
     await page.routeWebSocket('**/ws/v1/logs', (socket) => {
@@ -19,65 +20,75 @@ test.describe('日志流恢复', () => {
       socket.onMessage((raw) => {
         const message = JSON.parse(String(raw)) as { action?: string };
         if (message.action !== 'subscribe') return;
-        if (socketCount === 1 && !disconnected) {
-          disconnected = true;
-          socket.close();
-          return;
-        }
-        socket.send(JSON.stringify(logEvent('log.subscribed', 'c15', { service_id: ids.service })));
-        socket.send(JSON.stringify(logEvent('log.record', 'c15', log(15))));
-        socket.send(JSON.stringify(logEvent('log.record', 'c16', log(16, 'recovered live'))));
+        if (socketCount === 1) { socket.close(); closeFirstSocket(); return; }
+        socket.send(JSON.stringify(logEvent('log.subscribed', cursors[15], { service_id: ids.service })));
+        socket.send(JSON.stringify(logEvent('log.record', cursors[15], log(15))));
+        socket.send(JSON.stringify(logEvent('log.record', cursors[16], log(16, 'recovered live'))));
       });
     });
     await page.goto(`/services/${ids.service}?mode=live`);
+    await socketClosed;
     await expect(page.getByText('正在重新连接日志流…')).toBeVisible();
     await expect(page.getByText('recovered live')).toHaveCount(1, { timeout: 10_000 });
     await expect(page.getByText('日志流已连接')).toBeVisible();
-    expect(socketCount).toBeGreaterThanOrEqual(2);
-    expect(backfillRequests.some((query) => query.includes('before=c10'))).toBe(true);
-    await expect(page.getByText('c15')).toHaveCount(1);
+    expect(socketCount).toBe(2);
+    expect(historyRequests).toHaveLength(2);
+    expect(historyRequests[1].searchParams.get('before')).toBe(cursors[10]);
+    await expect(page.locator('[data-log-id="log-15"]')).toHaveCount(1);
   });
 
-  test('收到 gap 显示恢复状态并执行一次权威回补', async ({ page }) => {
-    let gapSeen = false;
-    const historyRequests: string[] = [];
+  test('收到 gap 后只执行一次不带 before 的权威回补', async ({ page }) => {
+    let gapSent = false;
+    let releaseGap!: () => void;
+    const gapReleased = new Promise<void>((resolve) => { releaseGap = resolve; });
+    const historyRequests: URL[] = [];
     await installCommonRoutes(page);
-    await routeJson(page, `/services/${ids.service}/logs`, logPage([log(10)], null));
-    await page.route('**/api/v1/services/*/logs**', async (route) => {
-      historyRequests.push(route.request().url());
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(logPage([log(10), log(11, 'authoritative')], null)) });
+    await page.route('**/api/v1/services/svc-web/logs**', async (route) => {
+      const url = new URL(route.request().url());
+      historyRequests.push(url);
+      const isInitial = historyRequests.length === 1;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(logPage(
+        isInitial ? [log(10)] : [log(10), log(11, 'authoritative')], null,
+      )) });
     });
     await installLogSocket(page, (message, socket) => {
-      if (message.action === 'subscribe' && !gapSeen) {
-        gapSeen = true;
-        socket.send(JSON.stringify(logEvent('stream.gap', 'c10')));
+      if (message.action === 'subscribe' && !gapSent) {
+        gapSent = true;
+        void gapReleased.then(() => socket.send(JSON.stringify(logEvent('stream.gap', cursors[10]))));
       } else if (message.action === 'subscribe') {
-        socket.send(JSON.stringify(logEvent('log.subscribed', 'c11', { service_id: ids.service })));
+        socket.send(JSON.stringify(logEvent('log.subscribed', cursors[11], { service_id: ids.service })));
       }
     });
     await page.goto(`/services/${ids.service}?mode=live`);
+    await expect.poll(() => gapSent).toBe(true);
+    expect(historyRequests).toHaveLength(1);
+    releaseGap();
     await expect(page.getByText('正在恢复日志间隙…')).toBeVisible();
     await expect(page.getByText('authoritative')).toBeVisible();
     await expect(page.getByText('日志流已连接')).toBeVisible();
-    expect(gapSeen).toBe(true);
     expect(historyRequests).toHaveLength(2);
+    expect(historyRequests[0].searchParams.get('before')).toBeNull();
+    expect(historyRequests[1].searchParams.get('before')).toBeNull();
   });
 
-  test('slow consumer backpressure 仍保持只读协议', async ({ page }) => {
+  test('slow consumer backpressure 后客户端 ack 并保持只读恢复协议', async ({ page }) => {
     const frames: Record<string, unknown>[] = [];
     await installCommonRoutes(page);
-    await routeJson(page, `/services/${ids.service}/logs`, logPage([log(10)], null));
+    await page.route('**/api/v1/services/svc-web/logs**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(logPage([log(10)], null)) }));
     await installLogSocket(page, (message, socket) => {
       if (message.action === 'subscribe') {
-        socket.send(JSON.stringify(logEvent('stream.slow_consumer', 'c10', { action: 'ack' })));
-        socket.send(JSON.stringify(logEvent('log.subscribed', 'c10', { service_id: ids.service })));
+        socket.send(JSON.stringify(logEvent('log.record', cursors[10], log(10, 'acknowledged'))));
+        socket.send(JSON.stringify(logEvent('stream.slow_consumer', cursors[10], { action: 'ack' })));
+        socket.send(JSON.stringify(logEvent('log.subscribed', cursors[10], { service_id: ids.service })));
       }
     });
     page.on('websocket', (socket) => socket.on('framesent', (frame) => {
       try { frames.push(JSON.parse(String(frame)) as Record<string, unknown>); } catch { /* ignore */ }
     }));
     await page.goto(`/services/${ids.service}?mode=live`);
+    await expect(page.getByText('acknowledged')).toBeVisible();
     await expect(page.getByText('日志流已连接')).toBeVisible();
+    await expect.poll(() => frames.some((frame) => frame.action === 'ack' && frame.cursor === cursors[10])).toBe(true);
     expect(frames.every((frame) => ['subscribe', 'ack', 'pause', 'resume', 'update'].includes(String(frame.action)))).toBe(true);
   });
 });
