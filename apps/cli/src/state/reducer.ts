@@ -58,6 +58,12 @@ export function reducer(state: CliState, action: CliAction): CliState {
     case 'set_session':
       return { ...state, session: action.session };
 
+    case 'set_approval':
+      return {
+        ...state,
+        approvals: { ...state.approvals, [action.approval.approval_id]: action.approval },
+      };
+
     case 'update_operation':
       return {
         ...state,
