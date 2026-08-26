@@ -76,13 +76,20 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
         const ws = wsFactory(socketUrl);
         const currentSocketGeneration = ++socketGeneration;
         socketRef.current = ws;
+        const isCurrentSocket = () => !disposed
+          && currentSocketGeneration === socketGeneration
+          && socketRef.current === ws;
         const send = (payload: string) => {
           const command = JSON.parse(payload) as { action?: string };
           assertReadOnlyLogAction(command.action ?? '');
           ws.send(payload);
         };
-        ws.onopen = () => { retries.current = 0; send(JSON.stringify(serializeLogSubscribe({ service_id: serviceId, target_id: search.target, severity: search.levels.length ? search.levels.join(',') : undefined, cursor: cursorRef.current }))); };
+        ws.onopen = () => {
+          if (!isCurrentSocket()) return;
+          send(JSON.stringify(serializeLogSubscribe({ service_id: serviceId, target_id: search.target, severity: search.levels.length ? search.levels.join(',') : undefined, cursor: cursorRef.current })));
+        };
         ws.onmessage = (message) => {
+          if (!isCurrentSocket()) return;
           try {
             const parsed = parseLogStreamEvent(JSON.parse(String(message.data)));
             if ('kind' in parsed) return;
@@ -105,7 +112,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
           } catch (e) { setError(e instanceof Error ? e : new Error('Invalid log stream event')); setStatus('error'); }
         };
         ws.onclose = () => {
-          if (disposed || recovering || currentSocketGeneration !== socketGeneration) return;
+          if (!isCurrentSocket() || recovering) return;
           socketRef.current = null;
           if (retries.current >= maxRetries) {
             setError(new Error('Log stream retry limit exceeded')); setStatus('error'); return;
@@ -113,7 +120,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
           retries.current += 1; setStatus('reconnecting');
           retryTimer = setTimeout(() => void connect(false), backoffMs * 2 ** (retries.current - 1));
         };
-        ws.onerror = () => { /* close drives bounded recovery */ };
+        ws.onerror = () => { if (!isCurrentSocket()) return; /* close drives bounded recovery */ };
       } catch (e) { setError(e instanceof Error ? e : new Error('Unable to connect to log stream')); setStatus('error'); }
     };
     void connect(true);
