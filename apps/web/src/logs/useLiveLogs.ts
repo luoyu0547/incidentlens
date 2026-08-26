@@ -41,6 +41,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
     const runId = ++generation.current;
     let disposed = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let recovering = false;
     const wsFactory = options.webSocketFactory ?? ((url: string) => new WebSocket(url));
     const initialQuery = query();
     const socketUrl = `${window.location.origin.replace(/^http/, 'ws')}/ws/v1/logs`;
@@ -85,10 +86,13 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
             if (parsed.event_type === 'log.record') { const record = parsed.payload as LogRecordView; append(record); if (parsed.cursor) { cursorRef.current = parsed.cursor; setLastCursor(parsed.cursor); send(JSON.stringify(serializeLogAck(parsed.cursor))); } }
             else if (parsed.event_type === 'log.subscribed') setStatus(pausedRef.current ? 'paused' : 'live');
             else if (parsed.event_type === 'stream.gap') {
+              recovering = true;
               closeSocket();
               void backfill(true).then(() => {
+                recovering = false;
                 if (!disposed) void connect(false, true);
               }).catch((e) => {
+                recovering = false;
                 if (disposed) return;
                 setError(e instanceof Error ? e : new Error('Unable to recover log history'));
                 setStatus('error');
@@ -97,7 +101,15 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
             }
           } catch (e) { setError(e instanceof Error ? e : new Error('Invalid log stream event')); setStatus('error'); }
         };
-        ws.onclose = () => { if (disposed) return; socketRef.current = null; if (retries.current >= maxRetries) { setError(new Error('Log stream retry limit exceeded')); setStatus('error'); return; } retries.current += 1; setStatus('reconnecting'); retryTimer = setTimeout(() => void connect(false), backoffMs * 2 ** (retries.current - 1)); };
+        ws.onclose = () => {
+          if (disposed || recovering) return;
+          socketRef.current = null;
+          if (retries.current >= maxRetries) {
+            setError(new Error('Log stream retry limit exceeded')); setStatus('error'); return;
+          }
+          retries.current += 1; setStatus('reconnecting');
+          retryTimer = setTimeout(() => void connect(false), backoffMs * 2 ** (retries.current - 1));
+        };
         ws.onerror = () => { /* close drives bounded recovery */ };
       } catch (e) { setError(e instanceof Error ? e : new Error('Unable to connect to log stream')); setStatus('error'); }
     };
