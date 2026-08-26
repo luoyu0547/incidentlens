@@ -1,6 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import { createInitialState, reducer } from './reducer.js';
 import type { CliState, ConversationItem } from './cli-state.js';
+import type { OperationView } from '@incidentlens/protocol';
+
+function makeOperation(overrides: Partial<OperationView> = {}): OperationView {
+  return {
+    operation_id: 'op-1',
+    kind: 'agent_message',
+    target_id: 'target-1',
+    session_id: 'session-1',
+    investigation_id: null,
+    status: 'running',
+    progress_summary: null,
+    error_code: null,
+    error_message: null,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    finished_at: null,
+    ...overrides,
+  };
+}
 
 describe('reducer', () => {
   describe('text delta merge', () => {
@@ -332,6 +351,29 @@ describe('reducer', () => {
 
       // Should advance sequence but not add messages
       expect(newState.messages).toHaveLength(0);
+    });
+  });
+
+  describe('update_operation', () => {
+    it('stores operations keyed by operation_id', () => {
+      const state = createInitialState();
+      const operation = makeOperation({ status: 'running' });
+
+      const newState = reducer(state, { type: 'update_operation', operation });
+
+      expect(newState.operations['op-1']).toEqual(operation);
+    });
+
+    it('replaces an existing operation with a newer snapshot', () => {
+      const state = createInitialState();
+      const running = makeOperation({ status: 'running' });
+      const succeeded = makeOperation({ status: 'succeeded', progress_summary: 'done' });
+
+      const state1 = reducer(state, { type: 'update_operation', operation: running });
+      const state2 = reducer(state1, { type: 'update_operation', operation: succeeded });
+
+      expect(state2.operations['op-1']).toEqual(succeeded);
+      expect(Object.keys(state2.operations)).toHaveLength(1);
     });
   });
 

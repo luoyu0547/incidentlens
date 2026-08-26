@@ -52,8 +52,17 @@ export function reducer(state: CliState, action: CliAction): CliState {
     case 'set_target':
       return { ...state, target: action.target };
 
+    case 'clear_target':
+      return { ...state, target: undefined };
+
     case 'set_session':
       return { ...state, session: action.session };
+
+    case 'update_operation':
+      return {
+        ...state,
+        operations: { ...state.operations, [action.operation.operation_id]: action.operation },
+      };
 
     case 'stream_event':
       return handleStreamEvent(state, action.event);
@@ -75,6 +84,19 @@ export function reducer(state: CliState, action: CliAction): CliState {
 
     case 'set_overlay':
       return { ...state, overlay: action.overlay };
+
+    case 'system_message':
+      return {
+        ...state,
+        messages: [
+          ...state.messages,
+          {
+            kind: 'system',
+            content: action.content,
+            timestamp: action.timestamp,
+          },
+        ],
+      };
 
     case 'clear_messages':
       return { ...state, messages: [] };

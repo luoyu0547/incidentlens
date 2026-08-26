@@ -9,6 +9,7 @@ import type {
   OperationAccepted,
   AgentSessionView,
   AgentSessionCreate,
+  AgentSessionPatch,
   AgentMessageView,
   AgentMessageAccepted,
   AgentMessageCreate,
@@ -16,6 +17,7 @@ import type {
   ApprovalPage,
   ApprovalDetailView,
   ApprovalDecisionRequest,
+  EventPage,
 } from '@incidentlens/protocol';
 
 /**
@@ -47,8 +49,21 @@ export interface MessageListQuery {
  */
 export interface ApprovalListQuery {
   readonly status?: string;
+  readonly sessionId?: string;
   readonly limit?: number;
   readonly offset?: number;
+}
+
+/**
+ * Query parameters for the product event log used to learn the
+ * authoritative latest sequence for a session during gap recovery.
+ */
+export interface EventLogQuery {
+  readonly sessionId?: string;
+  readonly targetId?: string;
+  readonly investigationId?: string;
+  readonly afterSequence?: number;
+  readonly limit?: number;
 }
 
 /**
@@ -64,6 +79,7 @@ export interface ControlPlaneApi {
   removeTarget(id: string, options: MutationOptions): Promise<void>;
   testTarget(id: string, options: MutationOptions): Promise<OperationAccepted>;
   createSession(input: AgentSessionCreate, options: MutationOptions): Promise<AgentSessionView>;
+  patchSession(id: string, input: AgentSessionPatch, options: MutationOptions): Promise<AgentSessionView>;
   listSessions(query: AgentSessionListQuery, signal?: AbortSignal): Promise<AgentSessionView[]>;
   getSession(id: string, signal?: AbortSignal): Promise<AgentSessionView>;
   listMessages(id: string, query: MessageListQuery, signal?: AbortSignal): Promise<AgentMessageView[]>;
@@ -72,6 +88,7 @@ export interface ControlPlaneApi {
   cancelSession(id: string, options: MutationOptions): Promise<OperationView>;
   getOperation(id: string, signal?: AbortSignal): Promise<OperationView>;
   listApprovals(query: ApprovalListQuery, signal?: AbortSignal): Promise<ApprovalPage>;
+  listEvents(query: EventLogQuery, signal?: AbortSignal): Promise<EventPage>;
   getApproval(id: string, signal?: AbortSignal): Promise<ApprovalDetailView>;
   decideApproval(
     id: string,
@@ -145,6 +162,10 @@ export class ControlPlaneApi implements ControlPlaneApi {
     return this.request<AgentSessionView>('POST', '/api/v1/agent-sessions', input, options.signal, options.idempotencyKey);
   }
 
+  async patchSession(id: string, input: AgentSessionPatch, options: MutationOptions): Promise<AgentSessionView> {
+    return this.request<AgentSessionView>('PATCH', `/api/v1/agent-sessions/${id}`, input, options.signal, options.idempotencyKey);
+  }
+
   async listSessions(query: AgentSessionListQuery, signal?: AbortSignal): Promise<AgentSessionView[]> {
     const params = new URLSearchParams();
     if (query.limit !== undefined) params.set('limit', String(query.limit));
@@ -184,10 +205,22 @@ export class ControlPlaneApi implements ControlPlaneApi {
   async listApprovals(query: ApprovalListQuery, signal?: AbortSignal): Promise<ApprovalPage> {
     const params = new URLSearchParams();
     if (query.status !== undefined) params.set('status', query.status);
+    if (query.sessionId !== undefined) params.set('session_id', query.sessionId);
     if (query.limit !== undefined) params.set('limit', String(query.limit));
     if (query.offset !== undefined) params.set('offset', String(query.offset));
     const qs = params.toString();
     return this.request<ApprovalPage>('GET', `/api/v1/approvals${qs ? `?${qs}` : ''}`, undefined, signal);
+  }
+
+  async listEvents(query: EventLogQuery, signal?: AbortSignal): Promise<EventPage> {
+    const params = new URLSearchParams();
+    if (query.sessionId !== undefined) params.set('session_id', query.sessionId);
+    if (query.targetId !== undefined) params.set('target_id', query.targetId);
+    if (query.investigationId !== undefined) params.set('investigation_id', query.investigationId);
+    if (query.afterSequence !== undefined) params.set('after_sequence', String(query.afterSequence));
+    if (query.limit !== undefined) params.set('limit', String(query.limit));
+    const qs = params.toString();
+    return this.request<EventPage>('GET', `/api/v1/events${qs ? `?${qs}` : ''}`, undefined, signal);
   }
 
   async getApproval(id: string, signal?: AbortSignal): Promise<ApprovalDetailView> {

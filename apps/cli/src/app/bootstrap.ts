@@ -7,6 +7,17 @@
 
 import type { AppDependencies } from './dependencies.js';
 import type { CliState, CliAction } from '../state/cli-state.js';
+import { assertCompatible, type ClientCompatibility } from '@incidentlens/protocol';
+
+/**
+ * Protocol versions this CLI understands. The control plane declares its
+ * `minimum_cli_protocol_version` in the version response; 1.0.0 is the
+ * current protocol generation served by both sides.
+ */
+const CLIENT_COMPATIBILITY: ClientCompatibility = {
+  min_protocol_version: '1.0.0',
+  max_protocol_version: '1.0.0',
+};
 
 /**
  * Bootstrap the application.
@@ -32,11 +43,7 @@ export async function bootstrap(
     // 3. Check compatibility
     try {
       const compatibility = await deps.api.compatibility();
-
-      if (!compatibility.compatible) {
-        dispatch({ type: 'bootstrap_complete', state: 'incompatible' });
-        return { bootstrap: 'incompatible' };
-      }
+      assertCompatible(compatibility, CLIENT_COMPATIBILITY);
     } catch {
       dispatch({ type: 'bootstrap_complete', state: 'incompatible' });
       return { bootstrap: 'incompatible' };
@@ -53,7 +60,7 @@ export async function bootstrap(
     if (profile?.lastTargetId) {
       try {
         const targets = await deps.api.listTargets();
-        const lastTarget = targets.find((t) => t.id === profile?.lastTargetId);
+        const lastTarget = targets.find((t) => t.target_id === profile?.lastTargetId);
 
         if (lastTarget) {
           dispatch({ type: 'set_target', target: lastTarget });
@@ -63,7 +70,19 @@ export async function bootstrap(
       }
     }
 
-    // 6. Bootstrap complete
+    // 6. Load last session
+    if (profile?.lastSessionId) {
+      try {
+        const session = await deps.api.getSession(profile.lastSessionId);
+        if (session) {
+          dispatch({ type: 'set_session', session });
+        }
+      } catch {
+        // Session load failed, continue without session
+      }
+    }
+
+    // 7. Bootstrap complete
     dispatch({ type: 'bootstrap_complete', state: 'ready' });
 
     return { bootstrap: 'ready' };
