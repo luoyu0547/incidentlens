@@ -22,11 +22,11 @@ describe('log locator', () => {
   it('fetches missing anchor, then centers the exact id', async () => {
     const onRecords = vi.fn();
     const scrollTo = vi.fn();
-    const fetchContext = vi.fn(async () => [record('2')]);
+    const fetchContext = vi.fn(async () => [record('log-2')]);
     const { result } = renderHook(() => useLogAnchor({ locator, currentService: locator.service, records: [record('1')], fetchContext, onRecords, scrollTo }));
     await act(async () => { await result.current.locate(); });
     expect(fetchContext).toHaveBeenCalledWith(locator);
-    expect(onRecords.mock.calls[0][0].map((x: LogRecordView) => x.log_id)).toEqual(['1', '2']);
+    expect(onRecords.mock.calls[0][0].map((x: LogRecordView) => x.log_id)).toEqual(['1', 'log-2']);
     expect(scrollTo).toHaveBeenCalledWith('log-2');
   });
 

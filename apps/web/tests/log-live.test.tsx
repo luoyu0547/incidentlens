@@ -39,7 +39,9 @@ describe('useLiveLogs', () => {
   });
   it('ignores unknown events and sends pause without changing server state', async () => {
     render(<Probe />);
+    await screen.findByTestId('records');
     await act(async () => {
+      await vi.waitFor(() => expect(FakeSocket.latest).toBeDefined());
       FakeSocket.latest!.open();
       FakeSocket.latest!.emit({ schema_version: 1, event_type: 'log.subscribed', occurred_at: '2026-08-26T00:00:00Z', cursor: 'cursor-1' });
     });

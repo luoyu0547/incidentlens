@@ -213,7 +213,7 @@ describe('Overview page', () => {
     const table = await screen.findByRole('table');
     expect(within(table).getByRole('link', { name: 'svc-web' })).toHaveAttribute(
       'href',
-      '/services/svc-web',
+      '/services/svc-web?levels=%5B%5D&mode=history&context=20&follow=true',
     );
 
     const issuesSection = screen.getByRole('region', { name: '活动问题' });

@@ -41,10 +41,7 @@ export const handlers = [
 
   http.get(`${API_ROOT}/investigations`, () => HttpResponse.json(investigationPageFixture)),
 
-  http.get(
-    `${API_ROOT}/investigations/:investigationId/summary`,
-    () => HttpResponse.json(investigationFixture),
-  ),
+  http.get(/\/api\/v1\/investigations\/[^/]+\/summary$/, () => HttpResponse.json(investigationFixture)),
 
   http.get(`${API_ROOT}/evidence/:evidenceRefId`, () => HttpResponse.json(evidenceFixture)),
 ];
