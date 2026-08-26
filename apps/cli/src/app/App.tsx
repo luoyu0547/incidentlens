@@ -467,7 +467,7 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
       <StatusLine
         streamConnected={state.stream.connected}
         pendingApprovals={
-          Object.values(state.approvals).filter((a) => a.status === 'pending').length
+          Object.values(state.approvals).filter((a) => a.decision_status === 'pending').length
         }
       />
 

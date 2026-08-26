@@ -25,7 +25,7 @@ describe('Ink rendering', () => {
     const approvalView = {
       approval_id: 'apr-1',
       decision_status: 'pending',
-      status: 'pending',
+      status: 'approved',
       downstream_status: 'pending',
       intent_summary: 'Restart the degraded service',
       risk: 'high',
