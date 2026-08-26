@@ -15,9 +15,10 @@ export interface UseLiveLogsResult {
   resume(): void;
   retry(): void;
 }
-export interface LiveLogsOptions { readonly webSocketFactory?: (url: string) => WebSocket; readonly maxRetries?: number; readonly backoffMs?: number; }
+export interface LiveLogsOptions { readonly webSocketFactory?: (url: string) => WebSocket; readonly maxRetries?: number; readonly backoffMs?: number; readonly enabled?: boolean; }
 const MAX_RETRIES = 5;
-const merge = (old: LogRecordView[], incoming: LogRecordView[]) => { const seen = new Set(old.map(x => x.log_id)); return [...old, ...incoming.filter(x => !seen.has(x.log_id))]; };
+const MAX_RECORDS = 5000;
+const merge = (old: LogRecordView[], incoming: LogRecordView[]) => [...old, ...incoming.filter(x => !old.some(y => y.log_id === x.log_id))].slice(-MAX_RECORDS);
 
 export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: LiveLogsOptions = {}): UseLiveLogsResult {
   const [records, setRecords] = useState<LogRecordView[]>([]);
@@ -38,6 +39,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
   const append = useCallback((record: LogRecordView) => { setRecords(prev => merge(prev, [record])); setUnreadCount(n => pausedRef.current ? n + 1 : 0); }, []);
 
   useEffect(() => {
+    if (options.enabled === false) return undefined;
     const runId = ++generation.current;
     let disposed = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -125,7 +127,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
     };
     void connect(true);
     return () => { disposed = true; socketGeneration += 1; if (retryTimer) clearTimeout(retryTimer); closeSocket(); };
-  }, [serviceId, search, query, append, closeSocket, options.webSocketFactory, maxRetries, backoffMs]);
+  }, [serviceId, search, query, append, closeSocket, options.webSocketFactory, options.enabled, maxRetries, backoffMs]);
 
   const pause = useCallback(() => { pausedRef.current = true; const command = serializeLogPause(); assertReadOnlyLogAction(command.action); socketRef.current?.send(JSON.stringify(command)); setStatus('paused'); }, []);
   const resume = useCallback(() => { pausedRef.current = false; setUnreadCount(0); const command = serializeLogResume(cursorRef.current); assertReadOnlyLogAction(command.action); socketRef.current?.send(JSON.stringify(command)); setStatus('connecting'); }, []);
