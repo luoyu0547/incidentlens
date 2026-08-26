@@ -40,8 +40,7 @@ describe('log locator', () => {
     await act(async () => { await result.current.locate(); });
     expect(fetchContext).toHaveBeenCalledTimes(1);
   });
-
-
+  it('navigates to the service before querying on mismatch', async () => {
     const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => undefined);
     const fetchContext = vi.fn();
     const { result } = renderHook(() => useLogAnchor({ locator, currentService: 'other', fetchContext }));
