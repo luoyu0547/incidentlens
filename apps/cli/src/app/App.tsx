@@ -435,9 +435,13 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
           focused={state.input.focused}
           promptEmpty={state.input.value.length === 0}
           overlayActive={state.overlay.kind !== 'none' || approvalPrompt !== undefined}
-          onAction={(action) => action === 'diff'
-            ? approvalRuntime.showDiff(approval)
-            : approvalRuntime.openReasonPrompt(approval.approval_id, action)}
+          onAction={(action) => {
+            void approvalController.refresh(approval.approval_id).then((latest) => {
+              dispatch({ type: 'set_approval', approval: latest });
+              if (action === 'diff') approvalRuntime.showDiff(latest);
+              else if (latest.decision_status === 'pending') approvalRuntime.openReasonPrompt(latest.approval_id, action);
+            }).catch((error) => dispatch({ type: 'system_message', content: `Error: ${error instanceof Error ? error.message : 'Approval refresh failed'}`, timestamp: deps.now() }));
+          }}
         />
       ))}
       {approvalPrompt && (

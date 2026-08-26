@@ -26,7 +26,7 @@ describe('Ink rendering', () => {
       approval_id: 'apr-1',
       decision_status: 'pending',
       status: 'pending',
-      downstream_status: 'not_started',
+      downstream_status: 'pending',
       intent_summary: 'Restart the degraded service',
       risk: 'high',
       kind: 'restart',

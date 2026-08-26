@@ -19,12 +19,16 @@ const CLIENT_COMPATIBILITY: ClientCompatibility = {
   max_protocol_version: '1.0.0',
 };
 
+async function dedupeById<T>(items: readonly T[], getId: (item: T) => string): Promise<T[]> {
+  return Array.from(new Map(items.map((item) => [getId(item), item])).values());
+}
+
 async function fetchAllMessages(deps: AppDependencies, sessionId: string): Promise<AgentMessageView[]> {
   const all: AgentMessageView[] = [];
   for (let offset = 0;; offset += 500) {
     const page = await deps.api.listMessages(sessionId, { limit: 500, offset });
     all.push(...page);
-    if (page.length < 500) return all;
+    if (page.length < 500) return dedupeById(all, (message) => message.message_id);
   }
 }
 
@@ -38,7 +42,7 @@ async function fetchAllEvents(deps: AppDependencies, sessionId: string): Promise
   for (;;) {
     const page = await deps.api.listEvents({ sessionId, afterSequence, limit: 500 });
     items.push(...page.items);
-    if (!page.has_more || page.items.length === 0) return { items, latest_sequence: page.latest_sequence };
+    if (!page.has_more || page.items.length === 0) return { items: Array.from(new Map(items.map((event) => [String(event.event_id ?? `${event.sequence}`), event])).values()), latest_sequence: 0 };
     afterSequence = page.next_after_sequence;
   }
 }
@@ -109,7 +113,7 @@ export async function bootstrap(
             fetchAllApprovals(deps, session.session_id),
             fetchAllEvents(deps, session.session_id),
           ]);
-          const sequence = events.latest_sequence > 0 ? events.latest_sequence : events.items.reduce(
+          const sequence = events.items.reduce(
             (latest, event) => Math.max(latest, event.sequence ?? 0),
             profile?.lastSequenceBySession[session.session_id] ?? 0,
           );

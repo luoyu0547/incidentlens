@@ -18,7 +18,12 @@ export function approvalHotkeysActive(
   return focused && promptEmpty && !overlayActive;
 }
 
-/** Safe approval preview. Intentionally does not render hidden/canonical intent or raw payloads. */
+function safeField(value: string | null | undefined): string | undefined {
+  if (!value) return undefined;
+  const redacted = value.replace(/(token|password|secret|authorization|credential)\s*[:=]\s*[^\s,;]+/gi, '$1=[redacted]');
+  return redacted.length > 240 ? `${redacted.slice(0, 237)}...` : redacted;
+}
+
 export function ApprovalCard({ approval, focused, promptEmpty, overlayActive, onAction }: ApprovalCardProps): React.ReactElement {
   const hotkeysActive = approvalHotkeysActive(focused, promptEmpty, overlayActive);
   useInput((input) => {
@@ -31,10 +36,10 @@ export function ApprovalCard({ approval, focused, promptEmpty, overlayActive, on
     <Text bold>Approval {approval.approval_id}</Text>
     <Text>Intent: {approval.intent_summary}</Text>
     <Text>Risk: {approval.risk}  Expires: {approval.expires_at}</Text>
-    {approval.diff && <Text>Diff: {approval.diff}</Text>}
-    {approval.impact && <Text>Impact: {approval.impact}</Text>}
-    {approval.verification && <Text>Verification: {approval.verification}</Text>}
-    {approval.rollback && <Text>Rollback: {approval.rollback}</Text>}
+    {safeField(approval.diff) && <Text>Diff: {safeField(approval.diff)}</Text>}
+    {safeField(approval.impact) && <Text>Impact: {safeField(approval.impact)}</Text>}
+    {safeField(approval.verification) && <Text>Verification: {safeField(approval.verification)}</Text>}
+    {safeField(approval.rollback) && <Text>Rollback: {safeField(approval.rollback)}</Text>}
     <Text>Decision persisted: {approval.decision_status}</Text>
     <Text>Downstream: {approval.downstream_status}</Text>
     {hotkeysActive && <Text color="gray">A approve, R reject, D diff</Text>}
