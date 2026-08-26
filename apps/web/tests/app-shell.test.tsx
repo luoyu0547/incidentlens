@@ -83,20 +83,27 @@ describe('Routes', () => {
 
   it('preserves search state when navigating', async () => {
     const ue = userEvent.setup();
-    renderApp({ initialEntries: ['/issues?status=open'] });
+    const { history, router } = renderApp({ initialEntries: ['/issues?status=open'] });
 
-    // Navigate to overview
+    // Initial search state is parsed from the URL.
+    expect(router.state.location.search.status).toBe('open');
+
+    // Navigate away to overview.
     const overviewLink = await screen.findByRole('link', { name: '总览' });
     await ue.click(overviewLink);
-
     expect(await screen.findByRole('heading', { name: '总览' })).toBeVisible();
+
+    // Navigate back — search state is preserved from history.
+    history.back();
+    expect(await screen.findByRole('heading', { name: '问题' })).toBeVisible();
+    expect(router.state.location.search.status).toBe('open');
   });
 });
 
 describe('History navigation', () => {
   it('supports browser back and forward', async () => {
     const ue = userEvent.setup();
-    renderApp({ initialEntries: ['/', '/issues'], initialIndex: 1 });
+    const { history } = renderApp({ initialEntries: ['/', '/issues'], initialIndex: 1 });
 
     // We're on /issues
     expect(await screen.findByRole('heading', { name: '问题' })).toBeVisible();
@@ -104,6 +111,14 @@ describe('History navigation', () => {
     // Click the overview nav link (push forward in history)
     const overviewLink = await screen.findByRole('link', { name: '总览' });
     await ue.click(overviewLink);
+    expect(await screen.findByRole('heading', { name: '总览' })).toBeVisible();
+
+    // Go back to /issues
+    history.back();
+    expect(await screen.findByRole('heading', { name: '问题' })).toBeVisible();
+
+    // Go forward to /
+    history.forward();
     expect(await screen.findByRole('heading', { name: '总览' })).toBeVisible();
   });
 });
