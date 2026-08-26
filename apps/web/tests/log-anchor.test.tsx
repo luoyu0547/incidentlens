@@ -30,7 +30,18 @@ describe('log locator', () => {
     expect(scrollTo).toHaveBeenCalledWith('log-2');
   });
 
-  it('navigates to the service before querying on mismatch', async () => {
+  it('resets the locating guard after an early return so a new anchor can locate', async () => {
+    const scrollTo = vi.fn();
+    const first = { ...locator, log_id: 'missing-1' };
+    const fetchContext = vi.fn(async () => [record('missing-1')]);
+    const { result, rerender } = renderHook(({ current, records, fetch }: { current: typeof first; records: LogRecordView[]; fetch?: typeof fetchContext }) => useLogAnchor({ locator: current, currentService: current.service, records, fetchContext: fetch, scrollTo }), { initialProps: { current: first, records: [record('other')], fetch: undefined } });
+    await act(async () => { await result.current.locate(); });
+    rerender({ current: { ...first, log_id: 'missing-2' }, records: [record('other')], fetch: fetchContext });
+    await act(async () => { await result.current.locate(); });
+    expect(fetchContext).toHaveBeenCalledTimes(1);
+  });
+
+
     const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => undefined);
     const fetchContext = vi.fn();
     const { result } = renderHook(() => useLogAnchor({ locator, currentService: 'other', fetchContext }));

@@ -70,19 +70,19 @@ export function useLogAnchor(options: UseLogAnchorOptions) {
   const locate = useCallback(async () => {
     if (locating.current || !locator || !anchorId) return;
     locating.current = true;
-    // A service mismatch must be handled before any query/context request.
-    if (currentService !== locator.service) {
-      window.location.assign(url ?? logLocatorUrl(locator));
-      return;
-    }
-    if (records.some((record) => record.log_id === anchorId)) {
-      requestAnimationFrame(() => scrollTo?.(anchorId));
-      return;
-    }
-    if (!fetchContext) return;
-    setLoading(true);
-    setExpired(false);
     try {
+      // A service mismatch must be handled before any query/context request.
+      if (currentService !== locator.service) {
+        window.location.assign(url ?? logLocatorUrl(locator));
+        return;
+      }
+      if (records.some((record) => record.log_id === anchorId)) {
+        requestAnimationFrame(() => scrollTo?.(anchorId));
+        return;
+      }
+      if (!fetchContext) return;
+      setLoading(true);
+      setExpired(false);
       const context = await fetchContext(locator);
       const merged = mergeRecords(records, context);
       onRecords?.(merged);
