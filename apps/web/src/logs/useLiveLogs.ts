@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LogRecordView, ServiceLogQuery } from '@incidentlens/protocol';
-import { parseLogStreamEvent, serializeLogAck, serializeLogPause, serializeLogResume, serializeLogSubscribe, serializeLogUpdate } from '@incidentlens/protocol';
+import { parseLogStreamEvent, serializeLogAck, serializeLogPause, serializeLogResume, serializeLogSubscribe } from '@incidentlens/protocol';
 import { readonlyClient } from '../api/client';
+import { assertReadOnlyLogAction } from '../api/read-only-guard';
 import { logSearchToQuery, type LogRouteSearch } from './log-search';
 
 export interface UseLiveLogsResult {
@@ -71,12 +72,17 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
         if (disposed) return;
         setStatus('connecting');
         const ws = wsFactory(socketUrl); socketRef.current = ws;
-        ws.onopen = () => { retries.current = 0; ws.send(JSON.stringify(serializeLogSubscribe({ service_id: serviceId, target_id: search.target, severity: search.levels.length ? search.levels.join(',') : undefined, cursor: cursorRef.current }))); };
+        const send = (payload: string) => {
+          const command = JSON.parse(payload) as { action?: string };
+          assertReadOnlyLogAction(command.action ?? '');
+          ws.send(payload);
+        };
+        ws.onopen = () => { retries.current = 0; send(JSON.stringify(serializeLogSubscribe({ service_id: serviceId, target_id: search.target, severity: search.levels.length ? search.levels.join(',') : undefined, cursor: cursorRef.current }))); };
         ws.onmessage = (message) => {
           try {
             const parsed = parseLogStreamEvent(JSON.parse(String(message.data)));
             if ('kind' in parsed) return;
-            if (parsed.event_type === 'log.record') { const record = parsed.payload as LogRecordView; append(record); if (parsed.cursor) { cursorRef.current = parsed.cursor; setLastCursor(parsed.cursor); ws.send(JSON.stringify(serializeLogAck(parsed.cursor))); } }
+            if (parsed.event_type === 'log.record') { const record = parsed.payload as LogRecordView; append(record); if (parsed.cursor) { cursorRef.current = parsed.cursor; setLastCursor(parsed.cursor); send(JSON.stringify(serializeLogAck(parsed.cursor))); } }
             else if (parsed.event_type === 'log.subscribed') setStatus(pausedRef.current ? 'paused' : 'live');
             else if (parsed.event_type === 'stream.gap') { closeSocket(); void backfill(true).then(() => { if (!disposed) void connect(false); }); }
           } catch (e) { setError(e instanceof Error ? e : new Error('Invalid log stream event')); setStatus('error'); }
@@ -89,8 +95,8 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
     return () => { disposed = true; if (retryTimer) clearTimeout(retryTimer); closeSocket(); };
   }, [serviceId, search, query, append, closeSocket, options.webSocketFactory, maxRetries, backoffMs]);
 
-  const pause = useCallback(() => { pausedRef.current = true; socketRef.current?.send(JSON.stringify(serializeLogPause())); setStatus('paused'); }, []);
-  const resume = useCallback(() => { pausedRef.current = false; setUnreadCount(0); socketRef.current?.send(JSON.stringify(serializeLogResume(cursorRef.current))); setStatus('connecting'); }, []);
+  const pause = useCallback(() => { pausedRef.current = true; const command = serializeLogPause(); assertReadOnlyLogAction(command.action); socketRef.current?.send(JSON.stringify(command)); setStatus('paused'); }, []);
+  const resume = useCallback(() => { pausedRef.current = false; setUnreadCount(0); const command = serializeLogResume(cursorRef.current); assertReadOnlyLogAction(command.action); socketRef.current?.send(JSON.stringify(command)); setStatus('connecting'); }, []);
   const retry = useCallback(() => { retries.current = 0; setError(null); closeSocket(); }, [closeSocket]);
   return { records, status, unreadCount, lastCursor, error, pause, resume, retry };
 }

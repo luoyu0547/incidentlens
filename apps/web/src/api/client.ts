@@ -28,7 +28,8 @@ function fetchWithoutCrossRealmSignal(input: RequestInfo | URL, init?: RequestIn
     const request = input as Request;
     return guardedFetch(request.url, { method: request.method, headers: request.headers });
   }
-  const { signal: _signal, ...safeInit } = init ?? {};
+  const safeInit = { ...init };
+  delete safeInit.signal;
   return guardedFetch(input, safeInit);
 }
 

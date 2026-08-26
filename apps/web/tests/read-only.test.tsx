@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createWebReadonlyClient } from '@incidentlens/protocol';
 import { readonlyClient, guardedFetch, ReadOnlyViolationError } from '../src/api/client';
+import { assertReadOnlyLogAction, READ_ONLY_LOG_ACTIONS } from '../src/api/read-only-guard';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -48,6 +49,15 @@ describe('read-only boundary', () => {
       'createSession',
     ]) {
       expect(pkg).not.toHaveProperty(forbidden);
+    }
+  });
+
+  it('allows only subscription-control WebSocket actions', () => {
+    for (const action of READ_ONLY_LOG_ACTIONS) {
+      expect(() => assertReadOnlyLogAction(action)).not.toThrow();
+    }
+    for (const action of ['approve', 'reject', 'execute', 'delete', 'deploy']) {
+      expect(() => assertReadOnlyLogAction(action)).toThrow(ReadOnlyViolationError);
     }
   });
 

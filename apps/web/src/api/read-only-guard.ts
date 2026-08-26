@@ -8,8 +8,19 @@
  */
 
 export const READ_ONLY_METHODS = ['GET', 'HEAD', 'OPTIONS'] as const;
+export const READ_ONLY_LOG_ACTIONS = ['subscribe', 'update', 'pause', 'resume', 'ack'] as const;
 
 const ALLOWED_METHODS = new Set<string>(READ_ONLY_METHODS);
+const ALLOWED_LOG_ACTIONS = new Set<string>(READ_ONLY_LOG_ACTIONS);
+
+/** Assert that a log WebSocket command is read-only subscription control. */
+export function assertReadOnlyLogAction(
+  action: string,
+): asserts action is (typeof READ_ONLY_LOG_ACTIONS)[number] {
+  if (!ALLOWED_LOG_ACTIONS.has(action)) {
+    throw new ReadOnlyViolationError(`WebSocket action ${action}`);
+  }
+}
 
 /**
  * Thrown when code attempts to issue a mutating request through the guarded

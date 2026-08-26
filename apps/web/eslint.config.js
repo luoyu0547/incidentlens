@@ -44,6 +44,12 @@ export default tseslint.config(
               message:
                 'Web code must use the guarded WebReadonlyClient facade from @incidentlens/protocol.',
             },
+            {
+              name: '@incidentlens/protocol',
+              importNames: ['createClient', 'createSdkClient'],
+              message:
+                'Web code must use the guarded WebReadonlyClient facade from @incidentlens/protocol.',
+            },
           ],
           patterns: [
             {
