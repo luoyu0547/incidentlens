@@ -9,7 +9,7 @@ export interface EvidenceMarkerProps {
 
 /** Marker attached to the exact server-identified log row. */
 export function EvidenceMarker({ record, active = false, onLocate }: EvidenceMarkerProps) {
-  return <span data-log-id={record.log_id} data-cursor={record.cursor} data-active={active || undefined} style={markerStyle}>
+  return <span data-cursor={record.cursor} data-active={active || undefined} style={markerStyle}>
     <button type="button" onClick={onLocate} aria-label={`定位日志 ${record.log_id}`}>证据</button>
   </span>;
 }

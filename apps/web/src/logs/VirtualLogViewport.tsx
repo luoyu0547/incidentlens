@@ -46,12 +46,12 @@ export function VirtualLogViewport({ records, paused = false, unreadCount = 0, o
     <section aria-label="日志记录视口" className={className}>
       {onPrepend && <button type="button" onClick={onPrepend}>加载更早日志</button>}
       {(paused || unreadCount > 0 || !following) && <button type="button" onClick={locateLatest}>定位最新{unreadCount > 0 ? ` (${unreadCount})` : ''}</button>}
-      <div ref={parentRef} onScroll={() => {
+      <div className="log-viewer__viewport" ref={parentRef} onScroll={() => {
         const element = parentRef.current;
         if (!element) return;
         setFollowing(element.scrollHeight - element.scrollTop - element.clientHeight < 32);
       }} style={{ height: 360, overflow: 'auto' }}>
-        <ol aria-label="日志记录" style={{ height: virtualizer.getTotalSize(), position: 'relative', margin: 0, padding: 0 }}>
+        <ol className="log-viewer__records" aria-label="日志记录" style={{ height: virtualizer.getTotalSize(), position: 'relative', margin: 0, padding: 0 }}>
           {virtualizer.getVirtualItems().map((item) => {
             const record = records[item.index];
             return <LogRow key={record.log_id} record={record} measureRef={virtualizer.measureElement} onLocate={onLocate} style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }} />;
