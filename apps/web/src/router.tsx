@@ -54,7 +54,9 @@ const overviewRoute = createRoute({
 const serviceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/services/$serviceId',
+  component: ServicePage,
   validateSearch: (search: Record<string, unknown>) => normalizeLogRouteSearch(search),
+  staticData: { title: ROUTE_TITLES['/services/$serviceId'] },
 });
 
 const issuesRoute = createRoute({
