@@ -4,7 +4,16 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
+from starlette.responses import Response
 from starlette.staticfiles import StaticFiles
+
+
+class ImmutableStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope) -> Response:
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
 
 _ALLOWED_SPA_PREFIXES = ("services/", "issues/", "investigations/")
 _RESERVED_PREFIXES = (
@@ -41,7 +50,7 @@ def mount_web_assets(app: FastAPI, *, web_root: Path) -> None:
     index = root / "index.html"
 
     if assets.is_dir():
-        app.mount("/assets", StaticFiles(directory=assets), name="web-assets")
+        app.mount("/assets", ImmutableStaticFiles(directory=assets), name="web-assets")
 
     @app.get("/{path:path}", include_in_schema=False)
     async def spa_fallback(request: Request, path: str):
