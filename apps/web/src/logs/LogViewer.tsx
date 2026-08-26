@@ -23,12 +23,12 @@ export function LogViewer({ serviceId, targetId, initialSearch, onSearchChange }
   const live = useLiveLogs(serviceId, { ...search, target: search.target ?? targetId }, { enabled: search.mode === 'live' });
   const recordsBase = search.mode === 'live' ? live.records : (history.data?.pages.flatMap((page) => page.items) ?? []);
   const records = [...recordsBase, ...anchoredRecords.filter((r) => !recordsBase.some((x) => x.log_id === r.log_id))];
-  const anchor = useMemo(() => search.anchor ? { service: serviceId, log_id: search.anchor, context: search.context } : null, [search.anchor, search.context, serviceId]);
+  const anchor = useMemo(() => search.anchor ? { service: serviceId, log_id: search.anchor, cursor: search.cursor, context: search.context } : null, [search.anchor, search.cursor, search.context, serviceId]);
   const scrollTo = (logId: string) => document.querySelector(`[data-log-id="${CSS.escape(logId)}"]`)?.scrollIntoView({ block: 'center' });
   const fetchContext = async (locator: { context?: number | null; cursor?: string | null }): Promise<readonly LogRecordView[]> => {
     const query: ServiceLogQuery = {
       limit: locator.context ?? search.context,
-      before: locator.cursor ?? search.anchor ?? undefined,
+      ...(locator.cursor ? { before: locator.cursor } : {}),
       after: search.from,
       severity: search.levels[0],
       source_ref: search.target ?? targetId,

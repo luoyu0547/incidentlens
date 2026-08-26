@@ -9,6 +9,7 @@ export interface LogRouteSearch {
   readonly q?: string;
   readonly mode: 'history' | 'live';
   readonly anchor?: string;
+  readonly cursor?: string;
   readonly evidence?: string;
   readonly issue?: string;
   readonly context: number;
@@ -40,7 +41,7 @@ export function normalizeLogRouteSearch(input: unknown): LogRouteSearch {
   return {
     target: optionalText(source.target), instance: optionalText(source.instance), levels,
     from, to, q: optionalText(source.q ?? source.query), mode,
-    anchor: optionalText(source.anchor), evidence: optionalText(source.evidence), issue: optionalText(source.issue),
+    anchor: optionalText(source.anchor), cursor: optionalText(source.cursor), evidence: optionalText(source.evidence), issue: optionalText(source.issue),
     context, follow: source.follow === undefined ? true : source.follow === true || source.follow === 'true' || source.follow === '1',
   };
 }
