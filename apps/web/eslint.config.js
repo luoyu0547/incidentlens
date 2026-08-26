@@ -27,6 +27,33 @@ export default tseslint.config(
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
       '@typescript-eslint/no-floating-promises': 'error',
       '@typescript-eslint/no-misused-promises': 'error',
+      // Read-only boundary: all HTTP flows through the guarded WebReadonlyClient
+      // facade. Raw generated SDK clients, generated SDK internals, and
+      // openapi-fetch are forbidden in the web workspace.
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: 'openapi-fetch',
+              message:
+                'Web code must use the guarded WebReadonlyClient facade from @incidentlens/protocol.',
+            },
+            {
+              name: '@hey-api/client-fetch',
+              message:
+                'Web code must use the guarded WebReadonlyClient facade from @incidentlens/protocol.',
+            },
+          ],
+          patterns: [
+            {
+              group: ['**/packages/protocol/src/**', '**/generated/**'],
+              message:
+                'Web code must not reach into @incidentlens/protocol internals; import the guarded WebReadonlyClient facade from @incidentlens/protocol.',
+            },
+          ],
+        },
+      ],
     },
   },
 );

@@ -1,5 +1,24 @@
-// Re-export generated types, SDK functions, and client
-export * from './generated/index.js';
+// Re-export generated types only (no value exports — SDK endpoint functions
+// must not be reachable from the web workspace through the root package entry)
+export type * from './generated/types.gen.js';
+
+// Re-export the read-only web facade (all apps/web HTTP must go through it)
+export {
+  DEFAULT_BASE_URL,
+  createWebReadonlyClient,
+  ReadonlyApiError,
+} from './web-readonly-client.js';
+
+export type {
+  WebReadonlyClient,
+  WebReadonlyClientOptions,
+  ReadonlyApiErrorOptions,
+  TargetPage,
+  TargetServicePage,
+  ServiceLogQuery,
+  IssueListQuery,
+  InvestigationListQuery,
+} from './web-readonly-client.js';
 
 // Re-export stream parsing utilities
 export {
