@@ -26,7 +26,9 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: 'dist',
+    outDir: '../control-plane/src/incidentlens_control_plane/static/web',
+    emptyOutDir: true,
+    manifest: true,
     sourcemap: true,
   },
 });

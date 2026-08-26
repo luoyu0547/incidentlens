@@ -31,6 +31,7 @@ class RuntimeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     data_dir: Path
+    web_root: Path | None = None
     max_active_log_subscriptions: int = Field(default=20, ge=1, le=1_000)
     log_subscription_queue_size: int = Field(default=1000, ge=1, le=100_000)
     log_subscription_batch_size: int = Field(default=100, ge=1, le=10_000)
@@ -138,6 +139,7 @@ class RuntimeSettings(BaseModel):
         configured = os.environ.get("INCIDENTLENS_DATA_DIR")
         data_dir = Path(configured).expanduser() if configured else Path.home() / ".incidentlens"
         report_output_dir = data_dir.resolve() / "reports"
+        web_root = Path(__file__).resolve().parent / "static" / "web"
         session_key_value = os.environ.get("INCIDENTLENS_SESSION_SIGNING_KEY")
         session_signing_key = (
             SecretStr(session_key_value)
@@ -147,6 +149,7 @@ class RuntimeSettings(BaseModel):
         return cls(
             data_dir=data_dir.resolve(),
             report_output_dir=report_output_dir,
+            web_root=web_root,
             agent_mode=os.environ.get("INCIDENTLENS_AGENT_MODE", "fake"),
             llm_active_model=os.environ.get("INCIDENTLENS_LLM_ACTIVE_MODEL"),
             llm_base_url=os.environ.get("INCIDENTLENS_LLM_BASE_URL"),

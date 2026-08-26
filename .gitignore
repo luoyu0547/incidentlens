@@ -12,5 +12,6 @@ node_modules/
 dist/
 *.tsbuildinfo
 apps/web/dist/
+apps/control-plane/src/incidentlens_control_plane/static/web/
 apps/web/test-results/
 apps/web/playwright-report/

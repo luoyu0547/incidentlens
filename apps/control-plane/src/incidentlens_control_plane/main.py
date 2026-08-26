@@ -37,6 +37,7 @@ from incidentlens_control_plane.config import (
 )
 from incidentlens_control_plane.remote_ops.transport import RemoteTransportFactory
 from incidentlens_control_plane.runtime import build_runtime
+from incidentlens_control_plane.web_assets import mount_web_assets
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +212,9 @@ def create_app(
         application.include_router(evidence_router)
         application.include_router(incidents_router)
         application.include_router(investigations_router)
+
+    if settings.web_root is not None:
+        mount_web_assets(application, web_root=settings.web_root)
 
     return application
 
