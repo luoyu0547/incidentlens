@@ -30,6 +30,9 @@ packages = ["apps/control-plane/src/incidentlens_control_plane"]
 [tool.hatch.build.targets.wheel.force-include]
 "apps/control-plane/src/incidentlens_control_plane/static/web" = "incidentlens_control_plane/static/web"
 
+[tool.hatch.build.hooks.custom]
+path = "scripts/hatch_build.py"
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100

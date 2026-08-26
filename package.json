@@ -23,6 +23,7 @@
     "web:typecheck": "npm run typecheck --workspace @incidentlens/web",
     "web:lint": "npm run lint --workspace @incidentlens/web",
     "web:build": "npm run build --workspace @incidentlens/web",
+    "build:static": "npm run web:build",
     "web:e2e": "npm run e2e --workspace @incidentlens/web",
     "web:verify": "npm run web:typecheck && npm run web:lint && npm run web:test && npm run web:build"
   },
