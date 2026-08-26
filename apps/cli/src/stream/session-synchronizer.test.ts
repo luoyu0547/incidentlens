@@ -445,17 +445,37 @@ describe('sessionSynchronizer', () => {
       ],
       has_more: false,
     });
-    (api.listEvents as ReturnType<typeof vi.fn>).mockResolvedValue({
-      items: [
-        { sequence: 100, event_type: 'operation.running', event_id: 'x', payload: { operation_id: 'op-1' } },
-        { sequence: 101, event_type: 'operation.succeeded', event_id: 'y', payload: { operation_id: 'op-1' } },
-      ],
-      latest_sequence: 101,
-      earliest_available_sequence: 90,
-      next_after_sequence: 101,
-      has_more: false,
-    });
-    (api.getOperation as ReturnType<typeof vi.fn>).mockResolvedValue(makeOperation());
+
+    // Two event pages: the first has_more, the second does not. The latest
+    // sequence (101) only appears on page two, so the authoritative cursor
+    // must account for pagination (Constraint: no double-merge).
+    const listEvents = api.listEvents as ReturnType<typeof vi.fn>;
+    listEvents
+      .mockResolvedValueOnce({
+        items: [
+          { sequence: 98, event_type: 'operation.running', event_id: 'a', payload: { operation_id: 'op-1' } },
+        ],
+        latest_sequence: 101,
+        earliest_available_sequence: 90,
+        next_after_sequence: 98,
+        has_more: true,
+      })
+      .mockResolvedValueOnce({
+        items: [
+          // Latest event is TERMINAL — must not be projected as active op.
+          { sequence: 101, event_type: 'operation.succeeded', event_id: 'b', payload: { operation_id: 'op-1' } },
+        ],
+        latest_sequence: 101,
+        earliest_available_sequence: 90,
+        next_after_sequence: 101,
+        has_more: false,
+      });
+
+    // op-1 has since finished; the authoritative getOperation returns a
+    // terminal status, so it is excluded from the snapshot's operations.
+    (api.getOperation as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeOperation({ status: 'succeeded' }),
+    );
 
     const { configStore, save } = makeConfigStore();
     const host = makeHost();
@@ -471,13 +491,23 @@ describe('sessionSynchronizer', () => {
     await vi.advanceTimersByTimeAsync(0);
     await flush();
 
+    // The authoritative session is surfaced via set_session (the reducer's
+    // gap_snapshot does not carry a session field).
+    expect(host.dispatch).toHaveBeenCalledWith({
+      type: 'set_session',
+      session: expect.objectContaining({ session_id: 'session-1' }),
+    });
+
     // gap_snapshot dispatched with the authoritative replacement.
     const gapAction = host.dispatch.mock.calls.find(
       (c) => (c[0] as CliAction).type === 'gap_snapshot',
     );
     expect(gapAction).toBeDefined();
-    const snapshot = (gapAction?.[0] as { type: 'gap_snapshot'; snapshot: { sequence: number } }).snapshot;
+    const snapshot = (gapAction?.[0] as { type: 'gap_snapshot'; snapshot: { sequence: number; operations: Record<string, unknown> } }).snapshot;
+    // Sequence accounts for the second page (has_more).
     expect(snapshot.sequence).toBe(101);
+    // The terminal op-1 is NOT projected as the active operation.
+    expect(snapshot.operations).toEqual({});
     expect(host.dispatch).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'gap_snapshot' }),
     );
@@ -486,6 +516,95 @@ describe('sessionSynchronizer', () => {
     expect(save).toHaveBeenCalledWith(
       expect.objectContaining({ lastSequenceBySession: { 'session-1': 101 } }),
     );
+
+    controller.abort();
+    await started;
+  });
+
+  it('reconnects with the authoritative cursor after a gap, even when the socket closes first', async () => {
+    // Important 1 ordering: the server sends `stream.gap` then closes 1012.
+    // The recoverable close must NOT reconnect at the old cursor before gap
+    // recovery (which sets the authoritative cursor) completes.
+    const stream = new MockEventStream();
+    const api = makeApi();
+    (api.getSession as ReturnType<typeof vi.fn>).mockResolvedValue(makeSession());
+    (api.listMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (api.listApprovals as ReturnType<typeof vi.fn>).mockResolvedValue({ items: [], has_more: false });
+    (api.listEvents as ReturnType<typeof vi.fn>).mockResolvedValue({
+      items: [
+        { sequence: 120, event_type: 'tool.proposed', event_id: 'x', payload: { tool_id: 't1' } },
+      ],
+      latest_sequence: 120,
+      earliest_available_sequence: 90,
+      next_after_sequence: 120,
+      has_more: false,
+    });
+    (api.getOperation as ReturnType<typeof vi.fn>).mockResolvedValue(makeOperation());
+    const { configStore } = makeConfigStore();
+    const host = makeHost();
+    const sync = new SessionSynchronizer(makeOptions(stream, api, configStore, host));
+    sync.setInitialCursor('session-1', 88);
+
+    const controller = new AbortController();
+    const started = sync.start(controller.signal);
+    stream.hello();
+    await flush();
+
+    // The gap frame arrives, then the socket drops (1012 → recoverable)
+    // while gap recovery (async HTTP) is still in flight.
+    stream.emitGap({ requested_after_sequence: 88, earliest_available_sequence: 90 });
+    stream.disconnect();
+    await vi.advanceTimersByTimeAsync(0);
+    await flush();
+
+    // Reconnect after backoff must use the AUTHORITATIVE cursor (120), not
+    // the stale 88.
+    await vi.advanceTimersByTimeAsync(250);
+    await flush();
+    expect(stream.connectCount).toBe(2);
+    expect(stream.cursor).toEqual({ sessionId: 'session-1', sequence: 120 });
+
+    controller.abort();
+    await started;
+  });
+
+  it('projects the active (non-terminal) operation into the gap snapshot', async () => {
+    const stream = new MockEventStream();
+    const api = makeApi();
+    (api.getSession as ReturnType<typeof vi.fn>).mockResolvedValue(makeSession());
+    (api.listMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (api.listApprovals as ReturnType<typeof vi.fn>).mockResolvedValue({ items: [], has_more: false });
+    (api.listEvents as ReturnType<typeof vi.fn>).mockResolvedValue({
+      items: [
+        { sequence: 200, event_type: 'operation.running', event_id: 'x', payload: { operation_id: 'op-1' } },
+      ],
+      latest_sequence: 200,
+      earliest_available_sequence: 90,
+      next_after_sequence: 200,
+      has_more: false,
+    });
+    (api.getOperation as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeOperation({ status: 'running' }),
+    );
+    const { configStore } = makeConfigStore();
+    const host = makeHost();
+    const sync = new SessionSynchronizer(makeOptions(stream, api, configStore, host));
+    sync.setInitialCursor('session-1', 10);
+
+    const controller = new AbortController();
+    const started = sync.start(controller.signal);
+    stream.hello();
+    await flush();
+
+    stream.emitGap({ requested_after_sequence: 10, earliest_available_sequence: 90 });
+    await vi.advanceTimersByTimeAsync(0);
+    await flush();
+
+    const gapAction = host.dispatch.mock.calls.find(
+      (c) => (c[0] as CliAction).type === 'gap_snapshot',
+    );
+    const snapshot = (gapAction?.[0] as { type: 'gap_snapshot'; snapshot: { operations: Record<string, unknown> } }).snapshot;
+    expect(snapshot.operations['op-1']).toMatchObject({ operation_id: 'op-1', status: 'running' });
 
     controller.abort();
     await started;

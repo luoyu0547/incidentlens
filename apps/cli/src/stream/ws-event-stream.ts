@@ -147,9 +147,24 @@ export class WsEventStream implements EventStream {
 
       let helloSeen = false;
       let settled = false;
-      let lastSequence = cursor.sequence;
+
+      // Removed from the shared signal on cleanup so repeated reconnects on
+      // the same signal do not accumulate abort listeners.
+      const onAbort = (): void => {
+        cleanup();
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
 
       const cleanup = (): void => {
+        try {
+          signal.removeEventListener('abort', onAbort);
+        } catch {
+          // ignore
+        }
         try {
           socket.removeAllListeners();
         } catch {
@@ -166,16 +181,6 @@ export class WsEventStream implements EventStream {
           }
         }
       };
-
-      // --- Abort handling ---
-      const onAbort = (): void => {
-        cleanup();
-        if (!settled) {
-          settled = true;
-          resolve();
-        }
-      };
-      signal.addEventListener('abort', onAbort, { once: true });
 
       // --- Open ---
       socket.on('open', () => {
@@ -236,21 +241,9 @@ export class WsEventStream implements EventStream {
         if (envelope.event_type === 'stream.hello') {
           if (!helloSeen) {
             helloSeen = true;
-            const payload = envelope.payload ?? {};
-            const schemaVersion = payload['schema_version'];
-            if (schemaVersion !== undefined && schemaVersion !== 1) {
-              handlers.onStatus({
-                kind: 'fatal',
-                error: `Unsupported schema_version ${String(schemaVersion)}`,
-                code: 'UNSUPPORTED_SCHEMA_VERSION',
-              });
-              if (!settled) {
-                settled = true;
-                reject(new Error(`Unsupported schema_version ${String(schemaVersion)}`));
-              }
-              cleanup();
-              return;
-            }
+            // `parseStreamFrame` already rejects a non-1 schema_version
+            // (UNSUPPORTED_SCHEMA_VERSION), so a successful parse here means
+            // the stream is compatible. The transport is live.
             handlers.onStatus({ kind: 'connected' });
             if (!settled) {
               settled = true;
@@ -275,14 +268,7 @@ export class WsEventStream implements EventStream {
 
         // --- Runtime events ---
         if (typeof envelope.sequence === 'number') {
-          if (envelope.sequence > lastSequence) {
-            lastSequence = envelope.sequence;
-          }
           if (parsed.kind === 'known') {
-            // Parsed.kind === 'known' narrows envelope to
-            // KnownCliStreamEnvelope.
-
-
             void handlers.onEvent(parsed.envelope);
           }
           // Unknown event types advance the cursor safely (no onEvent call).

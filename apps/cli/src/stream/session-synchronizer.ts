@@ -14,8 +14,9 @@
  * - On a history gap or slow consumer: pauses event projection, fetches an
  *   authoritative HTTP snapshot (Session + paginated messages + active
  *   Operation + pending Approvals), replaces the projection, sets the
- *   cursor to the server's authoritative `last_event_sequence`, and
- *   reconnects. The stale projection is never merged into the snapshot.
+ *   cursor to the server's authoritative `last_event_sequence`, then
+ *   reconnects — strictly in that order. The stale projection is never
+ *   merged into the snapshot.
  * - Marks 401 / version-incompatible as fatal (no reconnect) by surfacing
  *   `authentication-required` / `incompatible` to the host.
  * - Detects heartbeat timeout: when no `connected` status or data event
@@ -32,8 +33,9 @@
 import type { ControlPlaneApi } from '../api/control-plane-api.js';
 import type { ConfigStore } from '../config/types.js';
 import type { CliAction } from '../state/cli-state.js';
-import type { KnownCliStreamEnvelope } from '@incidentlens/protocol';
 import type {
+  KnownCliStreamEnvelope,
+  StreamEventEnvelope,
   AgentMessageView,
   AgentSessionView,
   ApprovalDetailView,
@@ -55,9 +57,33 @@ import { backoffDelay } from './reconnect-policy.js';
 const HEARTBEAT_TIMEOUT_MS = 20_000;
 
 /**
- * Message page size for authoritative snapshots during gap recovery.
+ * Message / event page size for authoritative snapshots during gap
+ * recovery. The server's event log hard-caps page size at 500, so this
+ * also bounds each `listEvents` request.
  */
 const SNAPSHOT_PAGE_SIZE = 500;
+
+/**
+ * Operation lifecycle events that still represent a pending/non-terminal
+ * operation. A terminal event (`operation.succeeded` / `.failed` /
+ * `.cancelled`) means the operation is finished and must not be projected
+ * as the session's active operation.
+ */
+const ACTIVE_OPERATION_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'operation.queued',
+  'operation.running',
+  'operation.cancel_requested',
+  'operation.uncertain',
+]);
+
+/**
+ * Operation statuses that are terminal.
+ */
+const TERMINAL_OPERATION_STATUSES: ReadonlySet<string> = new Set([
+  'succeeded',
+  'failed',
+  'cancelled',
+]);
 
 /**
  * Projection built from authoritative HTTP data.
@@ -98,18 +124,12 @@ export interface SessionSynchronizerOptions {
 }
 
 /**
- * Reconnect state machine for a session stream.
- */
-interface ReconnectState {
-  attempt: number;
-}
-
-/**
  * Concrete session synchronizer.
  *
  * A synchronizer instance owns one session. `start` begins the loop; the
  * provided `signal` stops it. Reconnects are bounded by
- * `backoffDelay` (250 ms → 10 s). Fatal statuses stop the loop.
+ * `backoffDelay` (250 ms → 10 s), reset on a successful connect. Fatal
+ * statuses stop the loop.
  */
 export class SessionSynchronizer {
   private readonly api: ControlPlaneApi;
@@ -150,10 +170,16 @@ export class SessionSynchronizer {
       return;
     }
 
-    const state: ReconnectState = { attempt: 0 };
+    let attempt = 0;
 
     while (!signal.aborted) {
-      const outcome = await this.runOnce(signal);
+      const outcome = await this.runOnce(signal, {
+        onConnected: () => {
+          // A stable connection resets backoff so a later blip does not
+          // wait out the full 10 s ceiling.
+          attempt = 0;
+        },
+      });
 
       if (outcome.kind === 'fatal') {
         this.host.dispatch({
@@ -168,8 +194,8 @@ export class SessionSynchronizer {
       }
 
       // Recoverable — back off and retry.
-      const delay = backoffDelay(state.attempt);
-      state.attempt += 1;
+      const delay = backoffDelay(attempt);
+      attempt += 1;
 
       await this.sleep(delay, signal);
       if (signal.aborted) {
@@ -180,8 +206,14 @@ export class SessionSynchronizer {
 
   /**
    * Run one connection cycle: connect, pump events, return why it ended.
+   *
+   * `onConnected` is invoked when the transport reports a live connection
+   * (hello / heartbeat), letting the host reset its backoff attempt count.
    */
-  private async runOnce(signal: AbortSignal): Promise<
+  private async runOnce(
+    signal: AbortSignal,
+    hooks: { onConnected: () => void },
+  ): Promise<
     | { kind: 'connected-and-closed' }
     | { kind: 'fatal'; error: string }
     | { kind: 'stopped' }
@@ -189,8 +221,16 @@ export class SessionSynchronizer {
     return new Promise((resolve) => {
       let settled = false;
       let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
+      // In-flight gap recovery, awaited before reconnecting so the cursor
+      // is authoritative before the next connect.
+      let gapRecovery: Promise<void> | null = null;
 
-      const finalize = (outcome: { kind: 'connected-and-closed' } | { kind: 'fatal'; error: string } | { kind: 'stopped' }): void => {
+      const finalize = (
+        outcome:
+          | { kind: 'connected-and-closed' }
+          | { kind: 'fatal'; error: string }
+          | { kind: 'stopped' },
+      ): void => {
         if (settled) {
           return;
         }
@@ -199,6 +239,7 @@ export class SessionSynchronizer {
           clearTimeout(heartbeatTimer);
           heartbeatTimer = undefined;
         }
+        signal.removeEventListener('abort', onAbort);
         resolve(outcome);
       };
 
@@ -222,6 +263,14 @@ export class SessionSynchronizer {
             status: { connected: false, error: 'Heartbeat timeout' },
           });
         }, this.heartbeatTimeoutMs);
+      };
+
+      const finishRecoverable = (error: string): void => {
+        finalize({ kind: 'connected-and-closed' });
+        this.host.dispatch({
+          type: 'set_stream_status',
+          status: { connected: false, error },
+        });
       };
 
       const handlers = {
@@ -249,13 +298,20 @@ export class SessionSynchronizer {
         },
 
         onGap: async (gap: StreamGap): Promise<void> => {
+          if (this.paused) {
+            return;
+          }
           this.paused = true;
           this.host.dispatch({
             type: 'set_stream_status',
             status: { connected: false, error: 'Event history gap — resynchronizing' },
           });
+          const recovery = this.recoverFromGap(gap).finally(() => {
+            this.paused = false;
+          });
+          gapRecovery = recovery;
           try {
-            await this.recoverFromGap(gap);
+            await recovery;
           } catch (error) {
             const message = error instanceof Error ? error.message : 'Gap recovery failed';
             this.host.dispatch({
@@ -263,7 +319,6 @@ export class SessionSynchronizer {
               status: { connected: false, error: message },
             });
           }
-          this.paused = false;
         },
 
         onStatus: (status: StreamStatus): void => {
@@ -273,14 +328,23 @@ export class SessionSynchronizer {
                 type: 'set_stream_status',
                 status: { connected: true, error: undefined },
               });
+              hooks.onConnected();
               resetHeartbeat();
               break;
             case 'recoverable':
-              finalize({ kind: 'connected-and-closed' });
-              this.host.dispatch({
-                type: 'set_stream_status',
-                status: { connected: false, error: status.error },
-              });
+              // A gap closes with 1012 right after the `stream.gap` frame.
+              // Wait for any in-flight gap recovery so the cursor is set to
+              // the authoritative sequence BEFORE the reconnect, otherwise
+              // the loop would re-connect at the old cursor and re-apply
+              // events the snapshot already captured (double merge).
+              if (gapRecovery !== null) {
+                void gapRecovery.catch(() => undefined).then(() => {
+                  gapRecovery = null;
+                  finishRecoverable(status.error);
+                });
+              } else {
+                finishRecoverable(status.error);
+              }
               break;
             case 'fatal':
               finalize({ kind: 'fatal', error: status.error });
@@ -315,14 +379,19 @@ export class SessionSynchronizer {
   /**
    * Recover from a history gap or slow consumer.
    *
-   * Pauses event projection (set by the caller), fetches the authoritative
-   * HTTP snapshot, replaces the projection via `gap_snapshot`, sets the
-   * cursor to the server's latest sequence, and reconnects.
+   * Fetches the authoritative HTTP snapshot, surfaces the session, replaces
+   * the projection via `gap_snapshot`, and sets the cursor to the server's
+   * authoritative latest sequence. The caller then reconnects at that
+   * cursor. The stale projection is never merged into the snapshot.
    */
   private async recoverFromGap(gap: StreamGap): Promise<void> {
     const sessionId = this.cursor.sessionId;
 
     const snapshot = await this.fetchAuthoritativeSnapshot(sessionId);
+
+    // Surface the authoritative session view (the reducer's gap_snapshot
+    // does not carry a session field).
+    this.host.dispatch({ type: 'set_session', session: snapshot.session });
 
     // Replace the projection with the authoritative snapshot. The stale
     // projection is discarded, never merged.
@@ -356,42 +425,42 @@ export class SessionSynchronizer {
   private async fetchAuthoritativeSnapshot(
     sessionId: string,
   ): Promise<SessionSnapshot> {
-    const [session, messages, operation, approvals] = await Promise.all([
+    const [session, messages, approvals, events] = await Promise.all([
       this.api.getSession(sessionId),
       this.fetchAllMessages(sessionId),
-      this.fetchActiveOperation(sessionId),
       this.fetchApprovals(sessionId),
+      this.fetchAllEvents(sessionId),
     ]);
-
-    // The authoritative latest sequence for the session comes from the
-    // session-filtered server event log. `latest_sequence` in the page is
-    // the GLOBAL high-water (unfiltered), so we take the max sequence of
-    // events actually observed for this session instead, falling back to
-    // the committed cursor when the session has no events yet.
-    let lastSequence = this.cursor.sequence;
-    try {
-      const page = await this.api.listEvents({
-        sessionId,
-        limit: 500,
-        afterSequence: this.cursor.sequence,
-      });
-      const observed = page.items
-        .map((e) => e.sequence)
-        .filter((s): s is number => typeof s === 'number' && s > this.cursor.sequence);
-      if (observed.length > 0) {
-        lastSequence = Math.max(...observed);
-      }
-    } catch {
-      // Event log unavailable — fall back to the current cursor.
-    }
 
     return {
       session,
       messages,
-      operation,
+      operation: await this.resolveActiveOperation(events),
       approvals,
-      lastSequence,
+      lastSequence: this.computeAuthoritativeSequence(sessionId, events),
     };
+  }
+
+  /**
+   * Compute the authoritative last sequence for a session from its event
+   * log. We take the max sequence of events strictly after the committed
+   * cursor (never the global `latest_sequence`, which is unfiltered).
+   * Fall back to the committed cursor when the session has no newer events.
+   */
+  private computeAuthoritativeSequence(
+    sessionId: string,
+    events: readonly StreamEventEnvelope[],
+  ): number {
+    let lastSequence = this.cursor.sequence;
+    for (const event of events) {
+      if (
+        typeof event.sequence === 'number' &&
+        event.sequence > lastSequence
+      ) {
+        lastSequence = event.sequence;
+      }
+    }
+    return lastSequence;
   }
 
   /**
@@ -415,44 +484,72 @@ export class SessionSynchronizer {
   }
 
   /**
-   * Fetch the active operation for a session, if any.
-   *
-   * The server publishes `operation.*` lifecycle events whose payload
-   * carries the `operation_id`. We scan the session's event log for the
-   * most recent operation event and resolve it through the authoritative
-   * `getOperation` read surface. When no operation event is found (or the
-   * lookup fails) we treat the session as having no active operation.
+   * Fetch the session's event log, paginating until `has_more` is false so
+   * the authoritative cursor is not underestimated (which would re-apply
+   * events already captured by the snapshot).
    */
-  private async fetchActiveOperation(
-    sessionId: string,
-  ): Promise<OperationView | null> {
-    try {
+  private async fetchAllEvents(sessionId: string): Promise<StreamEventEnvelope[]> {
+    const events: StreamEventEnvelope[] = [];
+    let afterSequence = this.cursor.sequence;
+    for (;;) {
       const page = await this.api.listEvents({
         sessionId,
-        limit: 500,
+        afterSequence,
+        limit: SNAPSHOT_PAGE_SIZE,
       });
-      const operationEvents = page.items
-        .filter((e) => e.event_type.startsWith('operation.'))
-        .sort((a, b) => (b.sequence ?? 0) - (a.sequence ?? 0));
-      const latestOpEvent = operationEvents[0];
-      if (!latestOpEvent) {
-        return null;
+      events.push(...page.items);
+      if (!page.has_more || page.items.length === 0) {
+        break;
       }
-      const operationId = latestOpEvent.payload?.['operation_id'];
-      if (typeof operationId !== 'string' || operationId.length === 0) {
-        return null;
-      }
-      return await this.api.getOperation(operationId);
-    } catch {
-      return null;
+      afterSequence = page.next_after_sequence;
     }
+    return events;
+  }
+
+  /**
+   * Resolve the current active (non-terminal) operation for a session from
+   * its event log.
+   *
+   * Terminal operation events (`operation.succeeded` / `.failed` /
+   * `.cancelled`) mark a finished operation and are excluded; the most
+   * recent non-terminal operation event is resolved through the
+   * authoritative `getOperation` read surface. We also re-check the
+   * operation status so a stale in-flight event does not project a
+   * finished operation as active. When nothing is active we return null.
+   */
+  private async resolveActiveOperation(
+    events: readonly StreamEventEnvelope[],
+  ): Promise<OperationView | null> {
+    const operationEvents = events
+      .filter((e) => ACTIVE_OPERATION_EVENT_TYPES.has(e.event_type))
+      .sort((a, b) => (b.sequence ?? 0) - (a.sequence ?? 0));
+
+    for (const event of operationEvents) {
+      const operationId = event.payload?.['operation_id'];
+      if (typeof operationId !== 'string' || operationId.length === 0) {
+        continue;
+      }
+      try {
+        const operation = await this.api.getOperation(operationId);
+        if (operation && !TERMINAL_OPERATION_STATUSES.has(operation.status)) {
+          return operation;
+        }
+      } catch {
+        // Operation lookup failed — try the next candidate.
+      }
+    }
+    return null;
   }
 
   /**
    * Fetch pending approvals for the session.
    */
   private async fetchApprovals(sessionId: string): Promise<ApprovalDetailView[]> {
-    const page = await this.api.listApprovals({ sessionId, limit: SNAPSHOT_PAGE_SIZE });
+    const page = await this.api.listApprovals({
+      sessionId,
+      status: 'pending',
+      limit: SNAPSHOT_PAGE_SIZE,
+    });
     return page.items;
   }
 
@@ -476,15 +573,21 @@ export class SessionSynchronizer {
   }
 
   /**
-   * Sleep with abort support.
+   * Sleep with abort support. Removes its abort listener once the timer
+   * fires so repeated backoffs on a shared signal do not accumulate
+   * listeners.
    */
   private sleep(ms: number, signal: AbortSignal): Promise<void> {
     return new Promise((resolve) => {
-      const timer = setTimeout(resolve, ms);
-      signal.addEventListener('abort', () => {
+      const onAbort = (): void => {
         clearTimeout(timer);
         resolve();
-      }, { once: true });
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener('abort', onAbort, { once: true });
     });
   }
 }
