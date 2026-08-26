@@ -36,7 +36,7 @@ export const targetServicesQuery = (targetId: string) =>
 export const serviceQuery = (serviceId: string) =>
   queryOptions({
     queryKey: queryKeys.service(serviceId),
-    queryFn: ({ signal }) => readonlyClient.getService(serviceId, signal),
+    queryFn: () => readonlyClient.getService(serviceId),
   });
 
 /** Paginated log records for a service. */

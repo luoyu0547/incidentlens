@@ -21,14 +21,15 @@ import { guardedFetch } from './read-only-guard';
  * `http://localhost:3000`, which MSW's relative `/api/v1/*` handlers match. When
  * no `window` is present the original root-relative default is kept.
  */
-const API_ROOT = '/api/v1';
+const API_ROOT = typeof window === 'undefined' ? '/api/v1' : window.location.origin + '/api/v1';
 
 function fetchWithoutCrossRealmSignal(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   if (typeof input === 'object' && input !== null && 'url' in input) {
     const request = input as Request;
-    return guardedFetch(new Request(request.url, { method: request.method, headers: request.headers }));
+    return guardedFetch(request.url, { method: request.method, headers: request.headers });
   }
-  return guardedFetch(input, init);
+  const { signal: _signal, ...safeInit } = init ?? {};
+  return guardedFetch(input, safeInit);
 }
 
 /**
