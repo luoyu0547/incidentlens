@@ -33,7 +33,40 @@ export type {
   InvestigationListQuery,
 } from './web-readonly-client.js';
 
-// Re-export stream parsing utilities
+export {
+  LogSubscribeCommandSchema,
+  LogUpdateCommandSchema,
+  LogPauseCommandSchema,
+  LogResumeCommandSchema,
+  LogAckCommandSchema,
+  LogStreamCommandSchema,
+  LogStreamEventSchema,
+  parseLogStreamCommand,
+  parseLogStreamEvent,
+  serializeLogSubscribe,
+  serializeLogUpdate,
+  serializeLogPause,
+  serializeLogResume,
+  serializeLogAck,
+  createLogSubscribe,
+  createLogUpdate,
+  createLogPause,
+  createLogResume,
+  createLogAck,
+} from './log-stream.js';
+
+export type {
+  LogSubscribeCommand,
+  LogUpdateCommand,
+  LogPauseCommand,
+  LogResumeCommand,
+  LogAckCommand,
+  LogStreamCommand,
+  LogStreamEvent,
+  KnownLogStreamEvent,
+  LogRecordEvent,
+} from './log-stream.js';
+
 export {
   CliStreamEnvelopeSchema,
   LogStreamEnvelopeSchema,
