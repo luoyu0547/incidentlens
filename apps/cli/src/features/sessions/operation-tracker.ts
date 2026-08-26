@@ -45,11 +45,14 @@ export async function trackOperation<
     maxPolls?: number;
     signal?: AbortSignal;
     onError?: (error: string) => void;
+    /** Called with the redacted OperationView on every successful poll. */
+    onProgress?: (operation: OperationView) => void;
   } = {},
 ): Promise<OperationTrackingProgress> {
   const pollIntervalMs = options.pollIntervalMs ?? 400;
   const maxPolls = options.maxPolls ?? 150;
   const errorCallback = options.onError;
+  const progressCallback = options.onProgress;
 
   let latest: OperationView | undefined;
   let reachedTerminal = false;
@@ -59,6 +62,7 @@ export async function trackOperation<
     try {
       const operation = await getOperation(operationId, options.signal);
       latest = operation;
+      progressCallback?.(operation);
 
       if (
         operation.status === 'succeeded' ||

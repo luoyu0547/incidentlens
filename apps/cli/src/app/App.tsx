@@ -80,7 +80,8 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
   );
 
   // Session controller shared by session commands and natural-language
-  // submits. It implements no-target blocking and create-on-first-message.
+  // submits. It implements no-target blocking, create-on-first-message,
+  // and durable-operation tracking that mirrors into state.operations.
   const sessionController = useMemo(
     () =>
       new SessionController({
@@ -88,6 +89,8 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
         configStore: deps.configStore,
         profileName: 'default',
         dispatch,
+        onOperationProgress: (operation) =>
+          dispatch({ type: 'update_operation', operation }),
       }),
     [deps.api, deps.configStore, dispatch]
   );
@@ -300,7 +303,7 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
       // Clear input
       dispatch({ type: 'set_input', input: { value: '' } });
     },
-    [state.session, deps.api, dispatch, registry, commandContext, intoMessages, sessionController]
+    [dispatch, registry, commandContext, intoMessages, sessionController, deps]
   );
 
   // Handle input change
@@ -408,7 +411,14 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
           <SessionPicker
             sessions={pickerSessions}
             onSelect={(session) => {
-              void sessionController.select(session);
+              void sessionController.select(session).catch((error) => {
+                const message = error instanceof Error ? error.message : 'Failed to select session';
+                dispatch({
+                  type: 'system_message',
+                  content: `Error: ${message}`,
+                  timestamp: deps.now(),
+                });
+              });
               dispatch({
                 type: 'system_message',
                 content: `Selected session ${session.session_id} (${session.title ?? 'untitled'})`,

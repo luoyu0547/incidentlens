@@ -158,8 +158,9 @@ function makeOptions(
   api: ControlPlaneApi,
   configStore: ConfigStore,
   dispatch?: (action: CliAction) => void,
+  onOperationProgress?: (operation: OperationView) => void,
 ): SessionControllerOptions {
-  return { api, configStore, profileName: 'default', dispatch };
+  return { api, configStore, profileName: 'default', dispatch, onOperationProgress };
 }
 
 function makeSessionRuntime(
@@ -378,6 +379,63 @@ describe('SessionController', () => {
       controller.sync(sampleTarget, undefined);
 
       await expect(controller.rename('abc')).rejects.toThrow('No active session');
+    });
+  });
+
+  describe('operation tracking', () => {
+    it('tracks the message operation and dispatches progress into state', async () => {
+      const { api, sendMessage, getOperation } = makeApi();
+      const session = makeSession();
+      sendMessage.mockResolvedValue(messageAccepted);
+      const succeeded = makeOperation({
+        status: 'succeeded',
+        progress_summary: 'Investigation complete',
+      });
+      getOperation.mockResolvedValue(succeeded);
+      const { configStore, load } = makeConfigStore();
+      load.mockResolvedValue(existingProfile);
+      const onOperationProgress = vi.fn();
+      const controller = new SessionController(
+        makeOptions(api, configStore, undefined, onOperationProgress),
+      );
+      controller.sync(sampleTarget, session);
+
+      await controller.sendNaturalLanguage('hello');
+
+      // The tracker was started with the accepted operation id and must
+      // have polled getOperation at least once.
+      expect(sendMessage).toHaveBeenCalledWith(
+        'session-1',
+        { content: 'hello' },
+        expect.any(Object),
+      );
+      expect(getOperation).toHaveBeenCalledWith('op-1', undefined);
+      await flush();
+      expect(onOperationProgress).toHaveBeenCalledWith(succeeded);
+    });
+
+    it('tracks the resume operation and reports progress', async () => {
+      const { api, resumeSession, getSession, getOperation } = makeApi();
+      resumeSession.mockResolvedValue(operationAccepted);
+      getSession.mockResolvedValue(makeSession());
+      const recovered = makeOperation({
+        status: 'succeeded',
+        progress_summary: 'Recovered',
+      });
+      getOperation.mockResolvedValue(recovered);
+      const { configStore, load } = makeConfigStore();
+      load.mockResolvedValue(existingProfile);
+      const onOperationProgress = vi.fn();
+      const controller = new SessionController(
+        makeOptions(api, configStore, undefined, onOperationProgress),
+      );
+      controller.sync(sampleTarget, makeSession());
+
+      await controller.resume('session-1');
+
+      expect(getOperation).toHaveBeenCalledWith('op-1', undefined);
+      await flush();
+      expect(onOperationProgress).toHaveBeenCalledWith(recovered);
     });
   });
 

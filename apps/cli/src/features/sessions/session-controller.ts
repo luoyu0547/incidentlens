@@ -37,6 +37,7 @@ import type {
   OperationView,
   TargetView,
 } from '@incidentlens/protocol';
+import { trackOperation } from './operation-tracker.js';
 
 /**
  * Session controller interface.
@@ -62,6 +63,13 @@ export interface SessionControllerOptions {
   readonly configStore: ConfigStore;
   readonly profileName: string;
   readonly dispatch?: (action: CliAction) => void;
+  /**
+   * Called with each redacted `OperationView` while polling a durable
+   * operation started by this controller (send / resume). The host wires
+   * this to dispatch `update_operation` into the reducer so the state's
+   * `operations` map stays current for the WS sync layer and UI.
+   */
+  readonly onOperationProgress?: (operation: OperationView) => void;
 }
 
 /**
@@ -98,6 +106,7 @@ export class SessionController implements SessionController {
   private readonly configStore: ConfigStore;
   private readonly profileName: string;
   private readonly dispatch?: (action: CliAction) => void;
+  private readonly onOperationProgress?: (operation: OperationView) => void;
 
   /** Current active projection (target + session). */
   private active: ActiveProjection = { target: undefined, session: undefined };
@@ -110,6 +119,7 @@ export class SessionController implements SessionController {
     this.configStore = options.configStore;
     this.profileName = options.profileName;
     this.dispatch = options.dispatch;
+    this.onOperationProgress = options.onOperationProgress;
   }
 
   /**
@@ -159,6 +169,21 @@ export class SessionController implements SessionController {
         { idempotencyKey },
       );
       this.pendingSend = undefined;
+      // Fire-and-forget operation tracking: the onProgress callback
+      // dispatches update_operation to the reducer so the state's
+      // operations map stays current.
+      void trackOperation(
+        (opId, signal) => this.api.getOperation(opId, signal),
+        accepted.operation_id,
+        () => {
+          /* terminal result is consumed by the WS sync layer */
+        },
+        {
+          pollIntervalMs: 400,
+          maxPolls: 150,
+          onProgress: this.onOperationProgress,
+        },
+      );
       return accepted;
     } catch (error) {
       // Keep the pending key so the caller can retry with the same key.
@@ -259,6 +284,19 @@ export class SessionController implements SessionController {
     this.dispatch?.({ type: 'set_session', session });
     this.active = { target: this.active.target, session };
     await this.persistLastSession(session);
+    // Fire-and-forget operation tracking for the resume operation.
+    void trackOperation(
+      (opId, signal) => this.api.getOperation(opId, signal),
+      accepted.operation_id,
+      () => {
+        /* terminal result consumed by WS sync layer */
+      },
+      {
+        pollIntervalMs: 400,
+        maxPolls: 150,
+        onProgress: this.onOperationProgress,
+      },
+    );
     return accepted;
   }
 

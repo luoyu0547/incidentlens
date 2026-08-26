@@ -121,6 +121,7 @@ export type CliAction =
   | { type: 'set_target'; target: TargetView }
   | { type: 'clear_target' }
   | { type: 'set_session'; session: AgentSessionView }
+  | { type: 'update_operation'; operation: OperationView }
   | { type: 'stream_event'; event: any }
   | { type: 'gap_snapshot'; snapshot: { messages: ConversationItem[]; operations: Record<string, OperationView>; approvals: Record<string, ApprovalDetailView>; sequence: number } }
   | { type: 'set_stream_status'; status: Partial<StreamStatus> }

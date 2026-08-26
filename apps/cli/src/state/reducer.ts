@@ -58,6 +58,12 @@ export function reducer(state: CliState, action: CliAction): CliState {
     case 'set_session':
       return { ...state, session: action.session };
 
+    case 'update_operation':
+      return {
+        ...state,
+        operations: { ...state.operations, [action.operation.operation_id]: action.operation },
+      };
+
     case 'stream_event':
       return handleStreamEvent(state, action.event);
 
