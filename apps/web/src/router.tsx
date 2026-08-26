@@ -26,6 +26,7 @@ import { IssueDetailPage } from './routes/IssueDetailPage';
 import { InvestigationPage } from './routes/InvestigationPage';
 import { RoutePending } from './app/RoutePending';
 import { RouteError } from './app/RouteError';
+import { normalizeLogRouteSearch } from './logs/log-search';
 
 /** Stable Chinese route titles keyed by route path. */
 const ROUTE_TITLES: Record<string, string> = {
@@ -53,8 +54,7 @@ const overviewRoute = createRoute({
 const serviceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/services/$serviceId',
-  component: ServicePage,
-  staticData: { title: ROUTE_TITLES['/services/$serviceId'] },
+  validateSearch: (search: Record<string, unknown>) => normalizeLogRouteSearch(search),
 });
 
 const issuesRoute = createRoute({

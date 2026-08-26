@@ -36,5 +36,12 @@ export function WorkspaceEventBridge() {
     });
     return () => connection.close();
   }, [queryClient]);
-  return <span role="status" data-workspace-status={status}>{status === 'reconnecting' ? '工作区正在重新同步' : status === 'live' ? '工作区已连接' : status === 'authentication-error' ? '工作区认证失败' : status === 'closed' ? '工作区连接已关闭' : '工作区连接中'}</span>;
+  const statusMessage = {
+    connecting: '工作区连接中',
+    live: '工作区已连接',
+    reconnecting: '工作区正在重新同步',
+    'authentication-error': '工作区认证失败',
+    closed: '工作区连接已关闭',
+  } satisfies Record<WorkspaceEventStatus, string>;
+  return <span role="status" data-workspace-status={status}>{statusMessage[status]}</span>;
 }

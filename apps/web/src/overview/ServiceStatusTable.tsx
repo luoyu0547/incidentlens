@@ -10,6 +10,9 @@
 import { Link } from '@tanstack/react-router';
 import type { OverviewServiceView, OverviewTargetView } from '@incidentlens/protocol';
 import { StatusBadge } from '../shared/StatusBadge';
+import { normalizeLogRouteSearch } from '../logs/log-search';
+
+const DEFAULT_LOG_SEARCH = normalizeLogRouteSearch({});
 import { Timestamp } from '../shared/Timestamp';
 
 export interface ServiceRow {
@@ -39,7 +42,7 @@ export function ServiceStatusTable({ rows }: { rows: readonly ServiceRow[] }) {
         {rows.map(({ target, service }) => (
           <tr key={`${target.target_id}:${service.service_id}`}>
             <td>
-              <Link to="/services/$serviceId" params={{ serviceId: service.service_id }} search={{}}>
+              <Link to="/services/$serviceId" params={{ serviceId: service.service_id }} search={DEFAULT_LOG_SEARCH}>
                 {service.service_id}
               </Link>
             </td>

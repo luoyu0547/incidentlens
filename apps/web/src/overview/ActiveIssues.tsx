@@ -10,6 +10,9 @@
 import { Link } from '@tanstack/react-router';
 import type { OverviewServiceView, OverviewTargetView } from '@incidentlens/protocol';
 import { StatusBadge } from '../shared/StatusBadge';
+import { normalizeLogRouteSearch } from '../logs/log-search';
+
+const DEFAULT_LOG_SEARCH = normalizeLogRouteSearch({});
 
 export interface OpenIssueServiceRow {
   readonly target: OverviewTargetView;
@@ -33,7 +36,7 @@ export function ActiveIssues({
       <ul>
         {services.map(({ target, service }) => (
           <li key={`${target.target_id}:${service.service_id}`}>
-            <Link to="/services/$serviceId" params={{ serviceId: service.service_id }} search={{}}>
+            <Link to="/services/$serviceId" params={{ serviceId: service.service_id }} search={DEFAULT_LOG_SEARCH}>
               {service.service_id}
             </Link>
             <StatusBadge status={service.status} />

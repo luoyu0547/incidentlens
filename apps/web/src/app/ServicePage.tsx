@@ -9,9 +9,9 @@ import { ServiceHeader } from '../services/ServiceHeader';
 import { ServiceIssues } from '../services/ServiceIssues';
 
 export function ServicePage() {
-  const { serviceId } = useParams({ strict: false });
-  const routeSearch = useSearch({ strict: false });
-  const navigate = useNavigate();
+  const { serviceId } = useParams({ from: '/services/$serviceId' });
+  const routeSearch = useSearch({ from: '/services/$serviceId' });
+  const navigate = useNavigate({ from: '/services/$serviceId' });
   const { data: service, error } = useQuery(serviceQuery(serviceId ?? ''));
 
   if (error) return <p role="alert">加载服务时出现问题。</p>;
@@ -28,7 +28,7 @@ export function ServicePage() {
         serviceId={service.service_id}
         targetId={service.target_ids[0] ?? ''}
         initialSearch={normalizeLogRouteSearch(routeSearch)}
-        onSearchChange={(search) => void navigate({ search: () => search as never })}
+        onSearchChange={(search) => void navigate({ search: () => search })}
       />
     </div>
   );
