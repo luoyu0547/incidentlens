@@ -1,4 +1,4 @@
-import { readFile, writeFile, rename, chmod, mkdir } from 'node:fs/promises';
+import { open, readFile, rename, chmod, mkdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { ProfileConfigSchema, type ProfileConfig, type ConfigStore } from './types.js';
@@ -20,13 +20,11 @@ export class FileConfigStore implements ConfigStore {
       const filePath = this.getFilePath(profileName);
       const content = await readFile(filePath, 'utf8');
       const raw = JSON.parse(content) as unknown;
-
-      // Validate with Zod schema
       const result = ProfileConfigSchema.safeParse(raw);
-      if (!result.success) {
+
+      if (!result.success || result.data.profileName !== profileName) {
         return null;
       }
-
       return result.data;
     } catch {
       return null;
@@ -34,70 +32,56 @@ export class FileConfigStore implements ConfigStore {
   }
 
   async save(profile: ProfileConfig): Promise<void> {
-    // Ensure config directory exists
-    await mkdir(this.configDir, { recursive: true });
+    await mkdir(this.configDir, { recursive: true, mode: 0o700 });
+    // mkdir does not tighten an existing directory, so enforce the mode too.
+    await chmod(this.configDir, 0o700);
 
-    // Normalize API URL
     const normalizedProfile: ProfileConfig = {
       ...profile,
       apiUrl: this.normalizeApiUrl(profile.apiUrl),
     };
-
-    // Validate before saving
     const validated = ProfileConfigSchema.parse(normalizedProfile);
-
-    const filePath = this.getFilePath(profile.profileName);
+    const filePath = this.getFilePath(validated.profileName);
     const tempPath = `${filePath}.tmp.${randomBytes(8).toString('hex')}`;
 
     try {
-      // Write to temp file first
-      await writeFile(tempPath, JSON.stringify(validated, null, 2), 'utf8');
-
-      // Set restrictive permissions (owner read/write only)
-      await chmod(tempPath, 0o600);
-
-      // Atomic rename
-      await rename(tempPath, filePath);
-    } catch (error) {
-      // Clean up temp file on error
+      const handle = await open(tempPath, 'wx', 0o600);
       try {
-        const { unlink } = await import('node:fs/promises');
-        await unlink(tempPath);
-      } catch {
-        // Ignore cleanup errors
+        await handle.writeFile(JSON.stringify(validated, null, 2), 'utf8');
+        await handle.chmod(0o600);
+        await handle.sync();
+      } finally {
+        await handle.close();
       }
+      await rename(tempPath, filePath);
+
+      // Sync the containing directory so the replacement survives a power loss.
+      const directory = await open(this.configDir, 'r');
+      try {
+        await directory.sync();
+      } finally {
+        await directory.close();
+      }
+    } catch (error) {
+      await unlink(tempPath).catch(() => undefined);
       throw error;
     }
   }
 
   private getFilePath(profileName: string): string {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(profileName)) {
+      throw new Error('Invalid profile name');
+    }
     return join(this.configDir, `${profileName}.json`);
   }
 
   private normalizeApiUrl(url: string): string {
-    try {
-      const parsed = new URL(url);
-
-      // Remove credentials
-      parsed.username = '';
-      parsed.password = '';
-
-      // Remove search params
-      parsed.search = '';
-
-      // Remove hash
-      parsed.hash = '';
-
-      // Remove trailing slash
-      let normalized = parsed.toString();
-      if (normalized.endsWith('/')) {
-        normalized = normalized.slice(0, -1);
-      }
-
-      return normalized;
-    } catch {
-      // If URL parsing fails, return as-is
-      return url;
-    }
+    const parsed = new URL(url);
+    parsed.username = '';
+    parsed.password = '';
+    parsed.search = '';
+    parsed.hash = '';
+    parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+    return parsed.toString().replace(/\/$/, '');
   }
 }
