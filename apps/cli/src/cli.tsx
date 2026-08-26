@@ -16,7 +16,7 @@ import { ControlPlaneApi } from './api/control-plane-api.js';
 const nodeVersion = process.version;
 const [major] = nodeVersion.slice(1).split('.').map(Number);
 
-if (major < 22) {
+if (major < 22 || (major === 22 && Number(nodeVersion.split('.')[1]) < 19)) {
   console.error(`IncidentLens requires Node.js >= 22.19.0. Current version: ${nodeVersion}`);
   process.exit(1);
 }
