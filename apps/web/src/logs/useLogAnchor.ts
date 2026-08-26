@@ -87,8 +87,9 @@ export function useLogAnchor(options: UseLogAnchorOptions) {
       setExpired(false);
       const context = await fetchContext(locator);
       const merged = mergeRecords(records, context);
-      onRecords?.(merged);
-      scrollTo?.(anchorId);
+      if (merged.some((record) => record.log_id === anchorId)) {
+        scrollTo?.(anchorId);
+      }
     } catch (error) {
       if (isExpired(error)) {
         setExpired(true);

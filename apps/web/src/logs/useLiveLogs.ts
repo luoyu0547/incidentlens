@@ -90,7 +90,6 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
         ws.onopen = () => {
           if (!isCurrentSocket()) return;
           send(JSON.stringify(serializeLogSubscribe({ service_id: serviceId, target_id: search.target, severity: search.levels.length ? search.levels.join(',') : undefined, cursor: cursorRef.current })));
-          setStatus(pausedRef.current ? 'paused' : 'live');
         };
         ws.onmessage = (message) => {
           if (!isCurrentSocket()) return;

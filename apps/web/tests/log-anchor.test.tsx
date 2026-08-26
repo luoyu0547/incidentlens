@@ -30,6 +30,12 @@ describe('log locator', () => {
     expect(scrollTo).toHaveBeenCalledWith('log-2');
   });
 
+  it('does not scroll when context does not include the target', async () => {
+    const scrollTo = vi.fn();
+    const { result } = renderHook(() => useLogAnchor({ locator, currentService: locator.service, records: [record('1')], fetchContext: async () => [record('3')], scrollTo }));
+    await act(async () => { await result.current.locate(); });
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
   it('resets the locating guard after an early return so a new anchor can locate', async () => {
     const scrollTo = vi.fn();
     const first = { ...locator, log_id: 'missing-1' };

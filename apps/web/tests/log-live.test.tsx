@@ -27,6 +27,10 @@ describe('useLiveLogs', () => {
     render(<Probe />);
     expect(await screen.findByTestId('records')).toHaveTextContent('log-1');
     FakeSocket.latest!.open();
+    await act(async () => {
+      FakeSocket.latest!.open();
+      FakeSocket.latest!.emit({ schema_version: 1, event_type: 'log.subscribed', occurred_at: '2026-08-26T00:00:00Z', cursor: 'cursor-1' });
+    });
     await screen.findByText('live');
     expect(JSON.parse(FakeSocket.latest!.sent[0])).toMatchObject({ action: 'subscribe', service_id: 'svc-web', cursor: 'cursor-1' });
     await act(async () => FakeSocket.latest!.emit({ schema_version: 1, event_type: 'log.record', occurred_at: '2026-08-26T00:00:01Z', cursor: 'cursor-2', payload: { log_id: 'log-2', cursor: 'cursor-2', message: 'new', occurred_at: '2026-08-26T00:00:01Z', severity: 'info' } }));
@@ -35,6 +39,10 @@ describe('useLiveLogs', () => {
   });
   it('ignores unknown events and sends pause without changing server state', async () => {
     render(<Probe />);
+    await act(async () => {
+      FakeSocket.latest!.open();
+      FakeSocket.latest!.emit({ schema_version: 1, event_type: 'log.subscribed', occurred_at: '2026-08-26T00:00:00Z', cursor: 'cursor-1' });
+    });
     await screen.findByText('live');
     await act(async () => FakeSocket.latest!.emit({ schema_version: 1, event_type: 'future.event', occurred_at: '2026-08-26T00:00:01Z' }));
     expect(screen.getByTestId('records')).toHaveTextContent('log-1');
