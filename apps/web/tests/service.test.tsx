@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { screen, within } from '@testing-library/react';
 import type { ServiceDetailView } from '@incidentlens/protocol';
@@ -84,13 +84,27 @@ describe('Service page', () => {
     expect(screen.queryByRole('button', { name: /approve|reject|restart|rollback|edit|shell/i })).toBeNull();
   });
 
-  it('renders the real log viewer controls instead of a placeholder', async () => {
+  it('attempts the log WebSocket connection from the service route', async () => {
+    const socketUrls: string[] = [];
+    class ObservedWebSocket {
+      static readonly OPEN = 1;
+      readonly readyState = ObservedWebSocket.OPEN;
+      onopen: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      constructor(url: string) {
+        socketUrls.push(url);
+      }
+      send() {}
+      close() { this.onclose?.(); }
+    }
+    vi.stubGlobal('WebSocket', ObservedWebSocket);
     useService(SERVICE);
-    renderApp({ initialEntries: ['/services/svc-web'] });
+    renderApp({ initialEntries: ['/services/svc-web?mode=live'] });
 
-    const viewer = await screen.findByRole('region', { name: '日志查看器' });
-    expect(within(viewer).getByRole('textbox', { name: '日志搜索' })).toBeVisible();
-    expect(within(viewer).getByRole('checkbox', { name: '跟随最新' })).toBeVisible();
-    expect(screen.queryByText('日志查看器将在此处加载')).toBeNull();
+    await screen.findByRole('region', { name: '日志查看器' });
+    expect(socketUrls.some((url) => url.endsWith('/ws/v1/logs'))).toBe(true);
+    vi.unstubAllGlobals();
   });
 });
