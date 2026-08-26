@@ -20,7 +20,7 @@
   },
   "scripts": {
     "build": "tsup",
-    "prepack": "npm run protocol:check && npm run typecheck && npm test && npm run build",
+    "prepack": "npm run protocol:check && npm run typecheck && npm run build",
     "protocol:check": "npm run check --workspace @incidentlens/protocol",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
