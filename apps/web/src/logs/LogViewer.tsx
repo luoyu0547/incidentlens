@@ -1,4 +1,6 @@
-import { useMemo } from 'react';
+import type { LogRecordView } from '@incidentlens/protocol';
+import { useEffect, useMemo, useState } from 'react';
+import { readonlyClient } from '../api/client';
 import { EmptyState } from '../shared/EmptyState';
 import { ErrorNotice } from '../shared/ErrorNotice';
 import { EvidenceMarker } from './EvidenceMarker';
@@ -14,13 +16,17 @@ export interface LogViewerProps { readonly serviceId: string; readonly targetId:
 
 export function LogViewer({ serviceId, targetId, initialSearch, onSearchChange }: LogViewerProps) {
   const search = initialSearch;
-  const update = (patch: Partial<LogRouteSearch>) => onSearchChange?.({ ...search, ...patch });
+  useEffect(() => { setAnchoredRecords([]); }, [search.anchor]);
+ = (patch: Partial<LogRouteSearch>) => onSearchChange?.({ ...search, ...patch });
   const invalidRange = logSearchError(search);
   const history = useLogHistory(serviceId, search);
   const live = useLiveLogs(serviceId, { ...search, target: search.target ?? targetId }, { enabled: search.mode === 'live' });
-  const records = search.mode === 'live' ? live.records : (history.data?.pages.flatMap((page) => page.items) ?? []);
+  const recordsBase = search.mode === 'live' ? live.records : (history.data?.pages.flatMap((page) => page.items) ?? []);
+  const records = [...recordsBase, ...anchoredRecords.filter((r) => !recordsBase.some((x) => x.log_id === r.log_id))];
   const anchor = useMemo(() => search.anchor ? { service: serviceId, log_id: search.anchor, context: search.context } : null, [search.anchor, search.context, serviceId]);
-  const locator = useLogAnchor({ locator: anchor, currentService: serviceId, records });
+  const scrollTo = (logId: string) => document.querySelector(`[data-log-id="${CSS.escape(logId)}"]`)?.scrollIntoView({ block: 'center' });
+  const fetchContext = async (locator: { context?: number | null }) => (await readonlyClient.getServiceLogs(serviceId, { limit: locator.context ?? search.context, anchor: search.anchor } as never)).items;
+  const locator = useLogAnchor({ locator: anchor, currentService: serviceId, records, fetchContext, onRecords: setAnchoredRecords, scrollTo });
   const error = search.mode === 'live' ? live.error : history.error;
   const status = search.mode === 'live' ? live.status : undefined;
   return <section className="log-viewer" aria-label="日志查看器">
@@ -32,8 +38,7 @@ export function LogViewer({ serviceId, targetId, initialSearch, onSearchChange }
     {invalidRange ? <ErrorNotice title="筛选条件无效" message={invalidRange} /> : null}
     {error ? <ErrorNotice message="日志加载失败，筛选条件已保留。" /> : null}
     {!invalidRange && !error && !history.isPending && records.length === 0 ? <EmptyState title="暂无日志" description="当前筛选条件没有匹配的日志记录。" /> : null}
-    {records.length > 0 ? <VirtualLogViewport records={records} paused={search.mode === 'live' && status === 'paused'} unreadCount={live.unreadCount} onResume={search.mode === 'live' ? () => live.resume() : undefined} onPrepend={search.mode === 'history' && history.hasNextPage ? () => void history.fetchNextPage() : undefined} /> : null}
-    {locator.anchorId && <p role="status">{locator.present ? `已定位日志 ${locator.anchorId}` : '正在定位证据日志…'}</p>}
-    {records.map((record) => record.log_id === search.anchor ? <EvidenceMarker key={`evidence-${record.log_id}`} record={record} active onLocate={() => locator.locate()} /> : null)}
+    {records.length > 0 ? <VirtualLogViewport records={records} follow={search.follow} onLocate={scrollTo} paused={search.mode === 'live' && status === 'paused'} unreadCount={live.unreadCount} onResume={search.mode === 'live' ? () => live.resume() : undefined} onPrepend={search.mode === 'history' && history.hasNextPage ? () => void history.fetchNextPage() : undefined} /> : null}
+    {locator.anchorId && locator.present && <p role="status">已定位日志 {locator.anchorId}</p>}
   </section>;
 }

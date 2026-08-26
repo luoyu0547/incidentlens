@@ -31,7 +31,7 @@ const values = (value: unknown): unknown[] => Array.isArray(value) ? value : typ
 
 export function normalizeLogRouteSearch(input: unknown): LogRouteSearch {
   const source = typeof input === 'object' && input !== null ? input as Record<string, unknown> : {};
-  const levels = [...new Set(values(source.levels).filter((x): x is LogSeverity => typeof x === 'string' && severitySet.has(x)))];
+  const levels = [...new Set(values(source.levels ?? source.severity).filter((x): x is LogSeverity => typeof x === 'string' && severitySet.has(x)))];
   const contextValue = typeof source.context === 'number' ? source.context : Number(source.context);
   const context = Number.isFinite(contextValue) ? Math.min(100, Math.max(1, Math.trunc(contextValue))) : 20;
   const mode = source.mode === 'live' ? 'live' : 'history';
@@ -39,9 +39,9 @@ export function normalizeLogRouteSearch(input: unknown): LogRouteSearch {
   const to = iso(source.to);
   return {
     target: optionalText(source.target), instance: optionalText(source.instance), levels,
-    from, to, q: optionalText(source.q), mode,
+    from, to, q: optionalText(source.q ?? source.query), mode,
     anchor: optionalText(source.anchor), evidence: optionalText(source.evidence), issue: optionalText(source.issue),
-    context, follow: source.follow === undefined ? true : source.follow === true || source.follow === 'true',
+    context, follow: source.follow === undefined ? true : source.follow === true || source.follow === 'true' || source.follow === '1',
   };
 }
 

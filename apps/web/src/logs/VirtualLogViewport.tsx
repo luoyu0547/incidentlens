@@ -9,10 +9,12 @@ export interface VirtualLogViewportProps {
   readonly unreadCount?: number;
   readonly onResume?: () => void;
   readonly onPrepend?: () => void;
+  readonly follow?: boolean;
+  readonly onLocate?: (logId: string) => void;
   readonly className?: string;
 }
 
-export function VirtualLogViewport({ records, paused = false, unreadCount = 0, onResume, onPrepend, className }: VirtualLogViewportProps) {
+export function VirtualLogViewport({ records, paused = false, unreadCount = 0, onResume, onPrepend, follow = true, onLocate, className }: VirtualLogViewportProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const previousFirst = useRef<string | undefined>(records[0]?.log_id);
   const previousCount = useRef(records.length);
@@ -36,8 +38,8 @@ export function VirtualLogViewport({ records, paused = false, unreadCount = 0, o
   }, [records, virtualizer]);
 
   useEffect(() => {
-    if (following && !paused && records.length > 0) virtualizer.scrollToIndex(records.length - 1, { align: 'end' });
-  }, [following, paused, records.length, virtualizer]);
+    if (follow && following && !paused && records.length > 0) virtualizer.scrollToIndex(records.length - 1, { align: 'end' });
+  }, [follow, following, paused, records.length, virtualizer]);
 
   const locateLatest = () => { setFollowing(true); if (records.length) virtualizer.scrollToIndex(records.length - 1, { align: 'end' }); onResume?.(); };
   return (
@@ -52,7 +54,7 @@ export function VirtualLogViewport({ records, paused = false, unreadCount = 0, o
         <ol aria-label="日志记录" style={{ height: virtualizer.getTotalSize(), position: 'relative', margin: 0, padding: 0 }}>
           {virtualizer.getVirtualItems().map((item) => {
             const record = records[item.index];
-            return <LogRow key={record.log_id} record={record} measureRef={virtualizer.measureElement} style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }} />;
+            return <LogRow key={record.log_id} record={record} measureRef={virtualizer.measureElement} onLocate={onLocate} style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }} />;
           })}
         </ol>
       </div>

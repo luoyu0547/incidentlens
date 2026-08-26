@@ -18,7 +18,8 @@ export interface UseLiveLogsResult {
 export interface LiveLogsOptions { readonly webSocketFactory?: (url: string) => WebSocket; readonly maxRetries?: number; readonly backoffMs?: number; readonly enabled?: boolean; }
 const MAX_RETRIES = 5;
 const MAX_RECORDS = 5000;
-const merge = (old: LogRecordView[], incoming: LogRecordView[]) => [...old, ...incoming.filter(x => !old.some(y => y.log_id === x.log_id))].slice(-MAX_RECORDS);
+const cap = (items: LogRecordView[]) => items.slice(-MAX_RECORDS);
+const merge = (old: LogRecordView[], incoming: LogRecordView[]) => cap([...old, ...incoming.filter(x => !old.some(y => y.log_id === x.log_id))]);
 
 export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: LiveLogsOptions = {}): UseLiveLogsResult {
   const [records, setRecords] = useState<LogRecordView[]>([]);
@@ -52,7 +53,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
       if (disposed || runId !== generation.current) return null;
       setStatus(authoritative ? 'gap' : 'backfilling');
       const fresh = await readonlyClient.getServiceLogs(serviceId, query(authoritative ? undefined : cursorRef.current));
-      if (authoritative) setRecords(fresh.items);
+      if (authoritative) setRecords(cap(fresh.items));
       else setRecords(prev => merge(prev, fresh.items));
       let page = fresh;
       while (page.has_more && page.next_cursor) {
@@ -70,7 +71,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
         if (initial) {
           const page = await readonlyClient.getServiceLogs(serviceId, initialQuery);
           if (disposed) return;
-          setRecords(page.items); const c = page.items.at(-1)?.cursor ?? page.snapshot_cursor;
+          setRecords(cap(page.items)); const c = page.items.at(-1)?.cursor ?? page.snapshot_cursor;
           cursorRef.current = c; setLastCursor(c);
         } else if (!skipBackfill) await backfill();
         if (disposed) return;
