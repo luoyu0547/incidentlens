@@ -1,5 +1,6 @@
-// Re-export generated types, SDK functions, and client
-export * from './generated/index.js';
+// Re-export generated types only (no value exports — SDK endpoint functions
+// must not be reachable from the web workspace through the root package entry)
+export type * from './generated/types.gen.js';
 
 // Re-export the read-only web facade (all apps/web HTTP must go through it)
 export {

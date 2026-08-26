@@ -32,6 +32,25 @@ describe('read-only boundary', () => {
     expect((readonlyClient as unknown as Record<string, unknown>)['createTarget']).toBeUndefined();
   });
 
+  it('never exports raw SDK endpoint functions from the @incidentlens/protocol root', async () => {
+    const pkg = await import('@incidentlens/protocol');
+    for (const forbidden of [
+      'createTarget',
+      'deleteTarget',
+      'patchTarget',
+      'testTarget',
+      'createAgentSession',
+      'sendAgentMessage',
+      'approveApproval',
+      'rejectApproval',
+      'rollbackChangeset',
+      'logout',
+      'createSession',
+    ]) {
+      expect(pkg).not.toHaveProperty(forbidden);
+    }
+  });
+
   it('rejects mutation methods with ReadOnlyViolationError before touching the network', async () => {
     const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);

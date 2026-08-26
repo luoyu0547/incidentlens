@@ -165,6 +165,9 @@ function toReadonlyApiError(value: unknown, status?: number): ReadonlyApiError {
   if (value instanceof DOMException && value.name === 'AbortError') {
     throw value;
   }
+  if (value instanceof Error && value.name === 'AbortError') {
+    throw value;
+  }
   if (isRecord(value)) {
     const envelope = isRecord(value.error) ? value.error : value;
     const message = typeof envelope.message === 'string' ? envelope.message : defaultMessage(status);
@@ -200,12 +203,14 @@ function unwrap<T>(result: SdkResult<T>): T {
  * request URLs same-origin relative (`/api/v1/...`) rather than absolute.
  */
 function toSdkBaseUrl(baseUrl: string): string {
-  if (baseUrl === DEFAULT_BASE_URL || baseUrl === '') {
+  // Strip trailing slash so prefix checks and slicing work cleanly
+  const normalized = baseUrl.replace(/\/+$/, '');
+  if (normalized === DEFAULT_BASE_URL || normalized === '') {
     return '';
   }
-  return baseUrl.endsWith(DEFAULT_BASE_URL)
-    ? baseUrl.slice(0, -DEFAULT_BASE_URL.length)
-    : baseUrl;
+  return normalized.endsWith(DEFAULT_BASE_URL)
+    ? normalized.slice(0, -DEFAULT_BASE_URL.length)
+    : normalized;
 }
 
 /**
