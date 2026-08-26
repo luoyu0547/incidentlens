@@ -84,11 +84,13 @@ describe('Service page', () => {
     expect(screen.queryByRole('button', { name: /approve|reject|restart|rollback|edit|shell/i })).toBeNull();
   });
 
-  it('renders a stable LogViewer placeholder rather than synthetic logs', async () => {
+  it('renders the real log viewer controls instead of a placeholder', async () => {
     useService(SERVICE);
     renderApp({ initialEntries: ['/services/svc-web'] });
 
-    expect(await screen.findByRole('region', { name: '日志查看器' })).toHaveTextContent('日志查看器将在此处加载');
-    expect(document.body.textContent).not.toContain('connection reset by peer');
+    const viewer = await screen.findByRole('region', { name: '日志查看器' });
+    expect(within(viewer).getByRole('textbox', { name: '日志搜索' })).toBeVisible();
+    expect(within(viewer).getByRole('checkbox', { name: '跟随最新' })).toBeVisible();
+    expect(screen.queryByText('日志查看器将在此处加载')).toBeNull();
   });
 });
