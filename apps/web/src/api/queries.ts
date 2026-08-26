@@ -16,7 +16,7 @@ import type {
 /** Workspace overview — the top-level dashboard snapshot. */
 export const overviewQuery = queryOptions({
   queryKey: queryKeys.overview,
-  queryFn: ({ signal }) => readonlyClient.getOverview(signal),
+  queryFn: () => readonlyClient.getOverview(),
 });
 
 /** All registered targets. */
