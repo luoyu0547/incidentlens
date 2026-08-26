@@ -10,10 +10,11 @@
 import { Link } from '@tanstack/react-router';
 import type { OverviewServiceView, OverviewTargetView } from '@incidentlens/protocol';
 import { StatusBadge } from '../shared/StatusBadge';
+import { Timestamp } from '../shared/Timestamp';
 import { normalizeLogRouteSearch } from '../logs/log-search';
 
 const DEFAULT_LOG_SEARCH = normalizeLogRouteSearch({});
-import { Timestamp } from '../shared/Timestamp';
+
 
 export interface ServiceRow {
   readonly target: OverviewTargetView;

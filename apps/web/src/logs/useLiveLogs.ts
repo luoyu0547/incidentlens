@@ -129,7 +129,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
     };
     void connect(true);
     return () => { disposed = true; socketGeneration += 1; if (retryTimer) clearTimeout(retryTimer); closeSocket(); };
-  }, [serviceId, search, query, append, closeSocket, options.webSocketFactory, options.enabled, maxRetries, backoffMs]);
+  }, [serviceId, JSON.stringify(search), append, closeSocket, options.webSocketFactory, options.enabled, maxRetries, backoffMs]);
 
   const pause = useCallback(() => { pausedRef.current = true; const command = serializeLogPause(); assertReadOnlyLogAction(command.action); socketRef.current?.send(JSON.stringify(command)); setStatus('paused'); }, []);
   const resume = useCallback(() => { pausedRef.current = false; setUnreadCount(0); const command = serializeLogResume(cursorRef.current); assertReadOnlyLogAction(command.action); socketRef.current?.send(JSON.stringify(command)); setStatus('connecting'); }, []);

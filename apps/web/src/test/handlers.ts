@@ -20,7 +20,7 @@ import {
   evidenceFixture,
 } from './fixtures';
 
-const API_ROOT = '/api/v1';
+const API_ROOT = 'http://localhost:3000/api/v1';
 
 export const handlers = [
   http.get('/events/v1/workspace', () => new HttpResponse(null, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })),
@@ -30,7 +30,10 @@ export const handlers = [
 
   http.get(`${API_ROOT}/services/:serviceId`, () => HttpResponse.json(serviceFixture)),
 
-  http.get(`${API_ROOT}/services/:serviceId/logs`, () => HttpResponse.json(logPageFixture)),
+  http.get(`${API_ROOT}/services/:serviceId/logs`, ({ request }) => {
+    void request;
+    return HttpResponse.json(logPageFixture);
+  }),
 
   http.get(`${API_ROOT}/issues`, () => HttpResponse.json(issuePageFixture)),
 
