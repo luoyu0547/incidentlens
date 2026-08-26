@@ -1,35 +1,91 @@
 {
+  "$defs": {
+    "WorkspaceResourceKind": {
+      "description": "The workspace resources the Web observer can invalidate.",
+      "enum": [
+        "overview",
+        "target",
+        "service",
+        "issue",
+        "investigation",
+        "evidence"
+      ],
+      "title": "WorkspaceResourceKind",
+      "type": "string"
+    }
+  },
   "$id": "incidentlens://protocol/workspace-stream-v1",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
+  "description": "Minimal invalidation envelope forwarded as SSE ``data:``.",
   "properties": {
     "event_id": {
+      "title": "Event Id",
       "type": "string"
     },
     "event_type": {
-      "minLength": 1,
+      "const": "resource.changed",
+      "default": "resource.changed",
+      "title": "Event Type",
       "type": "string"
     },
-    "payload": {
-      "type": "object"
-    },
-    "resource_type": {
+    "occurred_at": {
+      "format": "date-time",
+      "title": "Occurred At",
       "type": "string"
+    },
+    "resource_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Resource Id"
+    },
+    "resource_kind": {
+      "$ref": "#/$defs/WorkspaceResourceKind"
     },
     "schema_version": {
       "const": 1,
+      "default": 1,
+      "title": "Schema Version",
       "type": "integer"
     },
-    "sequence": {
-      "minimum": 0,
-      "type": "integer"
+    "service_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Service Id"
+    },
+    "target_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Target Id"
     }
   },
   "required": [
-    "schema_version",
-    "event_type",
-    "sequence"
+    "event_id",
+    "occurred_at",
+    "resource_kind",
+    "schema_version"
   ],
-  "title": "workspace-stream-v1",
+  "title": "WorkspaceResourceChanged",
   "type": "object"
 }

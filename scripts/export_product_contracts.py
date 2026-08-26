@@ -64,6 +64,14 @@ def _model_schema(
                 schema = model.model_json_schema()
                 schema.setdefault("$schema", "https://json-schema.org/draft/2020-12/schema")
                 schema.setdefault("$id", f"incidentlens://protocol/{fallback}")
+                # Stream frames always carry a protocol version.  A model may
+                # grant ``schema_version`` a default (Pydantic then leaves it
+                # out of ``required``), but the protocol contract requires it,
+                # so surface it in ``required`` for every stream schema.
+                if "schema_version" in schema.get("properties", {}):
+                    required = schema.setdefault("required", [])
+                    if "schema_version" not in required:
+                        required.append("schema_version")
                 return schema
     return _fallback(fallback)
 
@@ -111,17 +119,9 @@ def exports() -> dict[Path, dict[str, Any]]:
             ("LogStreamEnvelope",), "log-stream-v1",
         ),
         SCHEMA_DIR / "workspace-stream-v1.schema.json": _model_schema(
-            (
-                "incidentlens_control_plane.streams.workspace",
-                "incidentlens_control_plane.api.routes.workspace_events",
-            ),
-            (
-                "WorkspaceStreamEnvelope",
-                "WorkspaceEvent",
-                "WorkspaceSseEvent",
-            ),
+            ("incidentlens_control_plane.streams.workspace",),
+            ("WorkspaceResourceChanged", "WorkspaceStreamGap"),
             "workspace-stream-v1",
-
         ),
     }
 

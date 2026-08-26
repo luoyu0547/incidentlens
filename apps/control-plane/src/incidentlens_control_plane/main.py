@@ -17,12 +17,14 @@ from incidentlens_control_plane.api.router import router as v1_router
 from incidentlens_control_plane.api.routes import agent_sessions as agent_sessions_routes
 from incidentlens_control_plane.api.routes import approvals as approvals_v1_routes
 from incidentlens_control_plane.api.routes import changes as changes_routes
-from incidentlens_control_plane.api.routes import evidence as evidence_v1_routes
 from incidentlens_control_plane.api.routes import events as v1_events_routes
-from incidentlens_control_plane.api.routes import investigation_summaries as investigation_summary_routes
+from incidentlens_control_plane.api.routes import evidence as evidence_v1_routes
+from incidentlens_control_plane.api.routes import (
+    investigation_summaries as investigation_summary_routes,
+)
 from incidentlens_control_plane.api.routes import issues as issue_routes
-from incidentlens_control_plane.api.routes import overview as overview_routes
 from incidentlens_control_plane.api.routes import operations as operations_routes
+from incidentlens_control_plane.api.routes import overview as overview_routes
 from incidentlens_control_plane.api.routes import services as services_routes
 from incidentlens_control_plane.api.routes import targets as targets_routes
 from incidentlens_control_plane.api.routes.auth import (
@@ -188,12 +190,16 @@ def create_app(
     from incidentlens_control_plane.api.routes.service_logs import (
         router as service_logs_router,
     )
+    from incidentlens_control_plane.api.routes.workspace_events import (
+        router as workspace_events_router,
+    )
     from incidentlens_control_plane.api.ws.cli_events import router as cli_ws_router
     from incidentlens_control_plane.api.ws.logs import router as logs_ws_router
 
     application.include_router(cli_ws_router)
     application.include_router(logs_ws_router)
     application.include_router(service_logs_router)
+    application.include_router(workspace_events_router)
 
     if settings.legacy_api_enabled:
         application.include_router(approvals_router)
