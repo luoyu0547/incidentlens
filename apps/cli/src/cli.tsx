@@ -10,6 +10,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { FileConfigStore } from './config/file-config-store.js';
 import { KeyringTokenStore } from './auth/keyring-token-store.js';
+import { EnvironmentTokenStore } from './auth/environment-token-store.js';
 import { ControlPlaneApi } from './api/control-plane-api.js';
 import { WsEventStream } from './stream/ws-event-stream.js';
 import { App } from './app/App.js';
@@ -32,7 +33,9 @@ if (args.includes('--version')) {
 
 // Create dependencies
 const configStore = new FileConfigStore(join(homedir(), '.incidentlens'));
-const tokenStore = new KeyringTokenStore();
+const tokenStore = process.env['INCIDENTLENS_TOKEN']
+  ? new EnvironmentTokenStore()
+  : new KeyringTokenStore();
 const api = new ControlPlaneApi({
   baseUrl: process.env['INCIDENTLENS_API_URL'] ?? 'http://localhost:8000',
   token: process.env['INCIDENTLENS_TOKEN'],
