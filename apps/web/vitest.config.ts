@@ -2,7 +2,7 @@ import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import { resolve } from 'path';
 
-const webNodeModules = resolve(__dirname, 'node_modules');
+const webNodeModules = resolve(__dirname, '../../node_modules');
 
 export default defineConfig({
   plugins: [react()],
