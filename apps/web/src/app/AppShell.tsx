@@ -14,14 +14,14 @@ import { WorkspaceEventBridge } from './WorkspaceEventBridge';
  */
 export function AppShell() {
   return (
-    <div>
-      <a href="#main-content">跳转到主要内容</a>
-      <header>
+    <div className="app-shell">
+      <a className="app-shell__skip-link" href="#main-content">跳转到主要内容</a>
+      <header className="app-shell__header">
         <h1>IncidentLens</h1>
         <Navigation />
         <WorkspaceEventBridge />
       </header>
-      <main id="main-content">
+      <main className="app-shell__main" id="main-content" tabIndex={-1}>
         <Outlet />
       </main>
     </div>
