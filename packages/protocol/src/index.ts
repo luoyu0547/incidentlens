@@ -1,4 +1,17 @@
-// Re-export generated types only (no value exports — SDK endpoint functions
+export {
+  connectWorkspaceEvents,
+  WorkspaceGapEventSchema,
+  WorkspaceResourceEventSchema,
+} from './workspace-events.js';
+
+export type {
+  WorkspaceEventConnection,
+  WorkspaceEventOptions,
+  WorkspaceEventStatus,
+  WorkspaceGapEvent,
+  WorkspaceResourceEvent,
+} from './workspace-events.js';
+
 // must not be reachable from the web workspace through the root package entry)
 export type * from './generated/types.gen.js';
 

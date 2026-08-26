@@ -1,5 +1,6 @@
 import { Outlet } from '@tanstack/react-router';
 import { Navigation } from './Navigation';
+import { WorkspaceEventBridge } from './WorkspaceEventBridge';
 
 /**
  * Root application layout (App Shell).
@@ -18,7 +19,7 @@ export function AppShell() {
       <header>
         <h1>IncidentLens</h1>
         <Navigation />
-        <span>工作区连接状态：未知</span>
+        <WorkspaceEventBridge />
       </header>
       <main id="main-content">
         <Outlet />

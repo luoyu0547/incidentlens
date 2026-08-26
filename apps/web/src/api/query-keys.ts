@@ -17,9 +17,9 @@ import type {
  * so the resulting query key is deterministic regardless of property creation
  * order. The cursor is included verbatim — no parsing or transformation.
  */
-function canonicalFilter(query: Record<string, unknown>): unknown[] {
+function canonicalFilter(query: object): unknown[] {
   const keys = Object.keys(query).sort();
-  return keys.flatMap((k) => [k, query[k]]);
+  return keys.flatMap((k) => [k, (query as Record<string, unknown>)[k]]);
 }
 
 export const queryKeys = {
