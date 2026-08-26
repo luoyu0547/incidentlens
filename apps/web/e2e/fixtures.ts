@@ -2,12 +2,21 @@ import { expect, type Page, type WebSocketRoute } from '@playwright/test';
 
 export const ids = { service: 'svc-web', target: 'tgt-host-a', issue: 'iss-1', evidence: 'ev-1' } as const;
 
-export const log = (n: number, message = `c${n}`) => ({
+export const log = (n: number, message = `c${n}`, extra: Record<string, unknown> = {}) => ({
   cursor: `c${n}`,
   log_id: `log-${n}`,
   message,
   occurred_at: `2026-08-26T00:00:${String(n).padStart(2, '0')}Z`,
   severity: 'info',
+  ...extra,
+});
+
+export const logEvent = (event_type: string, cursor: string | null, payload: Record<string, unknown> | null = null) => ({
+  schema_version: 1,
+  event_type,
+  occurred_at: '2026-08-26T00:00:30Z',
+  cursor,
+  ...(payload === null ? {} : { payload }),
 });
 
 export const overview = {
@@ -48,7 +57,7 @@ export async function installCommonRoutes(page: Page) {
 }
 
 export async function installLogSocket(page: Page, onMessage: (message: Record<string, unknown>, socket: WebSocketRoute) => void) {
-  await page.routeWebSocket('**/api/v1/services/*/logs/stream', (socket) => {
+  await page.routeWebSocket('**/ws/v1/logs', (socket) => {
     socket.onMessage((message) => {
       try { onMessage(JSON.parse(String(message)) as Record<string, unknown>, socket); } catch { /* malformed client frames are ignored */ }
     });
