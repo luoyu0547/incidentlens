@@ -9,6 +9,7 @@ import type {
   OperationAccepted,
   AgentSessionView,
   AgentSessionCreate,
+  AgentSessionPatch,
   AgentMessageView,
   AgentMessageAccepted,
   AgentMessageCreate,
@@ -64,6 +65,7 @@ export interface ControlPlaneApi {
   removeTarget(id: string, options: MutationOptions): Promise<void>;
   testTarget(id: string, options: MutationOptions): Promise<OperationAccepted>;
   createSession(input: AgentSessionCreate, options: MutationOptions): Promise<AgentSessionView>;
+  patchSession(id: string, input: AgentSessionPatch, options: MutationOptions): Promise<AgentSessionView>;
   listSessions(query: AgentSessionListQuery, signal?: AbortSignal): Promise<AgentSessionView[]>;
   getSession(id: string, signal?: AbortSignal): Promise<AgentSessionView>;
   listMessages(id: string, query: MessageListQuery, signal?: AbortSignal): Promise<AgentMessageView[]>;
@@ -143,6 +145,10 @@ export class ControlPlaneApi implements ControlPlaneApi {
 
   async createSession(input: AgentSessionCreate, options: MutationOptions): Promise<AgentSessionView> {
     return this.request<AgentSessionView>('POST', '/api/v1/agent-sessions', input, options.signal, options.idempotencyKey);
+  }
+
+  async patchSession(id: string, input: AgentSessionPatch, options: MutationOptions): Promise<AgentSessionView> {
+    return this.request<AgentSessionView>('PATCH', `/api/v1/agent-sessions/${id}`, input, options.signal, options.idempotencyKey);
   }
 
   async listSessions(query: AgentSessionListQuery, signal?: AbortSignal): Promise<AgentSessionView[]> {

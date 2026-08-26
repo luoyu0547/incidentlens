@@ -25,11 +25,18 @@ import {
   createTargetCommands,
   type TargetCommandRuntime,
 } from '../features/targets/target-commands.js';
+import { SessionController } from '../features/sessions/session-controller.js';
+import {
+  createSessionCommands,
+  type SessionCommandRuntime,
+} from '../features/sessions/session-commands.js';
+import type { AgentSessionView } from '@incidentlens/protocol';
 import { Conversation } from '../ui/Conversation.js';
 import { PromptInput } from '../ui/PromptInput.js';
 import { StatusLine } from '../ui/StatusLine.js';
 import { CommandPalette } from '../ui/CommandPalette.js';
 import { TargetWizard, RemoveTargetPrompt } from '../ui/TargetWizard.js';
+import { SessionPicker } from '../ui/SessionPicker.js';
 
 interface AppProps {
   readonly dependencies: AppDependencies;
@@ -56,6 +63,10 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
   const stateRef = useRef<CliState>(state);
   stateRef.current = state;
 
+  // Sessions loaded into the picker overlay.
+  const [pickerSessions, setPickerSessions] = useState<readonly AgentSessionView[]>([]);
+  const [pickerError, setPickerError] = useState<string | undefined>(undefined);
+
   // Target controller shared by commands and the wizard.
   const controller = useMemo(
     () =>
@@ -67,6 +78,36 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
       }),
     [deps.api, deps.configStore, dispatch]
   );
+
+  // Session controller shared by session commands and natural-language
+  // submits. It implements no-target blocking and create-on-first-message.
+  const sessionController = useMemo(
+    () =>
+      new SessionController({
+        api: deps.api,
+        configStore: deps.configStore,
+        profileName: 'default',
+        dispatch,
+      }),
+    [deps.api, deps.configStore, dispatch]
+  );
+
+  // Keep the session controller's view of the active target/session in
+  // sync with the reducer on every render.
+  sessionController.sync(state.target, state.session);
+
+  // Load sessions when the picker opens.
+  useEffect(() => {
+    if (state.overlay.kind === 'session-picker') {
+      void sessionController
+        .list()
+        .then((sessions) => setPickerSessions(sessions))
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : 'Failed to load sessions';
+          setPickerError(message);
+        });
+    }
+  }, [state.overlay.kind, sessionController]);
 
   // Context used for command availability checks.
   const commandContext: CommandContext = useMemo(
@@ -130,10 +171,31 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
     [controller, dispatch, deps]
   );
 
-  // Command registry populated with the /target command group.
+  // Runtime callbacks backing the /session command group.
+  const sessionRuntime = useMemo<SessionCommandRuntime>(
+    () => ({
+      controller: sessionController,
+      openPicker: () =>
+        dispatch({ type: 'set_overlay', overlay: { kind: 'session-picker' } }),
+      status: (text) => dispatch({ type: 'system_message', content: text, timestamp: deps.now() }),
+      error: (text) =>
+        dispatch({
+          type: 'system_message',
+          content: `Error: ${text}`,
+          timestamp: deps.now(),
+        }),
+    }),
+    [sessionController, dispatch, deps]
+  );
+
+  // Command registry populated with the /target and /session command groups.
   const registry = useMemo(
-    () => createCommandRegistry(createTargetCommands(targetRuntime), commandContext),
-    [targetRuntime, commandContext]
+    () =>
+      createCommandRegistry(
+        [...createTargetCommands(targetRuntime), ...createSessionCommands(sessionRuntime)],
+        commandContext,
+      ),
+    [targetRuntime, sessionRuntime, commandContext]
   );
 
   // Surface a CommandResult as a system message in the conversation.
@@ -207,16 +269,18 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
           break;
 
         case 'message':
-          // Send as natural language message
-          if (state.session) {
-            void deps.api.sendMessage(
-              state.session.session_id,
-              { content: value },
-              {
-                idempotencyKey: crypto.randomUUID(),
-              }
-            );
-          }
+          // Send as natural language message through the session
+          // controller (no-target blocking + create-on-first-message).
+          void sessionController
+            .sendNaturalLanguage(value)
+            .catch((error) => {
+              const text = error instanceof Error ? error.message : 'Failed to send message';
+              dispatch({
+                type: 'system_message',
+                content: `Error: ${text}`,
+                timestamp: deps.now(),
+              });
+            });
           break;
 
         case 'command':
@@ -236,7 +300,7 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
       // Clear input
       dispatch({ type: 'set_input', input: { value: '' } });
     },
-    [state.session, deps.api, dispatch, registry, commandContext, intoMessages]
+    [state.session, deps.api, dispatch, registry, commandContext, intoMessages, sessionController]
   );
 
   // Handle input change
@@ -287,6 +351,7 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
   // Narrowed overlay variants so closures can reference them safely.
   const wizardOverlay = state.overlay.kind === 'target-wizard' ? state.overlay : undefined;
   const confirmationOverlay = state.overlay.kind === 'confirmation' ? state.overlay : undefined;
+  const sessionPickerOpen = state.overlay.kind === 'session-picker';
 
   return (
     <Box flexDirection="column">
@@ -332,6 +397,35 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
           focused={true}
         />
       )}
+
+      {/* Session Picker Overlay */}
+      {sessionPickerOpen &&
+        (pickerError ? (
+          <Box>
+            <Text color="red">Error loading sessions: {pickerError}</Text>
+          </Box>
+        ) : (
+          <SessionPicker
+            sessions={pickerSessions}
+            onSelect={(session) => {
+              void sessionController.select(session);
+              dispatch({
+                type: 'system_message',
+                content: `Selected session ${session.session_id} (${session.title ?? 'untitled'})`,
+                timestamp: deps.now(),
+              });
+              setPickerSessions([]);
+              setPickerError(undefined);
+              dispatch({ type: 'set_overlay', overlay: { kind: 'none' } });
+            }}
+            onCancel={() => {
+              setPickerSessions([]);
+              setPickerError(undefined);
+              dispatch({ type: 'set_overlay', overlay: { kind: 'none' } });
+            }}
+            focused={true}
+          />
+        ))}
 
       {/* Target Wizard Overlay */}
       {wizardOverlay && (

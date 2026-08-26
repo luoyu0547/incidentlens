@@ -70,7 +70,19 @@ export async function bootstrap(
       }
     }
 
-    // 6. Bootstrap complete
+    // 6. Load last session
+    if (profile?.lastSessionId) {
+      try {
+        const session = await deps.api.getSession(profile.lastSessionId);
+        if (session) {
+          dispatch({ type: 'set_session', session });
+        }
+      } catch {
+        // Session load failed, continue without session
+      }
+    }
+
+    // 7. Bootstrap complete
     dispatch({ type: 'bootstrap_complete', state: 'ready' });
 
     return { bootstrap: 'ready' };

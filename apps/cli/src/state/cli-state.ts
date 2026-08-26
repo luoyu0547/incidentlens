@@ -45,7 +45,8 @@ export type OverlayState =
       target?: TargetView;
       step: string;
     }
-  | { kind: 'confirmation'; target: TargetView; onConfirm: () => void };
+  | { kind: 'confirmation'; target: TargetView; onConfirm: () => void }
+  | { kind: 'session-picker' };
 
 /**
  * Conversation item - safe UI projection of messages and tool updates.
