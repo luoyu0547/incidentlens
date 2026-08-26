@@ -10,6 +10,7 @@ export interface LogRowProps {
   readonly measureRef?: (element: HTMLElement | null) => void;
   readonly style?: CSSProperties;
   readonly onLocate?: (logId: string) => void;
+}
 
 export function LogRow({ record, measureRef, style, onLocate }: LogRowProps) {
   const body = presentLogBody(record);

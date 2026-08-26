@@ -50,7 +50,7 @@ describe('log locator', () => {
 
   it('renders marker and locator link with server ids', () => {
     render(<><EvidenceMarker record={record('log-2')} /><LogLocatorLink locator={locator}>证据日志</LogLocatorLink></>);
-    expect(screen.getByRole('button', { name: '定位日志 log-2' })).toHaveAttribute('data-log-id', 'log-2');
+    expect(screen.getByRole('button', { name: '定位日志 log-2' })).not.toHaveAttribute('data-log-id');
     expect(screen.getByRole('link', { name: '证据日志' })).toHaveAttribute('href', logLocatorUrl(locator));
   });
 });

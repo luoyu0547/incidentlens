@@ -25,14 +25,21 @@ export function LogViewer({ serviceId, targetId, initialSearch, onSearchChange }
   const records = [...recordsBase, ...anchoredRecords.filter((r) => !recordsBase.some((x) => x.log_id === r.log_id))];
   const anchor = useMemo(() => search.anchor ? { service: serviceId, log_id: search.anchor, context: search.context } : null, [search.anchor, search.context, serviceId]);
   const scrollTo = (logId: string) => document.querySelector(`[data-log-id="${CSS.escape(logId)}"]`)?.scrollIntoView({ block: 'center' });
-  const fetchContext = async (locator: { context?: number | null }): Promise<readonly LogRecordView[]> => {
-    const query: ServiceLogQuery = { limit: locator.context ?? search.context, severity: search.levels[0], source_ref: search.target ?? targetId };
+  const fetchContext = async (locator: { context?: number | null; cursor?: string | null }): Promise<readonly LogRecordView[]> => {
+    const query: ServiceLogQuery = {
+      limit: locator.context ?? search.context,
+      before: locator.cursor ?? search.anchor ?? undefined,
+      after: search.from,
+      severity: search.levels[0],
+      source_ref: search.target ?? targetId,
+    };
     return (await readonlyClient.getServiceLogs(serviceId, query)).items;
   };
   const locator = useLogAnchor({ locator: anchor, currentService: serviceId, records, fetchContext, onRecords: setAnchoredRecords, scrollTo });
   useEffect(() => { if (search.anchor && !locator.present) void locator.locate(); }, [search.anchor, locator.present, locator.locate]);
   const error = search.mode === 'live' ? live.error : history.error;
-  const status = search.mode === 'live' ? live.status : undefined; <section className="log-viewer" aria-label="日志查看器">
+  const status = search.mode === 'live' ? live.status : undefined;
+  return <section className="log-viewer" aria-label="日志查看器">
     <h2>日志</h2>
     <LogToolbar search={search} onChange={update} />
     <StreamStatus mode={search.mode} isFetching={search.mode === 'history' ? history.isFetching : status === 'backfilling'} error={error} />
