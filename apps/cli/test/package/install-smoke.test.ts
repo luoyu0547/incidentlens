@@ -21,10 +21,17 @@ it('installs a clean tarball and launches incidentlens', async () => {
   ).toBe(true);
   expect(files.some((file) => /(^|\/)(src|test|\.env|token)/i.test(file))).toBe(false);
 
+  const packagePath = join(root, result.filename);
+  try {
+    await stat(packagePath);
+  } catch {
+    await exec('npm', ['pack', '--workspace', '@incidentlens/cli', '--ignore-scripts'], { cwd: root });
+  }
+
   const temp = await mkdtemp(join(tmpdir(), 'incidentlens-install-'));
   try {
     await exec('npm', ['init', '-y'], { cwd: temp });
-    await exec('npm', ['install', join(root, result.filename), '--ignore-scripts'], { cwd: temp });
+    await exec('npm', ['install', packagePath, '--ignore-scripts'], { cwd: temp });
     const bin = join(temp, 'node_modules/.bin/incidentlens');
     expect((await stat(bin)).mode & 0o111).not.toBe(0);
     const version = await exec(bin, ['--version'], { cwd: temp });

@@ -53,8 +53,8 @@ describe('Ink rendering', () => {
     );
 
     const frame = lastFrame() ?? '';
-    expect(frame).toContain('需要审批');
-    expect(frame).toMatch(/\[A\].*批准.*\[R\].*拒绝.*\[D\].*差异/);
+    expect(frame).toContain('Approval apr-1');
+    expect(frame).toMatch(/A approve.*R reject.*D diff/);
     expect(frame).toContain('1 pending approval(s)');
     expect(frame).not.toContain('approved');
   });
