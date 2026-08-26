@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import type { LogRecordView } from '@incidentlens/protocol';
 
 export interface LogLocator {
@@ -66,15 +66,17 @@ export function useLogAnchor(options: UseLogAnchorOptions) {
   const present = Boolean(anchorId && records.some((record) => record.log_id === anchorId));
   const url = useMemo(() => locator ? logLocatorUrl(locator) : undefined, [locator]);
 
+  const locating = useRef(false);
   const locate = useCallback(async () => {
-    if (!locator || !anchorId) return;
+    if (locating.current || !locator || !anchorId) return;
+    locating.current = true;
     // A service mismatch must be handled before any query/context request.
     if (currentService !== locator.service) {
       window.location.assign(url ?? logLocatorUrl(locator));
       return;
     }
     if (records.some((record) => record.log_id === anchorId)) {
-      scrollTo?.(anchorId);
+      requestAnimationFrame(() => scrollTo?.(anchorId));
       return;
     }
     if (!fetchContext) return;
@@ -94,6 +96,7 @@ export function useLogAnchor(options: UseLogAnchorOptions) {
       } else throw error;
     } finally {
       setLoading(false);
+      locating.current = false;
     }
   }, [locator, anchorId, currentService, url, records, fetchContext, onRecords, onExpired, scrollTo]);
 
