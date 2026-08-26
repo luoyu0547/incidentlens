@@ -86,7 +86,14 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
             else if (parsed.event_type === 'log.subscribed') setStatus(pausedRef.current ? 'paused' : 'live');
             else if (parsed.event_type === 'stream.gap') {
               closeSocket();
-              void backfill(true).then(() => { if (!disposed) void connect(false, true); });
+              void backfill(true).then(() => {
+                if (!disposed) void connect(false, true);
+              }).catch((e) => {
+                if (disposed) return;
+                setError(e instanceof Error ? e : new Error('Unable to recover log history'));
+                setStatus('error');
+                retryTimer = setTimeout(() => void connect(false), backoffMs);
+              });
             }
           } catch (e) { setError(e instanceof Error ? e : new Error('Invalid log stream event')); setStatus('error'); }
         };

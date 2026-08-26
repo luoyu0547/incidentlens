@@ -33,6 +33,8 @@ export interface WorkspaceEventOptions {
   onResourceChanged(event: WorkspaceResourceEvent): void;
   onGap(event: WorkspaceGapEvent): void;
   onStatus(status: WorkspaceEventStatus): void;
+  /** Optional fetch implementation used to inspect SSE HTTP failures. */
+  fetch?: typeof fetch;
 }
 
 const STORAGE_KEY = 'incidentlens.workspace.last-event-id';
@@ -56,27 +58,35 @@ export function connectWorkspaceEvents(options: WorkspaceEventOptions): Workspac
   let cursor = options.afterEventId ?? readLastEventId();
 
   const status = (value: WorkspaceEventStatus) => { if (!closed) options.onStatus(value); };
-  const connect = () => {
+  const fetchStatus = options.fetch ?? globalThis.fetch;
+  const connect = async () => {
     if (closed) return;
     status(retries === 0 ? 'connecting' : 'reconnecting');
     const browserOrigin = (globalThis as { location?: { origin: string } }).location?.origin;
     const url = new URL(options.url ?? DEFAULT_URL, browserOrigin ?? 'http://localhost');
     if (cursor) url.searchParams.set('after_event_id', cursor);
+    if (fetchStatus) {
+      try {
+        const response = await fetchStatus(url.toString(), { headers: { Accept: 'text/event-stream' }, credentials: 'include' });
+        if (response.status === 401 || response.status === 403) {
+          closed = true; options.onStatus('authentication-error'); return;
+        }
+      } catch {
+        // EventSource remains the source of truth for transient network failures.
+      }
+    }
+    if (closed) return;
     source = new EventSource(url.toString());
     source.onopen = () => { retries = 0; status('live'); };
     source.onmessage = (message) => handle(message.data, message.lastEventId);
     source.addEventListener('resource.changed', (event) => handle((event as MessageEvent).data, (event as MessageEvent).lastEventId));
     source.addEventListener('stream.gap', (event) => handle((event as MessageEvent).data, (event as MessageEvent).lastEventId));
     source.onerror = () => {
-      const responseStatus = (source as (EventSource & { status?: number }) | undefined)?.status;
       source?.close(); source = undefined;
       if (closed) return;
-      if (responseStatus === 401 || responseStatus === 403) {
-        closed = true; options.onStatus('authentication-error'); return;
-      }
       if (retries >= MAX_RETRIES) { closed = true; options.onStatus('closed'); return; }
       const delay = RETRY_BASE_MS * 2 ** retries++;
-      timer = setTimeout(connect, delay);
+      timer = setTimeout(() => { void connect(); }, delay);
     };
   };
   const handle = (raw: string, eventId?: string) => {
