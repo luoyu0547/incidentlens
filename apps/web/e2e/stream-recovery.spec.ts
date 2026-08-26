@@ -71,7 +71,7 @@ test.describe('日志流恢复', () => {
     expect(historyRequests[1].searchParams.get('before')).toBeNull();
   });
 
-  test('slow consumer backpressure 后客户端为服务器请求单独 ack', async ({ page }) => {
+  test('slow consumer 顶层 cursor 为空时从 payload.last_cursor 单独 ack', async ({ page }) => {
     const frames: Record<string, unknown>[] = [];
     let releaseSlowConsumer!: () => void;
     const slowConsumerReleased = new Promise<void>((resolve) => { releaseSlowConsumer = resolve; });
@@ -80,7 +80,7 @@ test.describe('日志流恢复', () => {
     await installLogSocket(page, (message, socket) => {
       if (message.action === 'subscribe') {
         socket.send(JSON.stringify(logEvent('log.subscribed', cursors[10], { service_id: ids.service })));
-        void slowConsumerReleased.then(() => socket.send(JSON.stringify(logEvent('stream.slow_consumer', cursors[10], { action: 'ack' }))));
+        void slowConsumerReleased.then(() => socket.send(JSON.stringify(logEvent('stream.slow_consumer', null, { action: 'ack', last_cursor: cursors[10] }))));
       }
     });
     page.on('websocket', (socket) => socket.on('framesent', (frame) => {
