@@ -6,8 +6,7 @@
  */
 
 import type { ControlPlaneApi } from '../api/control-plane-api.js';
-import type { ConfigStore } from '../config/types.js';
-import type { TokenStore } from '../auth/token-store.js';
+import type { ConfigStore, TokenStore } from '../config/types.js';
 
 /**
  * Event stream interface for WebSocket connections.

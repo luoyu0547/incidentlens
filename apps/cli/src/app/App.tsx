@@ -7,19 +7,29 @@
  * - Conversation history
  * - Status line
  * - Prompt input
+ * - Overlays: command palette, target wizard, typed remove confirmation
  */
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Box, Text, useInput, useApp } from 'ink';
 import type { AppDependencies } from './dependencies.js';
 import { bootstrap } from './bootstrap.js';
 import type { CliState, CliAction } from '../state/cli-state.js';
 import { createInitialState, reducer } from '../state/reducer.js';
 import { parseInput } from '../commands/parser.js';
+import { executeCommand } from '../commands/execute-command.js';
+import type { CommandContext, CommandResult } from '../commands/types.js';
+import { createCommandRegistry } from '../commands/registry.js';
+import { TargetController } from '../features/targets/target-controller.js';
+import {
+  createTargetCommands,
+  type TargetCommandRuntime,
+} from '../features/targets/target-commands.js';
 import { Conversation } from '../ui/Conversation.js';
 import { PromptInput } from '../ui/PromptInput.js';
 import { StatusLine } from '../ui/StatusLine.js';
 import { CommandPalette } from '../ui/CommandPalette.js';
+import { TargetWizard, RemoveTargetPrompt } from '../ui/TargetWizard.js';
 
 interface AppProps {
   readonly dependencies: AppDependencies;
@@ -41,6 +51,112 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
   const dispatch = useCallback((action: CliAction) => {
     setState((prev) => reducer(prev, action));
   }, []);
+
+  // Latest state ref so stable runtime callbacks never read stale state.
+  const stateRef = useRef<CliState>(state);
+  stateRef.current = state;
+
+  // Target controller shared by commands and the wizard.
+  const controller = useMemo(
+    () =>
+      new TargetController({
+        api: deps.api,
+        configStore: deps.configStore,
+        profileName: 'default',
+        dispatch,
+      }),
+    [deps.api, deps.configStore, dispatch]
+  );
+
+  // Context used for command availability checks.
+  const commandContext: CommandContext = useMemo(
+    () => ({
+      target: state.target,
+      session: state.session,
+      bootstrap: state.bootstrap,
+      capabilities: new Set<string>(),
+    }),
+    [state.target, state.session, state.bootstrap]
+  );
+
+  // Runtime callbacks backing the /target command group.
+  const targetRuntime = useMemo<TargetCommandRuntime>(
+    () => ({
+      controller,
+      openWizard: (mode, target) =>
+        dispatch({
+          type: 'set_overlay',
+          overlay: { kind: 'target-wizard', mode, target, step: 'name' },
+        }),
+      openRemoveConfirmation: (target) =>
+        dispatch({
+          type: 'set_overlay',
+          overlay: {
+            kind: 'confirmation',
+            target,
+            onConfirm: () => {
+              void controller
+                .remove(target.target_id)
+                .then(() => {
+                  if (stateRef.current.target?.target_id === target.target_id) {
+                    dispatch({ type: 'clear_target' });
+                  }
+                  dispatch({
+                    type: 'system_message',
+                    content: `Removed target ${target.name}`,
+                    timestamp: deps.now(),
+                  });
+                })
+                .catch((error) => {
+                  const message =
+                    error instanceof Error ? error.message : 'Failed to remove target';
+                  dispatch({
+                    type: 'system_message',
+                    content: `Error: ${message}`,
+                    timestamp: deps.now(),
+                  });
+                });
+            },
+          },
+        }),
+      status: (text) => dispatch({ type: 'system_message', content: text, timestamp: deps.now() }),
+      error: (text) =>
+        dispatch({
+          type: 'system_message',
+          content: `Error: ${text}`,
+          timestamp: deps.now(),
+        }),
+    }),
+    [controller, dispatch, deps]
+  );
+
+  // Command registry populated with the /target command group.
+  const registry = useMemo(
+    () => createCommandRegistry(createTargetCommands(targetRuntime), commandContext),
+    [targetRuntime, commandContext]
+  );
+
+  // Surface a CommandResult as a system message in the conversation.
+  const intoMessages = useCallback(
+    (result: CommandResult) => {
+      if (result.kind === 'message') {
+        dispatch({ type: 'system_message', content: result.text, timestamp: deps.now() });
+      } else if (result.kind === 'error') {
+        dispatch({
+          type: 'system_message',
+          content: `Error: ${result.message}`,
+          timestamp: deps.now(),
+        });
+      } else if (result.kind === 'navigate') {
+        dispatch({
+          type: 'system_message',
+          content: `Navigating to ${result.target}…`,
+          timestamp: deps.now(),
+        });
+      }
+    },
+    [dispatch, deps]
+  );
 
   // Bootstrap on mount
   useEffect(() => {
@@ -93,14 +209,19 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
         case 'message':
           // Send as natural language message
           if (state.session) {
-            void deps.api.sendMessage(state.session.id, { content: value }, {
-              idempotencyKey: crypto.randomUUID(),
-            });
+            void deps.api.sendMessage(
+              state.session.session_id,
+              { content: value },
+              {
+                idempotencyKey: crypto.randomUUID(),
+              }
+            );
           }
           break;
 
         case 'command':
-          // Handle command (to be implemented in later tasks)
+          // Route through the command registry.
+          void executeCommand(parsed.invocation, registry, commandContext).then(intoMessages);
           break;
 
         case 'incomplete-command':
@@ -115,7 +236,7 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
       // Clear input
       dispatch({ type: 'set_input', input: { value: '' } });
     },
-    [state.session, deps.api, dispatch]
+    [state.session, deps.api, dispatch, registry, commandContext, intoMessages]
   );
 
   // Handle input change
@@ -163,6 +284,10 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
     );
   }
 
+  // Narrowed overlay variants so closures can reference them safely.
+  const wizardOverlay = state.overlay.kind === 'target-wizard' ? state.overlay : undefined;
+  const confirmationOverlay = state.overlay.kind === 'confirmation' ? state.overlay : undefined;
+
   return (
     <Box flexDirection="column">
       {/* Header */}
@@ -186,18 +311,56 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
       {/* Status Line */}
       <StatusLine
         streamConnected={state.stream.connected}
-        pendingApprovals={Object.values(state.approvals).filter((a) => a.status === 'pending').length}
+        pendingApprovals={
+          Object.values(state.approvals).filter((a) => a.status === 'pending').length
+        }
       />
 
       {/* Command Palette Overlay */}
       {state.overlay.kind === 'command-palette' && (
         <CommandPalette
           query={state.overlay.query}
-          commands={[]}
+          commands={registry.getAvailable(commandContext)}
           selectedIndex={0}
-          onSelect={() => {}}
+          onSelect={(cmd) => {
+            void executeCommand({ path: [...cmd.path], args: '' }, registry, commandContext).then(
+              intoMessages
+            );
+            dispatch({ type: 'set_overlay', overlay: { kind: 'none' } });
+          }}
           onCancel={() => dispatch({ type: 'set_overlay', overlay: { kind: 'none' } })}
           focused={true}
+        />
+      )}
+
+      {/* Target Wizard Overlay */}
+      {wizardOverlay && (
+        <TargetWizard
+          mode={wizardOverlay.mode}
+          target={wizardOverlay.target}
+          controller={controller}
+          onComplete={(target) => {
+            dispatch({ type: 'set_target', target });
+            dispatch({ type: 'set_overlay', overlay: { kind: 'none' } });
+            dispatch({
+              type: 'system_message',
+              content: `Saved target ${target.name}`,
+              timestamp: deps.now(),
+            });
+          }}
+          onCancel={() => dispatch({ type: 'set_overlay', overlay: { kind: 'none' } })}
+        />
+      )}
+
+      {/* Typed Remove Confirmation Overlay */}
+      {confirmationOverlay && (
+        <RemoveTargetPrompt
+          target={confirmationOverlay.target}
+          onConfirm={() => {
+            confirmationOverlay.onConfirm();
+            dispatch({ type: 'set_overlay', overlay: { kind: 'none' } });
+          }}
+          onCancel={() => dispatch({ type: 'set_overlay', overlay: { kind: 'none' } })}
         />
       )}
 

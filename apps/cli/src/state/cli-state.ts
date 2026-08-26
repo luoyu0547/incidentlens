@@ -39,8 +39,13 @@ export interface InputState {
 export type OverlayState =
   | { kind: 'none' }
   | { kind: 'command-palette'; query: string }
-  | { kind: 'target-wizard'; step: string }
-  | { kind: 'confirmation'; message: string; onConfirm: () => void };
+  | {
+      kind: 'target-wizard';
+      mode: 'create' | 'edit';
+      target?: TargetView;
+      step: string;
+    }
+  | { kind: 'confirmation'; target: TargetView; onConfirm: () => void };
 
 /**
  * Conversation item - safe UI projection of messages and tool updates.
@@ -113,10 +118,12 @@ export interface CliState {
 export type CliAction =
   | { type: 'bootstrap_complete'; state: BootstrapState }
   | { type: 'set_target'; target: TargetView }
+  | { type: 'clear_target' }
   | { type: 'set_session'; session: AgentSessionView }
   | { type: 'stream_event'; event: any }
   | { type: 'gap_snapshot'; snapshot: { messages: ConversationItem[]; operations: Record<string, OperationView>; approvals: Record<string, ApprovalDetailView>; sequence: number } }
   | { type: 'set_stream_status'; status: Partial<StreamStatus> }
   | { type: 'set_input'; input: Partial<InputState> }
   | { type: 'set_overlay'; overlay: OverlayState }
+  | { type: 'system_message'; content: string; timestamp?: Date }
   | { type: 'clear_messages' };
