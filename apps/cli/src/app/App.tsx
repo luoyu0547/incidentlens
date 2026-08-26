@@ -38,6 +38,7 @@ import { CommandPalette } from '../ui/CommandPalette.js';
 import { TargetWizard, RemoveTargetPrompt } from '../ui/TargetWizard.js';
 import { SessionPicker } from '../ui/SessionPicker.js';
 import { ApprovalCard } from '../ui/ApprovalCard.js';
+import { safeApprovalText } from '../ui/ApprovalCard.js';
 import { ApprovalReasonPrompt } from '../ui/ApprovalReasonPrompt.js';
 import { ApprovalControllerImpl } from '../features/approvals/approval-controller.js';
 import { createApprovalCommands, type ApprovalCommandRuntime } from '../features/approvals/approval-commands.js';
@@ -108,7 +109,7 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
     listPending: async () => (await deps.api.listApprovals({ status: 'pending', limit: 500 })).items,
     getCurrentApprovalId: () => Object.values(stateRef.current.approvals).find((a) => a.decision_status === 'pending')?.approval_id,
     openReasonPrompt: (id, decision) => setApprovalPrompt({ id, decision }),
-    showDiff: (approval) => dispatch({ type: 'system_message', content: approval.diff ?? 'No safe diff available.', timestamp: deps.now() }),
+    showDiff: (approval) => dispatch({ type: 'system_message', content: safeApprovalText(approval.diff) ?? 'No safe diff available.', timestamp: deps.now() }),
   }), [approvalController, deps, dispatch]);
 
   // Keep the session controller's view of the active target/session in
@@ -451,7 +452,11 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
           onSubmit={(reason) => {
             const prompt = approvalPrompt;
             setApprovalPrompt(undefined);
-            void approvalController.decide(prompt.id, prompt.decision, reason).then((updated) => {
+            void approvalController.refresh(prompt.id).then((latest) => {
+              dispatch({ type: 'set_approval', approval: latest });
+              if (latest.decision_status !== 'pending') throw new Error(`Approval is ${latest.decision_status}`);
+              return approvalController.decide(prompt.id, prompt.decision, reason);
+            }).then((updated) => {
               dispatch({ type: 'set_approval', approval: updated });
             }).catch((error) => dispatch({ type: 'system_message', content: `Error: ${error instanceof Error ? error.message : 'Approval decision failed'}`, timestamp: deps.now() }));
           }}

@@ -19,7 +19,7 @@ const CLIENT_COMPATIBILITY: ClientCompatibility = {
   max_protocol_version: '1.0.0',
 };
 
-async function dedupeById<T>(items: readonly T[], getId: (item: T) => string): Promise<T[]> {
+function dedupeById<T>(items: readonly T[], getId: (item: T) => string): T[] {
   return Array.from(new Map(items.map((item) => [getId(item), item])).values());
 }
 

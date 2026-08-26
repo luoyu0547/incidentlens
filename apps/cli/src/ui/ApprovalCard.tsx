@@ -18,7 +18,7 @@ export function approvalHotkeysActive(
   return focused && promptEmpty && !overlayActive;
 }
 
-function safeField(value: string | null | undefined): string | undefined {
+export function safeApprovalText(value: string | null | undefined): string | undefined {
   if (!value) return undefined;
   const redacted = value.replace(/(token|password|secret|authorization|credential)\s*[:=]\s*[^\s,;]+/gi, '$1=[redacted]');
   return redacted.length > 240 ? `${redacted.slice(0, 237)}...` : redacted;
@@ -36,10 +36,10 @@ export function ApprovalCard({ approval, focused, promptEmpty, overlayActive, on
     <Text bold>Approval {approval.approval_id}</Text>
     <Text>Intent: {approval.intent_summary}</Text>
     <Text>Risk: {approval.risk}  Expires: {approval.expires_at}</Text>
-    {safeField(approval.diff) && <Text>Diff: {safeField(approval.diff)}</Text>}
-    {safeField(approval.impact) && <Text>Impact: {safeField(approval.impact)}</Text>}
-    {safeField(approval.verification) && <Text>Verification: {safeField(approval.verification)}</Text>}
-    {safeField(approval.rollback) && <Text>Rollback: {safeField(approval.rollback)}</Text>}
+    {safeApprovalText(approval.diff) && <Text>Diff: {safeApprovalText(approval.diff)}</Text>}
+    {safeApprovalText(approval.impact) && <Text>Impact: {safeApprovalText(approval.impact)}</Text>}
+    {safeApprovalText(approval.verification) && <Text>Verification: {safeApprovalText(approval.verification)}</Text>}
+    {safeApprovalText(approval.rollback) && <Text>Rollback: {safeApprovalText(approval.rollback)}</Text>}
     <Text>Decision persisted: {approval.decision_status}</Text>
     <Text>Downstream: {approval.downstream_status}</Text>
     {hotkeysActive && <Text color="gray">A approve, R reject, D diff</Text>}

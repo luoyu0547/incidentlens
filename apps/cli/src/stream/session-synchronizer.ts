@@ -480,7 +480,7 @@ export class SessionSynchronizer {
       }
       offset += page.length;
     }
-    return messages;
+    return Array.from(new Map(messages.map((message) => [message.message_id, message])).values());
   }
 
   /**
@@ -503,7 +503,7 @@ export class SessionSynchronizer {
       }
       afterSequence = page.next_after_sequence;
     }
-    return events;
+    return Array.from(new Map(events.map((event) => [String(event.event_id ?? `${event.session_id}:${event.sequence}`), event])).values());
   }
 
   /**
