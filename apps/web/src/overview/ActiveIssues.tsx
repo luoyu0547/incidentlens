@@ -33,7 +33,7 @@ export function ActiveIssues({
       <ul>
         {services.map(({ target, service }) => (
           <li key={`${target.target_id}:${service.service_id}`}>
-            <Link to="/services/$serviceId" params={{ serviceId: service.service_id }}>
+            <Link to="/services/$serviceId" params={{ serviceId: service.service_id }} search={{}}>
               {service.service_id}
             </Link>
             <StatusBadge status={service.status} />

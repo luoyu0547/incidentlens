@@ -54,7 +54,6 @@ const serviceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/services/$serviceId',
   component: ServicePage,
-  validateSearch: (search: Record<string, unknown>) => search,
   staticData: { title: ROUTE_TITLES['/services/$serviceId'] },
 });
 

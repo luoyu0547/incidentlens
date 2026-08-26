@@ -28,7 +28,7 @@ export function ServicePage() {
         serviceId={service.service_id}
         targetId={service.target_ids[0] ?? ''}
         initialSearch={normalizeLogRouteSearch(routeSearch)}
-        onSearchChange={(search) => void navigate({ search: () => search })}
+        onSearchChange={(search) => void navigate({ search: () => search as never })}
       />
     </div>
   );

@@ -39,7 +39,7 @@ export function ServiceStatusTable({ rows }: { rows: readonly ServiceRow[] }) {
         {rows.map(({ target, service }) => (
           <tr key={`${target.target_id}:${service.service_id}`}>
             <td>
-              <Link to="/services/$serviceId" params={{ serviceId: service.service_id }}>
+              <Link to="/services/$serviceId" params={{ serviceId: service.service_id }} search={{}}>
                 {service.service_id}
               </Link>
             </td>
