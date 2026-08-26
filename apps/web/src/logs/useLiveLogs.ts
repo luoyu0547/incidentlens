@@ -42,6 +42,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
     let disposed = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let recovering = false;
+    let socketGeneration = 0;
     const wsFactory = options.webSocketFactory ?? ((url: string) => new WebSocket(url));
     const initialQuery = query();
     const socketUrl = `${window.location.origin.replace(/^http/, 'ws')}/ws/v1/logs`;
@@ -72,7 +73,9 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
         } else if (!skipBackfill) await backfill();
         if (disposed) return;
         setStatus('connecting');
-        const ws = wsFactory(socketUrl); socketRef.current = ws;
+        const ws = wsFactory(socketUrl);
+        const currentSocketGeneration = ++socketGeneration;
+        socketRef.current = ws;
         const send = (payload: string) => {
           const command = JSON.parse(payload) as { action?: string };
           assertReadOnlyLogAction(command.action ?? '');
@@ -102,7 +105,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
           } catch (e) { setError(e instanceof Error ? e : new Error('Invalid log stream event')); setStatus('error'); }
         };
         ws.onclose = () => {
-          if (disposed || recovering) return;
+          if (disposed || recovering || currentSocketGeneration !== socketGeneration) return;
           socketRef.current = null;
           if (retries.current >= maxRetries) {
             setError(new Error('Log stream retry limit exceeded')); setStatus('error'); return;
@@ -114,7 +117,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
       } catch (e) { setError(e instanceof Error ? e : new Error('Unable to connect to log stream')); setStatus('error'); }
     };
     void connect(true);
-    return () => { disposed = true; if (retryTimer) clearTimeout(retryTimer); closeSocket(); };
+    return () => { disposed = true; socketGeneration += 1; if (retryTimer) clearTimeout(retryTimer); closeSocket(); };
   }, [serviceId, search, query, append, closeSocket, options.webSocketFactory, maxRetries, backoffMs]);
 
   const pause = useCallback(() => { pausedRef.current = true; const command = serializeLogPause(); assertReadOnlyLogAction(command.action); socketRef.current?.send(JSON.stringify(command)); setStatus('paused'); }, []);
