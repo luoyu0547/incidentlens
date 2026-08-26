@@ -71,24 +71,26 @@ test.describe('日志流恢复', () => {
     expect(historyRequests[1].searchParams.get('before')).toBeNull();
   });
 
-  test('slow consumer backpressure 后客户端 ack 并保持只读恢复协议', async ({ page }) => {
+  test('slow consumer backpressure 后客户端为服务器请求单独 ack', async ({ page }) => {
     const frames: Record<string, unknown>[] = [];
+    let releaseSlowConsumer!: () => void;
+    const slowConsumerReleased = new Promise<void>((resolve) => { releaseSlowConsumer = resolve; });
     await installCommonRoutes(page);
     await page.route('**/api/v1/services/svc-web/logs**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(logPage([log(10)], null)) }));
     await installLogSocket(page, (message, socket) => {
       if (message.action === 'subscribe') {
-        socket.send(JSON.stringify(logEvent('log.record', cursors[10], log(10, 'acknowledged'))));
-        socket.send(JSON.stringify(logEvent('stream.slow_consumer', cursors[10], { action: 'ack' })));
         socket.send(JSON.stringify(logEvent('log.subscribed', cursors[10], { service_id: ids.service })));
+        void slowConsumerReleased.then(() => socket.send(JSON.stringify(logEvent('stream.slow_consumer', cursors[10], { action: 'ack' }))));
       }
     });
     page.on('websocket', (socket) => socket.on('framesent', (frame) => {
       try { frames.push(JSON.parse(String(frame)) as Record<string, unknown>); } catch { /* ignore */ }
     }));
     await page.goto(`/services/${ids.service}?mode=live`);
-    await expect(page.getByText('acknowledged')).toBeVisible();
     await expect(page.getByText('日志流已连接')).toBeVisible();
-    await expect.poll(() => frames.some((frame) => frame.action === 'ack' && frame.cursor === cursors[10])).toBe(true);
+    frames.length = 0;
+    releaseSlowConsumer();
+    await expect.poll(() => frames).toEqual([{ action: 'ack', cursor: cursors[10] }]);
     expect(frames.every((frame) => ['subscribe', 'ack', 'pause', 'resume', 'update'].includes(String(frame.action)))).toBe(true);
   });
 });

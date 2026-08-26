@@ -97,6 +97,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
             const parsed = parseLogStreamEvent(JSON.parse(String(message.data)));
             if ('kind' in parsed) return;
             if (parsed.event_type === 'log.record') { const record = parsed.payload as LogRecordView; append(record); if (parsed.cursor) { cursorRef.current = parsed.cursor; setLastCursor(parsed.cursor); send(JSON.stringify(serializeLogAck(parsed.cursor))); } }
+            else if (parsed.event_type === 'stream.slow_consumer' && parsed.payload?.action === 'ack' && parsed.cursor) send(JSON.stringify(serializeLogAck(parsed.cursor)))
             else if (parsed.event_type === 'log.subscribed') setStatus(pausedRef.current ? 'paused' : 'live');
             else if (parsed.event_type === 'stream.gap') {
               recovering = true;
