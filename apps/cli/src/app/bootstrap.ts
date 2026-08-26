@@ -35,7 +35,9 @@ export async function bootstrap(
     // 2. Get authentication token
     const token = await deps.tokenStore.get('default');
 
-    if (!token) {
+    const tokenValue = typeof token === 'string' ? token : undefined;
+
+    if (!tokenValue) {
       dispatch({ type: 'bootstrap_complete', state: 'authentication-required' });
       return { bootstrap: 'authentication-required' };
     }
@@ -76,6 +78,31 @@ export async function bootstrap(
         const session = await deps.api.getSession(profile.lastSessionId);
         if (session) {
           dispatch({ type: 'set_session', session });
+          const [messages, approvals, events] = await Promise.all([
+            deps.api.listMessages(session.session_id, { limit: 500, offset: 0 }),
+            deps.api.listApprovals({ sessionId: session.session_id, status: 'pending', limit: 500 }),
+            deps.api.listEvents({ sessionId: session.session_id, afterSequence: 0, limit: 500 }),
+          ]);
+          const sequence = events.items.reduce(
+            (latest, event) => Math.max(latest, event.sequence ?? 0),
+            profile?.lastSequenceBySession[session.session_id] ?? 0,
+          );
+          dispatch({
+            type: 'gap_snapshot',
+            snapshot: {
+              messages: messages.map((message) => ({
+                kind: 'text' as const,
+                messageId: message.message_id,
+                blockId: message.message_id,
+                content: message.content,
+              })),
+              operations: {},
+              approvals: Object.fromEntries(
+                approvals.items.map((approval) => [approval.approval_id, approval]),
+              ),
+              sequence,
+            },
+          });
         }
       } catch {
         // Session load failed, continue without session

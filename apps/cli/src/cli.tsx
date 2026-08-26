@@ -11,6 +11,8 @@ import { join } from 'node:path';
 import { FileConfigStore } from './config/file-config-store.js';
 import { KeyringTokenStore } from './auth/keyring-token-store.js';
 import { ControlPlaneApi } from './api/control-plane-api.js';
+import { WsEventStream } from './stream/ws-event-stream.js';
+import { App } from './app/App.js';
 
 // Check Node version
 const nodeVersion = process.version;
@@ -36,10 +38,23 @@ const api = new ControlPlaneApi({
   token: process.env['INCIDENTLENS_TOKEN'],
 });
 
-// Simple placeholder component for Task 3-4 verification
-function IncidentLens() {
-  return React.createElement('ink-text', null, 'IncidentLens CLI - Task 3-4 Complete');
-}
+const eventStream = new WsEventStream({
+  baseUrl: process.env['INCIDENTLENS_API_URL'] ?? 'http://localhost:8000',
+  token: process.env['INCIDENTLENS_TOKEN'] ?? '',
+});
 
-// Render app
-render(React.createElement(IncidentLens));
+// Render app. Shutdown aborts the stream through App's effect cleanup and
+// intentionally does not call the server cancel endpoint.
+render(
+  React.createElement(App, {
+    dependencies: {
+      api,
+      configStore,
+      tokenStore,
+      eventStream: eventStream as never,
+      now: () => new Date(),
+      exit: () => undefined,
+    },
+  }),
+);
+

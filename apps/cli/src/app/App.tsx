@@ -37,6 +37,7 @@ import { StatusLine } from '../ui/StatusLine.js';
 import { CommandPalette } from '../ui/CommandPalette.js';
 import { TargetWizard, RemoveTargetPrompt } from '../ui/TargetWizard.js';
 import { SessionPicker } from '../ui/SessionPicker.js';
+import { SessionSynchronizer } from '../stream/session-synchronizer.js';
 
 interface AppProps {
   readonly dependencies: AppDependencies;
@@ -98,6 +99,43 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
   // Keep the session controller's view of the active target/session in
   // sync with the reducer on every render.
   sessionController.sync(state.target, state.session);
+
+  // A stream is opened only after bootstrap has produced an authoritative
+  // session snapshot. Aborting this controller is a clean client shutdown;
+  // it never issues a server cancellation.
+  const synchronizerRef = useRef<SessionSynchronizer | undefined>(undefined);
+  useEffect(() => {
+    if (state.bootstrap !== 'ready' || !state.session) {
+      return;
+    }
+    const synchronizer = new SessionSynchronizer({
+      api: deps.api,
+      configStore: deps.configStore,
+      profileName: 'default',
+      eventStream: deps.eventStream as never,
+      host: {
+        dispatch,
+        onCursorAdvance: () => {
+          // Cursor persistence is owned by the synchronizer and follows
+          // reducer dispatch for every accepted event.
+        },
+      },
+    });
+    synchronizerRef.current = synchronizer;
+    const controller = new AbortController();
+    void deps.configStore.load('default').then((profile) => {
+      if (controller.signal.aborted) return;
+      synchronizer.setInitialCursor(
+        state.session!.session_id,
+        profile?.lastSequenceBySession[state.session!.session_id] ?? state.stream.lastSequence,
+      );
+      void synchronizer.start(controller.signal);
+    });
+    return () => {
+      controller.abort();
+      synchronizerRef.current = undefined;
+    };
+  }, [state.bootstrap, state.session?.session_id, deps, dispatch]);
 
   // Load sessions when the picker opens.
   useEffect(() => {
