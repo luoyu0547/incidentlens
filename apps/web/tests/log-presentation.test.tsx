@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { presentLogBody, presentationText } from '../src/logs/log-presentation';
 import { highlightSegments } from '../src/shared/highlight';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { StructuredJson } from '../src/logs/StructuredJson';
 import { StackTrace } from '../src/logs/StackTrace';
 import type { LogRecordView } from '@incidentlens/protocol';
@@ -26,7 +26,7 @@ describe('safe log presentation', () => {
     expect(screen.getByText('<script>')).toBeInTheDocument();
     const buttons = screen.getAllByRole('button');
     expect(buttons.length).toBeGreaterThan(1);
-    buttons[0]?.click();
+    fireEvent.click(buttons[0]!);
     expect(screen.queryByText('<script>')).not.toBeInTheDocument();
   });
   it('preserves stack order and whitespace as text', () => {

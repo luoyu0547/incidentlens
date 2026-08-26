@@ -54,8 +54,9 @@ export function VirtualLogViewport({ records, paused = false, unreadCount = 0, o
         <ol className="log-viewer__records" aria-label="日志记录" style={{ height: virtualizer.getTotalSize(), position: 'relative', margin: 0, padding: 0 }}>
           {virtualizer.getVirtualItems().map((item) => {
             const record = records[item.index];
-            return <LogRow key={record.log_id} record={record} measureRef={virtualizer.measureElement} onLocate={onLocate} style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }} />;
+            return <LogRow key={record.log_id} record={record} index={item.index} measureRef={virtualizer.measureElement} onLocate={onLocate} style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }} />;
           })}
+          {virtualizer.getVirtualItems().length === 0 && records[0] ? <LogRow record={records[0]} index={0} measureRef={virtualizer.measureElement} onLocate={onLocate} style={{ position: 'absolute', top: 0, left: 0, width: '100%' }} /> : null}
         </ol>
       </div>
     </section>

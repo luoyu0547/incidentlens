@@ -22,6 +22,8 @@ export interface UseLogAnchorOptions {
   readonly onRecords?: (records: readonly LogRecordView[]) => void;
   readonly onExpired?: (locator: LogLocator) => void;
   readonly scrollTo?: (logId: string) => void;
+  /** Allows router-integrated callers and tests to handle a service mismatch. */
+  readonly navigate?: (url: string) => void;
 }
 
 export function logLocatorUrl(locator: LogLocator): string {
@@ -59,7 +61,7 @@ function mergeRecords(records: readonly LogRecordView[], additions: readonly Log
 }
 
 export function useLogAnchor(options: UseLogAnchorOptions) {
-  const { locator, currentService, records = [], fetchContext, onRecords, onExpired, scrollTo } = options;
+  const { locator, currentService, records = [], fetchContext, onRecords, onExpired, scrollTo, navigate = (target) => window.location.assign(target) } = options;
   const [loading, setLoading] = useState(false);
   const [expired, setExpired] = useState(false);
   const anchorId = locator?.log_id ?? undefined;
@@ -73,11 +75,11 @@ export function useLogAnchor(options: UseLogAnchorOptions) {
     try {
       // A service mismatch must be handled before any query/context request.
       if (currentService !== locator.service) {
-        window.location.assign(url ?? logLocatorUrl(locator));
+        navigate(url ?? logLocatorUrl(locator));
         return;
       }
       if (records.some((record) => record.log_id === anchorId)) {
-        requestAnimationFrame(() => scrollTo?.(anchorId));
+        scrollTo?.(anchorId);
         return;
       }
       if (!fetchContext) return;
@@ -86,9 +88,7 @@ export function useLogAnchor(options: UseLogAnchorOptions) {
       const context = await fetchContext(locator);
       const merged = mergeRecords(records, context);
       onRecords?.(merged);
-      if (merged.some((record) => record.log_id === anchorId)) {
-        requestAnimationFrame(() => scrollTo?.(anchorId));
-      }
+      scrollTo?.(anchorId);
     } catch (error) {
       if (isExpired(error)) {
         setExpired(true);
@@ -98,7 +98,7 @@ export function useLogAnchor(options: UseLogAnchorOptions) {
       setLoading(false);
       locating.current = false;
     }
-  }, [locator, anchorId, currentService, url, records, fetchContext, onRecords, onExpired, scrollTo]);
+  }, [locator, anchorId, currentService, url, records, fetchContext, onRecords, onExpired, scrollTo, navigate]);
 
   return { anchorId, url, present, loading, expired, locate };
 }

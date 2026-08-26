@@ -16,7 +16,17 @@ const base: IssueView = {
 };
 
 beforeEach(() => server.resetHandlers());
-function issueResponse(issue: IssueView = base): void { server.use(http.get(/api\/v1\/issues/, ({ request }) => { const url = new URL(request.url); expect(url.searchParams.get('status')).toBe('resolved'); expect(url.searchParams.get('service_id')).toBe('svc-web'); return HttpResponse.json({ has_more: false, next_cursor: null, items: [issue] } satisfies IssuePage); }), http.get(/api\/v1\/issues/, () => HttpResponse.json(issue))); }
+function issueResponse(issue: IssueView = base): void {
+  server.use(
+    http.get(/\/api\/v1\/issues$/, ({ request }) => {
+      const url = new URL(request.url);
+      expect(url.searchParams.get('status')).toBe('resolved');
+      expect(url.searchParams.get('service_id')).toBe('svc-web');
+      return HttpResponse.json({ has_more: false, next_cursor: null, items: [issue] } satisfies IssuePage);
+    }),
+    http.get(/\/api\/v1\/issues\/[^/]+$/, () => HttpResponse.json(issue)),
+  );
+}
 
 describe('Issues reads', () => {
   it('forwards URL filters and renders projected list fields', async () => {

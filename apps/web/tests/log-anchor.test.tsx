@@ -41,13 +41,12 @@ describe('log locator', () => {
     expect(fetchContext).toHaveBeenCalledTimes(1);
   });
   it('navigates to the service before querying on mismatch', async () => {
-    const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => undefined);
+    const navigate = vi.fn();
     const fetchContext = vi.fn();
-    const { result } = renderHook(() => useLogAnchor({ locator, currentService: 'other', fetchContext }));
+    const { result } = renderHook(() => useLogAnchor({ locator, currentService: 'other', fetchContext, navigate }));
     await act(async () => { await result.current.locate(); });
-    expect(assign).toHaveBeenCalledWith(logLocatorUrl(locator));
+    expect(navigate).toHaveBeenCalledWith(logLocatorUrl(locator));
     expect(fetchContext).not.toHaveBeenCalled();
-    assign.mockRestore();
   });
 
   it('falls back when the opaque cursor expires', async () => {

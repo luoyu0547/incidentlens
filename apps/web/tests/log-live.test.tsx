@@ -10,7 +10,8 @@ class FakeSocket {
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
   sent: string[] = [];
-  constructor() { FakeSocket.latest = this; queueMicrotask(() => this.onopen?.()); }
+  constructor() { FakeSocket.latest = this; }
+  open() { this.onopen?.(); }
   send(value: string) { this.sent.push(value); }
   close() { this.onclose?.(); }
   emit(value: unknown) { this.onmessage?.({ data: JSON.stringify(value) }); }
@@ -25,6 +26,7 @@ describe('useLiveLogs', () => {
   it('backfills before connecting, enters live only after subscribed, and appends records', async () => {
     render(<Probe />);
     expect(await screen.findByTestId('records')).toHaveTextContent('log-1');
+    FakeSocket.latest!.open();
     await screen.findByText('live');
     expect(JSON.parse(FakeSocket.latest!.sent[0])).toMatchObject({ action: 'subscribe', service_id: 'svc-web', cursor: 'cursor-1' });
     await act(async () => FakeSocket.latest!.emit({ schema_version: 1, event_type: 'log.record', occurred_at: '2026-08-26T00:00:01Z', cursor: 'cursor-2', payload: { log_id: 'log-2', cursor: 'cursor-2', message: 'new', occurred_at: '2026-08-26T00:00:01Z', severity: 'info' } }));

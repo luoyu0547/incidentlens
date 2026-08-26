@@ -23,7 +23,9 @@ import {
 const API_ROOT = '/api/v1';
 
 export const handlers = [
-  http.get(`${API_ROOT}/overview`, () => HttpResponse.json(overviewFixture)),
+  http.get('/events/v1/workspace', () => new HttpResponse(null, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })),
+
+
 
   http.get(`${API_ROOT}/targets`, () => HttpResponse.json(targetsFixture)),
 

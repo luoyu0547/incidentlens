@@ -7,15 +7,16 @@ import { StructuredJson } from './StructuredJson';
 
 export interface LogRowProps {
   readonly record: LogRecordView;
+  readonly index?: number;
   readonly measureRef?: (element: HTMLElement | null) => void;
   readonly style?: CSSProperties;
   readonly onLocate?: (logId: string) => void;
 }
 
-export function LogRow({ record, measureRef, style, onLocate }: LogRowProps) {
+export function LogRow({ record, index, measureRef, style, onLocate }: LogRowProps) {
   const body = presentLogBody(record);
   return (
-    <li ref={measureRef} data-log-id={record.log_id} style={{ listStyle: 'none', ...style }}>
+    <li ref={measureRef} data-index={index} data-log-id={record.log_id} style={{ listStyle: 'none', ...style }}>
       <time dateTime={record.occurred_at}>{record.occurred_at}</time>
       <strong className={`log-viewer__severity log-viewer__severity--${record.severity}`}>{record.severity}</strong>
       <span>{body.kind === 'json' ? <details><summary>{body.summary}</summary><StructuredJson value={body.value} /></details> : body.kind === 'stack' ? <details><summary>{body.headline}</summary><StackTrace headline={body.headline} lines={body.lines} /></details> : body.text}</span>
