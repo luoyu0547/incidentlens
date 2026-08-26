@@ -21,9 +21,9 @@ import { AppShell } from './app/AppShell';
 import { NotFoundPage } from './app/NotFoundPage';
 import { OverviewPage } from './routes/OverviewPage';
 import { ServicePage } from './app/ServicePage';
-import { IssuesPage } from './app/IssuesPage';
-import { IssueDetailPage } from './app/IssueDetailPage';
-import { InvestigationPage } from './app/InvestigationPage';
+import { IssuesPage } from './routes/IssuesPage';
+import { IssueDetailPage } from './routes/IssueDetailPage';
+import { InvestigationPage } from './routes/InvestigationPage';
 import { RoutePending } from './app/RoutePending';
 import { RouteError } from './app/RouteError';
 

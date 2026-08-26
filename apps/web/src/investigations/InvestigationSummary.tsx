@@ -1,0 +1,2 @@
+import type { InvestigationSummaryView } from '@incidentlens/protocol';
+export function InvestigationSummary({ investigation }: { investigation: InvestigationSummaryView }) { return <section aria-label="调查摘要"><h2>调查摘要</h2><p>状态：{investigation.status}</p><p>症状：{investigation.symptom}</p><p>服务：{investigation.service_id}；目标：{investigation.target_id}</p>{investigation.pending_approval_ids?.length ? <p>需要在 CLI 中处理待审批事项。</p> : null}</section>; }
