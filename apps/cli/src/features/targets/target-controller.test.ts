@@ -380,6 +380,35 @@ describe('TargetController', () => {
       expect(result.status).toBe('uncertain');
       expect(onResult).toHaveBeenCalledWith(result);
     });
+
+    it('surfaces a getOperation network failure as a safe error', async () => {
+      const onResult = vi.fn();
+      const onError = vi.fn();
+
+      const result = await trackTargetTest(
+        vi.fn().mockRejectedValue(new Error('upstream unavailable')),
+        'op-1',
+        onResult,
+        { pollIntervalMs: 1, maxPolls: 3, onError }
+      );
+
+      expect(result.status).toBe('failed');
+      expect(result.error).toContain('upstream unavailable');
+      expect(onError).toHaveBeenCalledWith(expect.stringContaining('upstream unavailable'));
+      expect(onResult).toHaveBeenCalledWith(result);
+    });
+
+    it('passes the AbortSignal through to getOperation', async () => {
+      const getOperation = vi.fn().mockResolvedValue(makeOperation({ status: 'succeeded' }));
+      const controllerAbort = new AbortController();
+
+      await trackTargetTest(getOperation, 'op-1', vi.fn(), {
+        pollIntervalMs: 1,
+        signal: controllerAbort.signal,
+      });
+
+      expect(getOperation).toHaveBeenCalledWith('op-1', controllerAbort.signal);
+    });
   });
 
   describe('remove (deletion)', () => {

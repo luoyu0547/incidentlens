@@ -87,7 +87,7 @@ export function reducer(state: CliState, action: CliAction): CliState {
           {
             kind: 'system',
             content: action.content,
-            timestamp: action.timestamp ?? new Date(),
+            timestamp: action.timestamp,
           },
         ],
       };

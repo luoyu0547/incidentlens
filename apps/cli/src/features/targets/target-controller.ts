@@ -40,6 +40,7 @@ export interface TargetController {
   update(id: string, input: TargetPatch): Promise<TargetView>;
   test(id: string): Promise<OperationAccepted>;
   remove(id: string): Promise<void>;
+  getOperation(id: string, signal?: AbortSignal): Promise<OperationView>;
 }
 
 /**
@@ -137,32 +138,52 @@ export interface TargetTestProgress {
  * server's safe result (verified host-key source/fingerprint or a safe
  * failure). Never reconstructs or displays credentials.
  *
+ * Catches errors from `getOperation` (network / server failures) and
+ * reports them as a safe failure so the user always sees feedback.
+ *
  * @param getOperation - Resolves an operation by id.
  * @param operationId - The operation accepted by `/targets/{id}/test`.
- * @param onResult - Called once with the terminal progress.
- * @param options - Poll tuning (mainly for tests).
+ * @param onResult - Called once with the terminal progress (or error).
+ * @param options - Poll tuning and optional AbortSignal.
+ * @param options.onError - Optional callback for safe error display.
  */
 export async function trackTargetTest(
   getOperation: (operationId: string, signal?: AbortSignal) => Promise<OperationView>,
   operationId: string,
   onResult: (progress: TargetTestProgress) => void,
-  options: { pollIntervalMs?: number; maxPolls?: number } = {}
+  options: {
+    pollIntervalMs?: number;
+    maxPolls?: number;
+    signal?: AbortSignal;
+    onError?: (error: string) => void;
+  } = {}
 ): Promise<TargetTestProgress> {
   const pollIntervalMs = options.pollIntervalMs ?? 400;
   const maxPolls = options.maxPolls ?? 150;
+  const errorCallback = options.onError;
 
   let latest: OperationView | undefined;
   let reachedTerminal = false;
-  for (let attempt = 0; attempt < maxPolls; attempt += 1) {
-    const operation = await getOperation(operationId);
-    latest = operation;
+  let apiError: string | undefined;
 
-    if (
-      operation.status === 'succeeded' ||
-      operation.status === 'failed' ||
-      operation.status === 'cancelled'
-    ) {
-      reachedTerminal = true;
+  for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+    try {
+      const operation = await getOperation(operationId, options.signal);
+      latest = operation;
+
+      if (
+        operation.status === 'succeeded' ||
+        operation.status === 'failed' ||
+        operation.status === 'cancelled'
+      ) {
+        reachedTerminal = true;
+        break;
+      }
+    } catch (error) {
+      // Network / server failure — report as safe failure and stop.
+      const message =
+        error instanceof Error ? error.message : 'Operation polling failed';
+      apiError = message;
       break;
     }
 
@@ -170,11 +191,15 @@ export async function trackTargetTest(
   }
 
   const progress: TargetTestProgress = {
-    status: reachedTerminal ? (latest?.status ?? 'uncertain') : 'uncertain',
+    status: apiError ? 'failed' : reachedTerminal ? (latest?.status ?? 'uncertain') : 'uncertain',
     summary: latest?.progress_summary ?? null,
-    error: latest?.error_message ?? null,
+    error: apiError ?? (latest?.error_message ?? null),
     operationId,
   };
+
+  if (apiError) {
+    errorCallback?.(apiError);
+  }
 
   onResult(progress);
   return progress;

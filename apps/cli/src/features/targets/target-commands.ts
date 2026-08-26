@@ -125,6 +125,8 @@ export function createTargetCommands(runtime: TargetCommandRuntime): SlashComman
         const accepted = await runtime.controller.test(target.target_id);
 
         // Track the returned Operation and report only the safe result.
+        // Errors from getOperation (network/server failures) are caught
+        // inside trackTargetTest and surfaced via onError → runtime.error.
         void trackTargetTest(
           (operationId, signal) => runtime.controller.getOperation(operationId, signal),
           accepted.operation_id,
@@ -140,7 +142,8 @@ export function createTargetCommands(runtime: TargetCommandRuntime): SlashComman
             } else {
               runtime.status(`Target test ${progress.status} (operation ${accepted.operation_id})`);
             }
-          }
+          },
+          { onError: (message) => runtime.error(`Target test error: ${message}`) }
         );
 
         return {

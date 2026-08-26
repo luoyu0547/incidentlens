@@ -125,5 +125,5 @@ export type CliAction =
   | { type: 'set_stream_status'; status: Partial<StreamStatus> }
   | { type: 'set_input'; input: Partial<InputState> }
   | { type: 'set_overlay'; overlay: OverlayState }
-  | { type: 'system_message'; content: string; timestamp?: Date }
+  | { type: 'system_message'; content: string; timestamp: Date }
   | { type: 'clear_messages' };
