@@ -98,6 +98,7 @@ class CursorLogStream:
             return -1
         snapshot = self.store.latest_product_sequence()
         current = after
+        self.last_sequence = max(self.last_sequence, after)
         while True:
             records, more = self._records(after=current, snapshot=snapshot)
             for record in records:
@@ -124,18 +125,18 @@ class CursorLogStream:
         close: Callable[..., Awaitable[Any]],
         initial: dict[str, Any],
     ) -> None:
-        await send(
-            envelope(
-                "log.subscribed",
-                {"service_id": self.service_id},
-                cursor=encode_log_cursor(self.last_sequence),
-            )
-        )
         async with self.subscriptions.subscribe_all_records() as queue:
             high_water = await self.backlog(send, initial.get("cursor"))
             if high_water < 0:
                 await close(1012, "log history no longer available")
                 return
+            await send(
+                envelope(
+                    "log.subscribed",
+                    {"service_id": self.service_id},
+                    cursor=encode_log_cursor(self.last_sequence),
+                )
+            )
             while True:
                 queue_task = asyncio.create_task(queue.get())
                 control_task = asyncio.create_task(receive())

@@ -60,7 +60,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
       if (c) { cursorRef.current = c; setLastCursor(c); }
       return fresh;
     };
-    const connect = async (initial = false) => {
+    const connect = async (initial = false, skipBackfill = false) => {
       if (disposed) return;
       try {
         if (initial) {
@@ -68,7 +68,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
           if (disposed) return;
           setRecords(page.items); const c = page.items.at(-1)?.cursor ?? page.snapshot_cursor;
           cursorRef.current = c; setLastCursor(c);
-        } else await backfill();
+        } else if (!skipBackfill) await backfill();
         if (disposed) return;
         setStatus('connecting');
         const ws = wsFactory(socketUrl); socketRef.current = ws;
@@ -84,7 +84,10 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
             if ('kind' in parsed) return;
             if (parsed.event_type === 'log.record') { const record = parsed.payload as LogRecordView; append(record); if (parsed.cursor) { cursorRef.current = parsed.cursor; setLastCursor(parsed.cursor); send(JSON.stringify(serializeLogAck(parsed.cursor))); } }
             else if (parsed.event_type === 'log.subscribed') setStatus(pausedRef.current ? 'paused' : 'live');
-            else if (parsed.event_type === 'stream.gap') { closeSocket(); void backfill(true).then(() => { if (!disposed) void connect(false); }); }
+            else if (parsed.event_type === 'stream.gap') {
+              closeSocket();
+              void backfill(true).then(() => { if (!disposed) void connect(false, true); });
+            }
           } catch (e) { setError(e instanceof Error ? e : new Error('Invalid log stream event')); setStatus('error'); }
         };
         ws.onclose = () => { if (disposed) return; socketRef.current = null; if (retries.current >= maxRetries) { setError(new Error('Log stream retry limit exceeded')); setStatus('error'); return; } retries.current += 1; setStatus('reconnecting'); retryTimer = setTimeout(() => void connect(false), backoffMs * 2 ** (retries.current - 1)); };

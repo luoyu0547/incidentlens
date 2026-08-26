@@ -25,7 +25,7 @@ export type WorkspaceResourceEvent = z.infer<typeof WorkspaceResourceEventSchema
 export type WorkspaceGapEvent = z.infer<typeof WorkspaceGapEventSchema>;
 
 export interface WorkspaceEventConnection { close(): void; }
-export type WorkspaceEventStatus = 'connecting' | 'live' | 'reconnecting' | 'closed';
+export type WorkspaceEventStatus = 'connecting' | 'live' | 'reconnecting' | 'authentication-error' | 'closed';
 
 export interface WorkspaceEventOptions {
   url?: string;
@@ -68,10 +68,11 @@ export function connectWorkspaceEvents(options: WorkspaceEventOptions): Workspac
     source.addEventListener('resource.changed', (event) => handle((event as MessageEvent).data, (event as MessageEvent).lastEventId));
     source.addEventListener('stream.gap', (event) => handle((event as MessageEvent).data, (event as MessageEvent).lastEventId));
     source.onerror = () => {
+      const responseStatus = (source as (EventSource & { status?: number }) | undefined)?.status;
       source?.close(); source = undefined;
       if (closed) return;
-      if (source && (source as EventSource & { status?: number }).status && [401, 403].includes((source as EventSource & { status: number }).status)) {
-        closed = true; options.onStatus('closed'); return;
+      if (responseStatus === 401 || responseStatus === 403) {
+        closed = true; options.onStatus('authentication-error'); return;
       }
       if (retries >= MAX_RETRIES) { closed = true; options.onStatus('closed'); return; }
       const delay = RETRY_BASE_MS * 2 ** retries++;
