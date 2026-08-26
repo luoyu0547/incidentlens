@@ -5,7 +5,7 @@ import base64
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient

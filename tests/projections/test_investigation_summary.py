@@ -25,7 +25,9 @@ from incidentlens_control_plane.investigation.types import (
     UsageCounters,
 )
 from incidentlens_control_plane.logs.types import LogRecord, LogScope, LogSeverity, LogSourceKind
-from incidentlens_control_plane.projections.investigations import InvestigationSummaryProjectionService
+from incidentlens_control_plane.projections.investigations import (
+    InvestigationSummaryProjectionService,
+)
 from incidentlens_control_plane.remote_ops.fakes import FakeTransportFactory
 from incidentlens_control_plane.runtime import build_runtime
 

@@ -24,7 +24,10 @@ def _is_spa_path(path: str) -> bool:
     normalized = path.strip("/")
     if not normalized or normalized in {"issues"}:
         return True
-    if any(normalized == prefix or normalized.startswith(f"{prefix}/") for prefix in _RESERVED_PREFIXES):
+    if any(
+        normalized == prefix or normalized.startswith(f"{prefix}/")
+        for prefix in _RESERVED_PREFIXES
+    ):
         return False
     if "." in normalized.rsplit("/", 1)[-1]:
         return False

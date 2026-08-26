@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
 from incidentlens_control_plane.api.ws.auth import resolve_ws_principal
 from incidentlens_control_plane.auth.types import PrincipalScope
 from incidentlens_control_plane.streams.logs import CursorLogStream

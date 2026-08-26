@@ -2,7 +2,6 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
 from incidentlens_control_plane.web_assets import mount_web_assets
 
 

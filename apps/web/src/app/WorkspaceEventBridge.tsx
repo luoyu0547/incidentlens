@@ -13,25 +13,25 @@ export function WorkspaceEventBridge() {
   useEffect(() => {
     const invalidate = (event: WorkspaceResourceEvent) => {
       switch (event.resource_kind) {
-        case 'overview': queryClient.invalidateQueries({ queryKey: queryKeys.overview }); break;
-        case 'target': queryClient.invalidateQueries({ queryKey: queryKeys.targets }); break;
+        case 'overview': void queryClient.invalidateQueries({ queryKey: queryKeys.overview }); break;
+        case 'target': void queryClient.invalidateQueries({ queryKey: queryKeys.targets }); break;
         case 'service':
-          if (event.resource_id) queryClient.invalidateQueries({ queryKey: queryKeys.service(event.resource_id) });
-          if (event.target_id) queryClient.invalidateQueries({ queryKey: queryKeys.targetServices(event.target_id) });
+          if (event.resource_id) void queryClient.invalidateQueries({ queryKey: queryKeys.service(event.resource_id) });
+          if (event.target_id) void queryClient.invalidateQueries({ queryKey: queryKeys.targetServices(event.target_id) });
           break;
         case 'issue':
-          if (event.resource_id) queryClient.invalidateQueries({ queryKey: queryKeys.issue(event.resource_id) });
-          queryClient.invalidateQueries({ queryKey: ['issues'] }); break;
+          if (event.resource_id) void queryClient.invalidateQueries({ queryKey: queryKeys.issue(event.resource_id) });
+          void queryClient.invalidateQueries({ queryKey: ['issues'] }); break;
         case 'investigation':
-          if (event.resource_id) queryClient.invalidateQueries({ queryKey: queryKeys.investigation(event.resource_id) });
-          queryClient.invalidateQueries({ queryKey: ['investigations'] }); break;
+          if (event.resource_id) void queryClient.invalidateQueries({ queryKey: queryKeys.investigation(event.resource_id) });
+          void queryClient.invalidateQueries({ queryKey: ['investigations'] }); break;
         case 'evidence':
-          if (event.resource_id) queryClient.invalidateQueries({ queryKey: queryKeys.evidence(event.resource_id) }); break;
+          if (event.resource_id) void queryClient.invalidateQueries({ queryKey: queryKeys.evidence(event.resource_id) }); break;
       }
     };
     const connection = connectWorkspaceEvents({
       onResourceChanged: invalidate,
-      onGap: () => queryClient.invalidateQueries(),
+      onGap: () => { void queryClient.invalidateQueries(); },
       onStatus: setStatus,
     });
     return () => connection.close();

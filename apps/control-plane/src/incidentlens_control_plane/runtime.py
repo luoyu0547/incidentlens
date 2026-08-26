@@ -77,12 +77,12 @@ from incidentlens_control_plane.project_memory.openai_adapter import (
 from incidentlens_control_plane.project_memory.service import ProjectMemoryService
 from incidentlens_control_plane.project_memory.store import ProjectMemoryStore
 from incidentlens_control_plane.project_registry.store import ProjectRegistryStore
-from incidentlens_control_plane.projections.overview import OverviewProjectionService
 from incidentlens_control_plane.projections.evidence import EvidenceProjectionService
 from incidentlens_control_plane.projections.investigations import (
     InvestigationSummaryProjectionService,
 )
 from incidentlens_control_plane.projections.issues import IssueProjectionService
+from incidentlens_control_plane.projections.overview import OverviewProjectionService
 from incidentlens_control_plane.projections.services import ServiceProjectionService
 from incidentlens_control_plane.remote_ops.asyncssh_adapter import (
     AsyncSshTransportFactory,
