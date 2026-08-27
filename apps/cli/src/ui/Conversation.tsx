@@ -19,7 +19,7 @@ export function Conversation({ messages }: ConversationProps): React.ReactElemen
   // Streaming can briefly create an empty text block before its first delta.
   // Do not render that placeholder as a large empty bordered card.
   const visibleMessages = messages.filter(
-    (item) => item.kind !== 'text' || (typeof item.content === 'string' && item.content.trim().length > 0),
+    (item) => item.kind !== 'text' || isRenderableAgentText(item.content),
   );
 
   if (visibleMessages.length === 0) {
@@ -90,9 +90,37 @@ function ConversationItem({ item }: { item: ConversationItem }): React.ReactElem
 function TextBlockView({ block }: { block: TextBlock }): React.ReactElement {
   return (
     <Box marginBottom={1} paddingLeft={1} borderStyle="single" borderColor={block.finalized ? 'cyan' : 'gray'}>
-      <Text color={block.finalized ? undefined : 'gray'}>{block.content}</Text>
+      <Text color={block.finalized ? undefined : 'gray'}>{formatAgentText(block.content)}</Text>
     </Box>
   );
+}
+
+function isRenderableAgentText(content: unknown): content is string {
+  if (typeof content !== 'string' || content.trim().length === 0) return false;
+  try {
+    const value = JSON.parse(content) as Record<string, unknown>;
+    const empty = Array.isArray(value.conclusions) && value.conclusions.length === 0
+      && Array.isArray(value.hypotheses) && value.hypotheses.length === 0
+      && value.delegation == null && value.stop == null;
+    return !empty;
+  } catch {
+    return true;
+  }
+}
+
+function formatAgentText(content: string): string {
+  try {
+    const value = JSON.parse(content) as Record<string, any>;
+    const summaries = [
+      ...(Array.isArray(value.conclusions) ? value.conclusions.map((item) => item?.summary).filter(Boolean) : []),
+      ...(Array.isArray(value.hypotheses) ? value.hypotheses.map((item) => item?.summary).filter(Boolean) : []),
+      value.stop?.summary,
+    ].filter((item): item is string => typeof item === 'string');
+    if (summaries.length > 0) return summaries.join(' ');
+  } catch {
+    // Non-JSON assistant text is already user-readable.
+  }
+  return content;
 }
 
 /**

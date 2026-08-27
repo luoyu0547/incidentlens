@@ -199,6 +199,10 @@ class RuntimeSettings(BaseModel):
             max_investigation_tool_calls=_environment_int(
                 "INCIDENTLENS_MAX_INVESTIGATION_TOOL_CALLS", 64
             ),
+            max_active_investigations=_environment_int(
+                "INCIDENTLENS_MAX_ACTIVE_INVESTIGATIONS", 4
+            ),
+            max_active_children=_environment_int("INCIDENTLENS_MAX_ACTIVE_CHILDREN", 8),
         )
 
     def default_run_budget(self) -> AgentBudget:
