@@ -20,7 +20,7 @@ export function StatusLine({
   pendingApprovals,
 }: StatusLineProps): React.ReactElement {
   return (
-    <Box marginTop={1} paddingX={1} borderStyle="single" borderColor={streamConnected ? 'green' : 'red'}>
+    <Box marginTop={1} paddingX={1}>
       <Text color={streamConnected ? 'green' : 'red'}>
         {streamConnected ? '●' : '○'}
       </Text>

@@ -26,14 +26,20 @@ export function PromptInput({
   placeholder = 'Type a message or / for commands',
 }: PromptInputProps): React.ReactElement {
   return (
-    <Box>
-      <Text color={focused ? 'blue' : 'gray'} bold>
-        {'> '}
+    <Box
+      marginTop={1}
+      paddingX={1}
+      borderStyle="round"
+      borderColor={focused ? 'magenta' : 'gray'}
+      flexDirection="row"
+    >
+      <Text color={focused ? 'magenta' : 'gray'} bold>
+        {'❯ '}
       </Text>
       {value.length > 0 ? (
-        <Text>{value}</Text>
+        <Text color="white">{value}{focused ? '▌' : ''}</Text>
       ) : (
-        <Text color="gray">{placeholder}</Text>
+        <Text color="gray">{focused ? '▌ ' : ''}{placeholder}</Text>
       )}
     </Box>
   );

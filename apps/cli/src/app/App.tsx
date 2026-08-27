@@ -309,6 +309,28 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
       }
       return;
     }
+
+    // Route the terminal's actual stdin into the visible prompt. Keeping this
+    // here (alongside the global escape handling) means the prompt works in a
+    // real interactive Terminal, not only in component tests.
+    if (key.return) {
+      if (state.input.value.trim().length > 0) {
+        handleSubmit(state.input.value);
+        dispatch({ type: 'set_input', input: { value: '' } });
+      }
+      return;
+    }
+
+    if (key.backspace || key.delete) {
+      if (state.input.value.length > 0) {
+        dispatch({ type: 'set_input', input: { value: state.input.value.slice(0, -1) } });
+      }
+      return;
+    }
+
+    if (input.length > 0 && !key.ctrl && !key.meta) {
+      dispatch({ type: 'set_input', input: { value: state.input.value + input } });
+    }
   });
 
   // Handle input submission
