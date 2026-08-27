@@ -313,9 +313,23 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
     // here (alongside the global escape handling) means the prompt works in a
     // real interactive Terminal, not only in component tests.
     // Ink normally marks Enter as `key.return`, but macOS Terminal and
-    // pseudo-terminals may deliver a raw CR/LF byte without that annotation.
-    // Treat both forms as submit so interactive commands work in a real PTY.
-    if (key.return || input === '\r' || input === '\n') {
+    // pseudo-terminals may deliver a raw CR/LF byte (or a chunk containing
+    // text followed by CR/LF) without that annotation. Split such chunks into
+    // complete submissions so commands cannot accumulate in the prompt.
+    if (input.includes('\r') || input.includes('\n')) {
+      let pending = state.input.value;
+      for (const part of input.split(/\r\n|\r|\n/)) {
+        pending += part;
+        if (pending.trim().length > 0) {
+          handleSubmit(pending);
+          pending = '';
+        }
+      }
+      dispatch({ type: 'set_input', input: { value: pending } });
+      return;
+    }
+
+    if (key.return) {
       if (state.input.value.trim().length > 0) {
         handleSubmit(state.input.value);
         dispatch({ type: 'set_input', input: { value: '' } });
