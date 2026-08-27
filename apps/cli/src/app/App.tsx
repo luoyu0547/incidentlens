@@ -33,7 +33,6 @@ import {
 import type { AgentSessionView } from '@incidentlens/protocol';
 import { Conversation } from '../ui/Conversation.js';
 import { PromptInput } from '../ui/PromptInput.js';
-import { StatusLine } from '../ui/StatusLine.js';
 import { CommandPalette } from '../ui/CommandPalette.js';
 import { TargetWizard, RemoveTargetPrompt } from '../ui/TargetWizard.js';
 import { SessionPicker } from '../ui/SessionPicker.js';
@@ -429,16 +428,23 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
   return (
     <Box flexDirection="column" paddingX={1}>
       {/* Header */}
-      <Box borderStyle="single" borderColor="cyan" paddingX={1}>
-        <Text bold color="cyan">◆ IncidentLens</Text>
-        <Text color="gray">  /  </Text>
-        <Text color={state.target ? 'white' : 'gray'}>{state.target?.name ?? 'No target'}</Text>
-        {state.session && (
-          <>
-            <Text color="gray">  /  </Text>
-            <Text color="white">{state.session.title}</Text>
-          </>
-        )}
+      <Box borderStyle="round" borderColor="cyan" paddingX={1} justifyContent="space-between">
+        <Box>
+          <Text bold color="cyan">◆ IncidentLens</Text>
+          <Text color="gray">  ·  </Text>
+          <Text color={state.target ? 'white' : 'gray'}>
+            {state.target?.name ?? '未选择目标'}
+          </Text>
+          {state.session && (
+            <>
+              <Text color="gray">  ·  </Text>
+              <Text color="white">{state.session.title ?? '未命名会话'}</Text>
+            </>
+          )}
+        </Box>
+        <Text color={state.stream.connected ? 'green' : 'yellow'}>
+          {state.stream.connected ? '● 在线' : '○ 待连接'}
+        </Text>
       </Box>
 
       {/* Conversation */}
@@ -477,13 +483,11 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
         />
       )}
 
-      {/* Status Line */}
-      <StatusLine
-        streamConnected={state.stream.connected}
-        pendingApprovals={
-          Object.values(state.approvals).filter((a) => a.decision_status === 'pending').length
-        }
-      />
+      {Object.values(state.approvals).some((approval) => approval.decision_status === 'pending') && (
+        <Text color="yellow" dimColor>
+          {Object.values(state.approvals).filter((a) => a.decision_status === 'pending').length} pending approval(s)
+        </Text>
+      )}
 
       {/* Command Palette Overlay */}
       {state.overlay.kind === 'command-palette' && (

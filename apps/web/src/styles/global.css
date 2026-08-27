@@ -19,6 +19,7 @@ a:hover { text-decoration: underline; }
 
 /* Shared read-only workspace surfaces. */
 .overview > section,
+.workspace-auth,
 .service-page > section,
 .service-page > .log-viewer,
 .service-header,
@@ -31,8 +32,13 @@ main > section[aria-label] {
 }
 
 main > section[aria-label],
+.workspace-auth,
 .service-page > section,
 .service-page > .log-viewer { padding: var(--space-6); margin-bottom: var(--space-4); }
+
+.workspace-auth { border-left: 4px solid var(--color-warning); }
+.workspace-auth h3 { margin-bottom: var(--space-2); }
+.workspace-auth p { margin: 0; color: var(--color-muted); }
 
 main > section[aria-label] > h3 { border-bottom: 1px solid var(--color-border); padding-bottom: var(--space-3); }
 ul { padding-left: 1.25rem; }

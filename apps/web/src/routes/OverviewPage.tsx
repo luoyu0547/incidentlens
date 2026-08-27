@@ -10,7 +10,7 @@
  * status is conveyed by icon + Chinese text, never color alone.
  */
 import { useQuery } from '@tanstack/react-query';
-import type { OverviewView } from '@incidentlens/protocol';
+import { ReadonlyApiError, type OverviewView } from '@incidentlens/protocol';
 import { overviewQuery } from '../api/queries';
 import { Timestamp } from '../shared/Timestamp';
 import { TargetStatusList } from '../overview/TargetStatusList';
@@ -19,13 +19,21 @@ import { ActiveIssues, type OpenIssueServiceRow } from '../overview/ActiveIssues
 import { RecentResults } from '../overview/RecentResults';
 
 export function OverviewPage() {
-  const { data, isPending, isError } = useQuery(overviewQuery);
+  const { data, isPending, isError, error } = useQuery(overviewQuery);
+  const requiresAuthentication = error instanceof ReadonlyApiError && (error.status === 401 || error.status === 403);
 
   return (
     <div className="overview-page">
       <h2>总览</h2>
       {isPending ? <p>加载中...</p> : null}
-      {isError ? <p role="alert">加载页面时出现问题，请稍后重试。</p> : null}
+      {requiresAuthentication ? (
+        <section className="workspace-auth" aria-label="工作区认证">
+          <h3>需要登录工作区</h3>
+          <p>当前浏览器没有有效的工作区会话。请先完成登录，再刷新此页面。</p>
+        </section>
+      ) : isError ? (
+        <p role="alert">加载页面时出现问题，请稍后重试。</p>
+      ) : null}
       {data ? <OverviewBody data={data} /> : null}
     </div>
   );
