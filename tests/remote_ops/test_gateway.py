@@ -1039,6 +1039,34 @@ async def test_gateway_resolve_service_validates_target_and_service(
 
 
 @pytest.mark.asyncio
+async def test_gateway_resolves_host_for_target_without_discovered_services(
+    project_store, target_registration
+) -> None:
+    """Fresh target-facade projects can start a host-scoped discovery turn."""
+    from incidentlens_control_plane.project_registry.types import ProjectRegistration
+    from incidentlens_control_plane.remote_ops.fakes import FakeTransportFactory
+    from incidentlens_control_plane.remote_ops.gateway import RemoteToolGateway
+    from incidentlens_control_plane.remote_ops.sessions import SessionManager
+
+    project_store.create(
+        ProjectRegistration(
+            project_id="empty-target",
+            display_name="Empty target",
+            targets=(target_registration,),
+            services=(),
+        ),
+        now=datetime(2026, 8, 12, tzinfo=UTC),
+    )
+    gateway = RemoteToolGateway(
+        projects=project_store,
+        sessions=SessionManager(FakeTransportFactory()),
+    )
+
+    service = gateway.resolve_service("empty-target", "dev-a", "host")
+    assert service.compose_service == "host"
+
+
+@pytest.mark.asyncio
 async def test_gateway_container_list_requires_registered_container(
     project_store, target_registration, service_registration
 ) -> None:

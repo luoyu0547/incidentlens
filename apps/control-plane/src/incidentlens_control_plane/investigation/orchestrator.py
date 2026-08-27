@@ -117,7 +117,10 @@ from incidentlens_control_plane.logs.redaction import redact_message
 from incidentlens_control_plane.logs.types import LogScope
 from incidentlens_control_plane.project_memory.types import ProjectMemoryExtractionRequest
 from incidentlens_control_plane.project_registry.store import ProjectRegistryStore
-from incidentlens_control_plane.project_registry.types import TargetRegistration
+from incidentlens_control_plane.project_registry.types import (
+    ServiceRegistration,
+    TargetRegistration,
+)
 from incidentlens_control_plane.remote_ops.sessions import SessionManager
 
 
@@ -828,8 +831,20 @@ class AgentOrchestrator:
     ) -> ConversationRequest:
         project = self._projects.get(investigation.project_id)
         service = next(
-            item for item in project.services if item.compose_service == investigation.service
+            (
+                item
+                for item in project.services
+                if item.compose_service == investigation.service
+            ),
+            ServiceRegistration(compose_service="host")
+            if not project.services and investigation.service == "host"
+            else None,
         )
+        if service is None:
+            raise ValueError(
+                f"service {investigation.service!r} not found in project "
+                f"{investigation.project_id!r}"
+            )
         tool_schemas = self._executor.tool_schemas(scope=run.scope.scope)
         context = await self._context.prepare(
             run, investigation, tool_schemas, child_reports=tuple(child_reports)
