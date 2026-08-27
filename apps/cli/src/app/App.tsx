@@ -312,7 +312,10 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
     // Route the terminal's actual stdin into the visible prompt. Keeping this
     // here (alongside the global escape handling) means the prompt works in a
     // real interactive Terminal, not only in component tests.
-    if (key.return) {
+    // Ink normally marks Enter as `key.return`, but macOS Terminal and
+    // pseudo-terminals may deliver a raw CR/LF byte without that annotation.
+    // Treat both forms as submit so interactive commands work in a real PTY.
+    if (key.return || input === '\r' || input === '\n') {
       if (state.input.value.trim().length > 0) {
         handleSubmit(state.input.value);
         dispatch({ type: 'set_input', input: { value: '' } });
