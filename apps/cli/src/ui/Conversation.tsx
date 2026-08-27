@@ -16,13 +16,17 @@ interface ConversationProps {
  * Conversation component.
  */
 export function Conversation({ messages }: ConversationProps): React.ReactElement | null {
-  if (messages.length === 0) {
+  // Streaming can briefly create an empty text block before its first delta.
+  // Do not render that placeholder as a large empty bordered card.
+  const visibleMessages = messages.filter((item) => item.kind !== 'text' || item.content.trim().length > 0);
+
+  if (visibleMessages.length === 0) {
     return null;
   }
 
   return (
     <Box flexDirection="column" marginTop={1}>
-      {messages.map((item, index) => (
+      {visibleMessages.map((item, index) => (
         <ConversationItem key={getItemKey(item, index)} item={item} />
       ))}
     </Box>
