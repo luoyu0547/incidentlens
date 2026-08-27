@@ -89,17 +89,20 @@ export async function bootstrap(
     }
 
     // 5. Load last target
-    if (profile?.lastTargetId) {
-      try {
-        const targets = await deps.api.listTargets();
-        const lastTarget = targets.find((t) => t.target_id === profile?.lastTargetId);
-
-        if (lastTarget) {
-          dispatch({ type: 'set_target', target: lastTarget });
-        }
-      } catch {
-        // Target load failed, continue without target
+    try {
+      const targets = await deps.api.listTargets();
+      const remembered = profile?.lastTargetId
+        ? targets.find((t) => t.target_id === profile.lastTargetId)
+        : undefined;
+      // A single configured target is an unambiguous workspace default. This
+      // keeps a fresh demo session immediately actionable while preserving the
+      // picker behavior when multiple targets exist.
+      const target = remembered ?? (targets.length === 1 ? targets[0] : undefined);
+      if (target) {
+        dispatch({ type: 'set_target', target });
       }
+    } catch {
+      // Target load failed, continue without target
     }
 
     // 6. Load last session
