@@ -65,6 +65,56 @@ def test_product_page_paginates_beyond_1000_and_filters_dimensions(tmp_path: Pat
     assert all(item.sequence > 1000 and item.sequence % 2 == 0 for item in filtered.items)
 
 
+def test_product_page_unions_session_and_investigation_history(tmp_path: Path) -> None:
+    store = RuntimeEventStore(lambda: sqlite3.connect(tmp_path / "runtime.db"))
+    store.migrate()
+    base = RuntimeEvent(
+        event_id="evt-session-text",
+        event_type=RuntimeEventType.AGENT_TEXT_DELTA,
+        occurred_at=datetime(2026, 8, 10, tzinfo=UTC),
+        payload={"session_id": "session-1", "message_id": "message-1", "text": "done"},
+    )
+    store.append(base)
+    store.append(
+        base.model_copy(
+            update={
+                "event_id": "evt-investigation-tool",
+                "event_type": RuntimeEventType.TOOL_PROPOSED,
+                "payload": {
+                    "investigation_id": "investigation-1",
+                    "tool_call_id": "call-1",
+                    "tool_name": "registry_info",
+                },
+            }
+        )
+    )
+    store.append(
+        base.model_copy(
+            update={
+                "event_id": "evt-other-tool",
+                "event_type": RuntimeEventType.TOOL_PROPOSED,
+                "payload": {
+                    "investigation_id": "investigation-2",
+                    "tool_call_id": "call-2",
+                    "tool_name": "registry_info",
+                },
+            }
+        )
+    )
+
+    page = store.list_page(
+        after_sequence=0,
+        limit=500,
+        session_id="session-1",
+        investigation_id="investigation-1",
+    )
+
+    assert [event.event_id for event in page.items] == [
+        "evt-session-text",
+        "evt-investigation-tool",
+    ]
+
+
 def test_log_subscription_event_types_persist_round_trip(tmp_path: Path) -> None:
     store = RuntimeEventStore(lambda: sqlite3.connect(tmp_path / "runtime.db"))
     store.migrate()

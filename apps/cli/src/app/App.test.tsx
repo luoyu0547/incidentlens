@@ -7,6 +7,10 @@ import type { ApprovalDetailView } from '@incidentlens/protocol';
 import type { AppDependencies } from './dependencies.js';
 import type { ApprovalBlock } from '../state/cli-state.js';
 
+const settle = async (): Promise<void> => {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+};
+
 describe('Ink rendering', () => {
   it('renders simple text', () => {
     const { lastFrame } = render(<Text>Hello World</Text>);
@@ -57,5 +61,36 @@ describe('Ink rendering', () => {
     expect(frame).toMatch(/A approve.*R reject.*D diff/);
     expect(frame).toContain('1 pending approval(s)');
     expect(frame).not.toContain('approved');
+  });
+
+  it('routes wizard input exclusively to the target overlay', async () => {
+    const deps = {
+      api: {},
+      configStore: { load: vi.fn().mockResolvedValue(null), save: vi.fn() },
+      tokenStore: { get: vi.fn().mockResolvedValue('token') },
+      eventStream: { connect: vi.fn().mockResolvedValue(undefined) },
+      now: () => new Date('2026-01-01T00:00:00Z'),
+      exit: vi.fn(),
+    } as unknown as AppDependencies;
+    const instance = render(
+      <App
+        dependencies={deps}
+        initialState={{
+          bootstrap: 'ready',
+          overlay: { kind: 'target-wizard', mode: 'create', step: 'name' },
+        }}
+      />,
+    );
+    await settle();
+
+    instance.stdin.write('incidentlens-tencent');
+    await settle();
+    instance.stdin.write('\r');
+    await settle();
+
+    const frame = instance.lastFrame() ?? '';
+    expect(frame).toContain('Host');
+    expect(frame).not.toContain('No target selected');
+    expect(frame).not.toContain('Type a message or / for commands');
   });
 });

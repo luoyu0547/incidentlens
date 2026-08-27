@@ -192,8 +192,6 @@ class LogStore:
                     ON log_records(correlation_key);
                 CREATE INDEX IF NOT EXISTS idx_log_records_normal_signal
                     ON log_records(normal_signal);
-                CREATE INDEX IF NOT EXISTS idx_log_records_service_sequence
-                    ON log_records(service_name, stream_sequence);
                 CREATE INDEX IF NOT EXISTS idx_log_records_service_time
                     ON log_records(service_name, observed_at);
 

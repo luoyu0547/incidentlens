@@ -89,6 +89,7 @@ from incidentlens_control_plane.investigation.store import (
     RoundConflict,
 )
 from incidentlens_control_plane.investigation.tool_executor import ToolExecutor
+from incidentlens_control_plane.investigation.tools import TOOL_TODO_WRITE
 from incidentlens_control_plane.investigation.transcript import TranscriptService
 from incidentlens_control_plane.investigation.types import (
     AgentBudget,
@@ -451,7 +452,7 @@ class AgentOrchestrator:
         self._write_checkpoint(run, sequence=before_seq, round_number=round_number, now=now)
         if self._events_pub is not None:
             self._events_pub.model_round_started(
-                run, round_number=round_number, occurred_at=now
+                run, round_number=round_number, occurred_at=self._now()
             )
         provider_started = time.monotonic()
 
@@ -1707,6 +1708,17 @@ class AgentOrchestrator:
         run = self._store.get_agent_run(run.agent_run_id)
         investigation = self._store.get_investigation(investigation.investigation_id)
 
+        if (
+            request.tool_name == TOOL_TODO_WRITE
+            and outcome.status is ToolCallStatus.SUCCEEDED
+            and self._events_pub is not None
+        ):
+            self._events_pub.todo_changed(
+                run,
+                self._store.list_todos(run.agent_run_id),
+                occurred_at=now,
+            )
+
         if outcome.status is ToolCallStatus.UNCERTAIN:
             run, investigation = self._pause_round(
                 run, investigation, AgentRunStatus.PAUSED_UNCERTAIN_STATE, now=now,
@@ -1848,18 +1860,32 @@ class AgentOrchestrator:
             approval_id=approval_id,
         )
         if self._events_pub is not None:
+            investigation_id = self._store.get_agent_run(
+                updated.agent_run_id
+            ).investigation_id
             if previous != updated.status.value:
                 self._events_pub.tool_call_status_changed(
-                    updated, previous=previous, occurred_at=now
+                    updated,
+                    previous=previous,
+                    investigation_id=investigation_id,
+                    occurred_at=now,
                 )
             if (
                 previous == ToolCallStatus.PLANNED.value
                 and updated.status
                 in (ToolCallStatus.RUNNING, ToolCallStatus.WAITING_APPROVAL)
             ):
-                self._events_pub.tool_call_started(updated, occurred_at=now)
+                self._events_pub.tool_call_started(
+                    updated,
+                    investigation_id=investigation_id,
+                    occurred_at=now,
+                )
             if TOOL_CALL_STATE_MACHINE.is_terminal(updated.status):
-                self._events_pub.tool_call_completed(updated, occurred_at=now)
+                self._events_pub.tool_call_completed(
+                    updated,
+                    investigation_id=investigation_id,
+                    occurred_at=now,
+                )
         return updated
 
     # -- child delegation -----------------------------------------------------

@@ -66,12 +66,14 @@ class CliEventStream:
         broker: RuntimeEventBroker,
         filter: EventFilter,
         allowed_target_ids: frozenset[str] | None,
+        resolve_investigation_id: Callable[[str], str | None] | None = None,
         heartbeat_seconds: float = HEARTBEAT_INTERVAL_SECONDS,
     ) -> None:
         self._events = events
         self._broker = broker
         self._filter = filter
         self._allowed_target_ids = allowed_target_ids
+        self._resolve_investigation_id = resolve_investigation_id
         self._heartbeat_seconds = heartbeat_seconds
 
     async def run(
@@ -184,7 +186,66 @@ class CliEventStream:
             if event.sequence <= from_sequence:
                 # Already delivered during replay; ignore the boundary overlap.
                 continue
+            # The broker is shared by every session.  Durable replay applies
+            # the SQL filter, but live delivery comes from the fan-out queue
+            # and must apply the same predicate again; otherwise a CLI for one
+            # session renders another session's tool calls and completion
+            # markers (the source of misleading stale `running` rows).
+            if not self._matches_filter(event):
+                continue
             await _send(send, _envelope(event))
+
+    def _refresh_investigation_filter(self) -> None:
+        if (
+            self._filter.session_id is None
+            or self._filter.investigation_id is not None
+            or self._resolve_investigation_id is None
+        ):
+            return
+        try:
+            investigation_id = self._resolve_investigation_id(self._filter.session_id)
+        except Exception:  # noqa: BLE001 - binding may not be durable yet
+            return
+        if investigation_id is not None:
+            self._filter = EventFilter(
+                session_id=self._filter.session_id,
+                target_id=self._filter.target_id,
+                investigation_id=investigation_id,
+                event_types=self._filter.event_types,
+            )
+
+    def _matches_filter(self, event: RuntimeEvent) -> bool:
+        self._refresh_investigation_filter()
+        payload = event.payload
+        f = self._filter
+        # Product messages/operation events carry session_id, while the
+        # investigation runtime predates product sessions and carries only
+        # investigation_id. A session stream must accept either correlation
+        # path; requiring both drops every tool event once the session has
+        # been bound to its investigation.
+        event_session_id = payload.get("session_id")
+        event_investigation_id = payload.get("investigation_id")
+        if f.session_id is not None or f.investigation_id is not None:
+            matches_session = (
+                f.session_id is not None and event_session_id == f.session_id
+            )
+            matches_investigation = (
+                f.investigation_id is not None
+                and event_investigation_id == f.investigation_id
+            )
+            if not matches_session and not matches_investigation:
+                return False
+        if f.target_id is not None and payload.get("target_id") != f.target_id:
+            return False
+        if f.event_types and event.event_type not in tuple(
+            RuntimeEventType(t) for t in f.event_types
+        ):
+            return False
+        if self._allowed_target_ids is not None:
+            target_id = payload.get("target_id")
+            if target_id is not None and target_id not in self._allowed_target_ids:
+                return False
+        return True
 
     async def _close_slow(
         self,

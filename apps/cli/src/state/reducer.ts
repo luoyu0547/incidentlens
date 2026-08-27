@@ -11,6 +11,7 @@ import type {
   ConversationItem,
   TextBlock,
   ToolBlock,
+  ToolEventSnapshot,
   StreamStatus,
 } from './cli-state.js';
 
@@ -23,6 +24,9 @@ export function createInitialState(): CliState {
     messages: [],
     operations: {},
     approvals: {},
+    todos: [],
+    usage: { rounds: 0, inputTokens: 0, outputTokens: 0 },
+    activity: { kind: 'idle' },
     stream: {
       connected: false,
       lastSequence: 0,
@@ -56,6 +60,12 @@ export function reducer(state: CliState, action: CliAction): CliState {
       return { ...state, target: undefined };
 
     case 'set_session':
+      // A newly-created session starts a fresh transcript. Keeping rows from
+      // the previous session makes an old running tool appear to belong to
+      // the new prompt, which is especially misleading during reconnects.
+      if (state.session?.session_id && state.session.session_id !== action.session.session_id) {
+        return { ...state, session: action.session, messages: [], operations: {}, approvals: {}, todos: [], usage: { rounds: 0, inputTokens: 0, outputTokens: 0 }, activity: { kind: 'idle' }, activeOperationId: undefined };
+      }
       return { ...state, session: action.session };
 
     case 'set_approval':
@@ -65,10 +75,7 @@ export function reducer(state: CliState, action: CliAction): CliState {
       };
 
     case 'update_operation':
-      return {
-        ...state,
-        operations: { ...state.operations, [action.operation.operation_id]: action.operation },
-      };
+      return updateOperation(state, action.operation);
 
     case 'stream_event':
       return handleStreamEvent(state, action.event);
@@ -122,6 +129,67 @@ export function reducer(state: CliState, action: CliAction): CliState {
 }
 
 /**
+ * Store durable-operation progress and mark the end of an Agent turn.
+ *
+ * Operation status is authoritative over the stream: a tool may have
+ * succeeded while the provider is still producing the next turn.  Rendering
+ * an explicit terminal marker keeps that boundary visible in a long-running
+ * transcript and prevents a previous tool row from looking like live work.
+ */
+function updateOperation(state: CliState, operation: any): CliState {
+  const operations = { ...state.operations, [operation.operation_id]: operation };
+  const terminal = operation.status === 'succeeded' || operation.status === 'failed' || operation.status === 'cancelled';
+  if (!terminal) return { ...state, operations, activeOperationId: operation.operation_id };
+
+  // This outer operation only confirms prompt delivery. The Agent Run has its
+  // own lifecycle and may still be running or waiting for approval.
+  if (operation.kind === 'agent_message') {
+    return { ...state, operations, activeOperationId: undefined };
+  }
+
+  // HTTP operation polling and the websocket event stream are independent.
+  // If the terminal poll wins the race, do not leave a visually impossible
+  // "running" tool beside the completed marker; retain it as explicitly
+  // uncertain until a later snapshot can reconcile the final tool result.
+  const messagesWithSettledTools = state.messages.map((item) =>
+    item.kind === 'tool' && (item.status === 'running' || item.status === 'proposed')
+      ? {
+          ...item,
+          status: 'uncertain' as const,
+          summary: item.summary ?? '工具事件收尾中',
+        }
+      : item,
+  );
+
+  const marker = `operation:${operation.operation_id}:${operation.status}`;
+  const alreadyRendered = messagesWithSettledTools.some(
+    (item) => item.kind === 'system' && item.id === marker,
+  );
+  if (alreadyRendered) return { ...state, operations, activeOperationId: operation.operation_id };
+
+  const label = operation.status === 'succeeded'
+    ? '本轮 Agent 已完成'
+    : operation.status === 'cancelled'
+      ? '本轮 Agent 已取消'
+      : '本轮 Agent 失败';
+  const detail = operation.error_message || operation.progress_summary;
+  return {
+    ...state,
+    operations,
+    activeOperationId: operation.operation_id,
+    messages: [
+      ...messagesWithSettledTools,
+      {
+        kind: 'system',
+        id: marker,
+        content: `${label}${detail ? ` · ${String(detail).slice(0, 300)}` : ''}`,
+        timestamp: new Date(),
+      },
+    ],
+  };
+}
+
+/**
  * Handle a stream event.
  */
 function handleStreamEvent(state: CliState, event: any): CliState {
@@ -159,7 +227,110 @@ function handleStreamEvent(state: CliState, event: any): CliState {
       return {
         ...state,
         stream: newStream,
-        messages: updateToolStatus(state.messages, event),
+        messages: updateToolStatus(
+          state.messages,
+          event,
+          Boolean(state.activeOperationId && ['succeeded', 'failed', 'cancelled'].includes(state.operations[state.activeOperationId]?.status)),
+        ),
+      };
+
+    case 'todo.changed': {
+      const items = Array.isArray(event.items) ? event.items : [];
+      return {
+        ...state,
+        stream: newStream,
+        todos: items
+          .filter(
+            (item: any) =>
+              item && typeof item.todo_id === 'string' && typeof item.content === 'string',
+          )
+          .map((item: any) => ({
+            todoId: item.todo_id,
+            content: item.content,
+            status:
+              item.status === 'completed'
+                ? 'completed'
+                : item.status === 'in_progress'
+                  ? 'in_progress'
+                  : 'pending',
+          })),
+      };
+    }
+
+    case 'agent_run.status_changed':
+      if (event.status === 'waiting_approval') {
+        return {
+          ...state,
+          stream: newStream,
+          messages: upsertRunStatus(
+            state.messages,
+            event.run_id,
+            'Agent 已暂停，等待审批',
+          ),
+        };
+      }
+      return { ...state, stream: newStream };
+
+    case 'agent_run.completed':
+      return {
+        ...state,
+        stream: newStream,
+        activity: { kind: 'idle' },
+        messages: upsertRunStatus(state.messages, event.run_id, '调查完成'),
+        todos: state.todos.map((todo) => ({ ...todo, status: 'completed' as const })),
+      };
+
+    case 'agent_run.failed': {
+      const reason = friendlyFailureReason(event.reason_preview);
+      return {
+        ...state,
+        stream: newStream,
+        activity: { kind: 'idle' },
+        messages: upsertRunStatus(
+          state.messages,
+          event.run_id ?? event.investigation_id ?? 'investigation',
+          `调查失败${reason ? `：${reason}` : ''}`,
+        ),
+      };
+    }
+
+    case 'investigation.failed':
+      return {
+        ...state,
+        stream: newStream,
+        activity: { kind: 'idle' },
+        messages: state.messages.some(
+          (item) => item.kind === 'system' && item.content.startsWith('调查失败'),
+        )
+          ? state.messages
+          : upsertRunStatus(
+              state.messages,
+              event.investigation_id ?? 'investigation',
+              '调查失败',
+            ),
+      };
+
+    case 'model_round.started':
+      return {
+        ...state,
+        stream: newStream,
+        activity: {
+          kind: 'model',
+          round: Number(event.round_number ?? state.usage.rounds + 1),
+          startedAt: typeof event.occurred_at === 'string' ? event.occurred_at : new Date().toISOString(),
+        },
+      };
+
+    case 'model_round.completed':
+      return {
+        ...state,
+        stream: newStream,
+        activity: { kind: 'idle' },
+        usage: {
+          rounds: state.usage.rounds + 1,
+          inputTokens: state.usage.inputTokens + Number(event.input_tokens ?? 0),
+          outputTokens: state.usage.outputTokens + Number(event.output_tokens ?? 0),
+        },
       };
 
     case 'approval.requested':
@@ -176,6 +347,14 @@ function handleStreamEvent(state: CliState, event: any): CliState {
       // Unknown event - advance cursor without UI mutation
       return { ...state, stream: newStream };
   }
+}
+
+function friendlyFailureReason(reason: unknown): string | undefined {
+  if (typeof reason !== 'string' || reason.trim().length === 0) return undefined;
+  if (/结构化调查回合无效|JSON|Expecting .+ delimiter/i.test(reason)) {
+    return '模型返回格式无效，已停止本轮调查';
+  }
+  return reason.replace(/\s+/g, ' ').trim().slice(0, 180);
 }
 
 /**
@@ -214,6 +393,7 @@ function mergeTextDelta(
     messageId: message_id,
     blockId: block_id,
     content: delta,
+    finalized: false,
   };
 
   return [...messages, newBlock];
@@ -241,26 +421,41 @@ function finalizeMessage(
  */
 function updateToolStatus(
   messages: readonly ConversationItem[],
-  event: any
+  event: any,
+  operationAlreadyTerminal = false,
 ): readonly ConversationItem[] {
-  const { tool_id, event_type } = event;
+  const toolId = event.tool_id ?? event.tool_call_id;
+  const { event_type } = event;
+  if (typeof toolId !== 'string' || toolId.length === 0) {
+    return messages;
+  }
 
   // Map event type to tool status
   const statusMap: Record<string, ToolBlock['status']> = {
     'tool.proposed': 'proposed',
     'tool_call.started': 'running',
     'tool_call.completed': 'succeeded',
-    'tool_call.status_changed': event.status === 'failed' ? 'failed' : 'running',
+    'tool_call.status_changed': event.status === 'failed'
+      ? 'failed'
+      : event.status === 'succeeded'
+        ? 'succeeded'
+        : event.status === 'waiting_approval'
+          ? 'waiting_approval'
+          : event.status === 'uncertain'
+            ? 'uncertain'
+            : 'running',
   };
 
-  const newStatus = statusMap[event_type];
+  const newStatus = operationAlreadyTerminal && (event_type === 'tool.proposed' || event_type === 'tool_call.started')
+    ? 'uncertain'
+    : statusMap[event_type];
   if (!newStatus) {
     return messages;
   }
 
   // Find existing tool block
   const existingIndex = messages.findIndex(
-    (m) => m.kind === 'tool' && m.toolId === tool_id
+    (m) => m.kind === 'tool' && m.toolId === toolId
   );
 
   if (existingIndex >= 0) {
@@ -282,7 +477,7 @@ function updateToolStatus(
   // New tool block
   const newBlock: ToolBlock = {
     kind: 'tool',
-    toolId: tool_id,
+    toolId,
     toolName: event.tool_name || 'unknown',
     status: newStatus,
     error: event.error,
@@ -292,6 +487,18 @@ function updateToolStatus(
   return [...messages, newBlock];
 }
 
+function upsertRunStatus(
+  messages: readonly ConversationItem[],
+  runId: unknown,
+  content: string,
+): readonly ConversationItem[] {
+  const id = `agent-run:${String(runId ?? 'current')}:status`;
+  const withoutPrevious = messages.filter(
+    (item) => item.kind !== 'system' || item.id !== id,
+  );
+  return [...withoutPrevious, { kind: 'system', id, content, timestamp: new Date() }];
+}
+
 /**
  * Handle gap snapshot - replace projection.
  */
@@ -299,6 +506,8 @@ function handleGapSnapshot(
   state: CliState,
   snapshot: {
     messages: ConversationItem[];
+    tools?: ToolEventSnapshot[];
+    todos?: CliState['todos'];
     operations: Record<string, any>;
     approvals: Record<string, any>;
     sequence: number;
@@ -306,9 +515,16 @@ function handleGapSnapshot(
 ): CliState {
   return {
     ...state,
-    messages: snapshot.messages,
+    messages: [
+      ...snapshot.messages,
+      ...(snapshot.tools ?? []).map((tool): ToolBlock => ({
+        kind: 'tool',
+        ...tool,
+      })),
+    ],
     operations: snapshot.operations,
     approvals: snapshot.approvals,
+    todos: snapshot.todos ?? [],
     stream: {
       ...state.stream,
       lastSequence: snapshot.sequence,

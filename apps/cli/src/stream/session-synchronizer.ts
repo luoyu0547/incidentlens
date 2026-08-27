@@ -32,7 +32,7 @@
 
 import type { ControlPlaneApi } from '../api/control-plane-api.js';
 import type { ConfigStore } from '../config/types.js';
-import type { CliAction } from '../state/cli-state.js';
+import type { CliAction, TodoItemState, ToolEventSnapshot } from '../state/cli-state.js';
 import type {
   KnownCliStreamEnvelope,
   StreamEventEnvelope,
@@ -93,6 +93,7 @@ export interface SessionSnapshot {
   readonly messages: readonly AgentMessageView[];
   readonly operation: OperationView | null;
   readonly approvals: readonly ApprovalDetailView[];
+  readonly events: readonly StreamEventEnvelope[];
   readonly lastSequence: number;
 }
 
@@ -404,6 +405,8 @@ export class SessionSynchronizer {
           blockId: m.message_id,
           content: m.content,
         })),
+        tools: projectToolEvents(snapshot.events),
+        todos: projectTodoEvents(snapshot.events),
         operations: snapshot.operation
           ? { [snapshot.operation.operation_id]: snapshot.operation }
           : {},
@@ -437,6 +440,7 @@ export class SessionSynchronizer {
       messages,
       operation: await this.resolveActiveOperation(events),
       approvals,
+      events,
       lastSequence: this.computeAuthoritativeSequence(sessionId, events),
     };
   }
@@ -590,4 +594,76 @@ export class SessionSynchronizer {
       signal.addEventListener('abort', onAbort, { once: true });
     });
   }
+}
+
+/** Rebuild the latest visible state of every tool from durable history. */
+export function projectToolEvents(
+  events: readonly StreamEventEnvelope[],
+): ToolEventSnapshot[] {
+  const tools = new Map<string, ToolEventSnapshot>();
+  const statuses: Record<string, ToolEventSnapshot['status'] | undefined> = {
+    'tool.proposed': 'proposed',
+    'tool_call.started': 'running',
+    'tool_call.completed': 'succeeded',
+  };
+
+  for (const event of [...events].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))) {
+    if (!event.event_type.startsWith('tool')) continue;
+    const payload = event.payload ?? {};
+    const toolId = payload['tool_id'] ?? payload['tool_call_id'];
+    if (typeof toolId !== 'string' || toolId.length === 0) continue;
+    const existing = tools.get(toolId);
+    const eventStatus = payload['status'];
+    const status = event.event_type === 'tool_call.status_changed'
+      ? eventStatus === 'failed'
+        ? 'failed'
+        : eventStatus === 'succeeded'
+          ? 'succeeded'
+          : eventStatus === 'waiting_approval'
+            ? 'waiting_approval'
+            : eventStatus === 'uncertain'
+              ? 'uncertain'
+              : 'running'
+      : statuses[event.event_type];
+    if (!status) continue;
+    const toolName = payload['tool_name'];
+    const summary = payload['summary'] ?? payload['result'];
+    const error = payload['error'] ?? payload['error_redacted'];
+    tools.set(toolId, {
+      toolId,
+      toolName: typeof toolName === 'string' ? toolName : existing?.toolName ?? 'unknown',
+      status,
+      summary: typeof summary === 'string' ? summary : existing?.summary,
+      error: typeof error === 'string' ? error : existing?.error,
+    });
+  }
+
+  return [...tools.values()];
+}
+
+/** Rebuild the latest server-authoritative Todo plan from durable history. */
+export function projectTodoEvents(
+  events: readonly StreamEventEnvelope[],
+): TodoItemState[] {
+  const latest = [...events]
+    .filter((event) => event.event_type === 'todo.changed')
+    .sort((a, b) => (b.sequence ?? 0) - (a.sequence ?? 0))[0];
+  const items = latest?.payload?.['items'];
+  if (!Array.isArray(items)) return [];
+  return items.flatMap((item): TodoItemState[] => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) return [];
+    const todoId = item['todo_id'];
+    const content = item['content'];
+    const status = item['status'];
+    if (typeof todoId !== 'string' || typeof content !== 'string') return [];
+    return [{
+      todoId,
+      content,
+      status: status === 'completed'
+        ? 'completed'
+        : status === 'in_progress'
+          ? 'in_progress'
+          : 'pending',
+    }];
+  });
 }

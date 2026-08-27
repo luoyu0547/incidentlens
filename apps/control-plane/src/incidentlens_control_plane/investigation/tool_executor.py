@@ -67,6 +67,7 @@ from incidentlens_control_plane.investigation.tools import (
     TOOL_FILE_EDIT,
     TOOL_FILE_WRITE,
     TOOL_HOST_LIST,
+    TOOL_HOST_METRICS,
     TOOL_HOST_READ,
     TOOL_HOST_SEARCH,
     TOOL_HOST_STAT,
@@ -724,6 +725,51 @@ class ToolExecutor:
             evidence=(self._evidence_ref(ctx, ref, summary),),
             summary=summary,
             output_bytes=len(description),
+        )
+
+    async def _handle_host_metrics(self, ctx: ToolContext) -> ToolResult:
+        """Collect fixed read-only host metrics without exposing generic shell."""
+        requested = ctx.arguments.get("sections") or ["load", "memory", "disk"]
+        sections = tuple(dict.fromkeys(requested))
+        commands = {
+            "load": "uptime",
+            "memory": "free -h",
+            "disk": "df -h",
+        }
+        target = self._resolve_target(ctx)
+        session = await self._sessions.connect(target)
+        process = await session.transport.open_shell()
+        shell = PersistentShell(process)
+        framed_parts = [
+            f"printf '\n[{section}]\n'; {commands[section]}" for section in sections
+        ]
+        framed = "; ".join(framed_parts)
+        try:
+            result = await shell.execute(framed, timeout=30)
+        except asyncio.TimeoutError as exc:
+            raise ToolUncertain("host metrics collection timed out") from exc
+        finally:
+            await shell.close()
+
+        output = self._bound_content(
+            ctx,
+            result.stdout.decode("utf-8", errors="replace"),
+            CONTENT_MAX_LENGTH,
+        )
+        ref = self._evidence.record_command_output(
+            **self._evidence_kwargs(ctx, "host", f"host:{ctx.run.scope.target_id}"),
+            command=f"host_metrics:{','.join(sections)}",
+            output=output,
+            exit_code=result.exit_status,
+        )
+        summary = _model_visible_summary("host metrics collected: ", ref.content_redacted)
+        failed = result.exit_status != 0
+        return ToolResult(
+            status=ToolCallStatus.FAILED if failed else ToolCallStatus.SUCCEEDED,
+            evidence=(self._evidence_ref(ctx, ref, "host health metrics"),),
+            summary=summary,
+            output_bytes=len(output),
+            error_redacted="one or more metric commands failed" if failed else None,
         )
 
     # -- file tools (host + container) ----------------------------------------
@@ -1738,6 +1784,7 @@ def default_tool_registry(executor: ToolExecutor) -> ToolRegistry:
         TOOL_EVIDENCE_LIST: executor._handle_evidence_list,
         TOOL_REGISTRY_INFO: executor._handle_registry_info,
         TOOL_SERVICE_INFO: executor._handle_service_info,
+        TOOL_HOST_METRICS: executor._handle_host_metrics,
         TOOL_HOST_READ: executor._handle_host_read,
         TOOL_HOST_LIST: executor._handle_host_list,
         TOOL_HOST_SEARCH: executor._handle_host_search,

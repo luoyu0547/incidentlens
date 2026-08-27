@@ -148,6 +148,14 @@ def build_agent_message_handler(
             user_message_id=message_id,
             now=operation.updated_at,
         )
+        # `start()` may return a terminal failed/completed run. Keep the
+        # product session facade authoritative so clients do not poll an
+        # already-finished investigation as ACTIVE indefinitely.
+        session_service.sync_investigation(
+            session_id,
+            investigation_id,
+            now=operation.updated_at,
+        )
         return OperationResult(summary="agent message execution completed")
 
     return handler

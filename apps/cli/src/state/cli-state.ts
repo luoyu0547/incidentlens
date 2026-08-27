@@ -33,6 +33,18 @@ export interface InputState {
   readonly value: string;
 }
 
+export interface UsageState {
+  readonly rounds: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+}
+
+export interface AgentActivityState {
+  readonly kind: 'idle' | 'model';
+  readonly round?: number;
+  readonly startedAt?: string;
+}
+
 /**
  * Overlay state for modals and wizards.
  */
@@ -83,7 +95,22 @@ export interface ToolBlock {
   readonly kind: 'tool';
   readonly toolId: string;
   readonly toolName: string;
-  readonly status: 'proposed' | 'running' | 'succeeded' | 'failed' | 'uncertain';
+  readonly status: 'proposed' | 'running' | 'waiting_approval' | 'succeeded' | 'failed' | 'uncertain';
+  readonly error?: string;
+  readonly summary?: string;
+}
+
+export interface TodoItemState {
+  readonly todoId: string;
+  readonly content: string;
+  readonly status: 'pending' | 'in_progress' | 'completed';
+}
+
+/** Durable tool row returned by the event-history snapshot. */
+export interface ToolEventSnapshot {
+  readonly toolId: string;
+  readonly toolName: string;
+  readonly status: ToolBlock['status'];
   readonly error?: string;
   readonly summary?: string;
 }
@@ -104,6 +131,7 @@ export interface SystemMessage {
   readonly kind: 'system';
   readonly content: string;
   readonly timestamp: Date;
+  readonly id?: string;
 }
 
 /**
@@ -115,7 +143,11 @@ export interface CliState {
   readonly session?: AgentSessionView;
   readonly messages: readonly ConversationItem[];
   readonly operations: Readonly<Record<string, OperationView>>;
+  readonly activeOperationId?: string;
   readonly approvals: Readonly<Record<string, ApprovalDetailView>>;
+  readonly todos: readonly TodoItemState[];
+  readonly usage: UsageState;
+  readonly activity: AgentActivityState;
   readonly stream: StreamStatus;
   readonly input: InputState;
   readonly overlay: OverlayState;
@@ -132,7 +164,7 @@ export type CliAction =
   | { type: 'set_approval'; approval: ApprovalDetailView }
   | { type: 'update_operation'; operation: OperationView }
   | { type: 'stream_event'; event: any }
-  | { type: 'gap_snapshot'; snapshot: { messages: ConversationItem[]; operations: Record<string, OperationView>; approvals: Record<string, ApprovalDetailView>; sequence: number } }
+  | { type: 'gap_snapshot'; snapshot: { messages: ConversationItem[]; tools?: ToolEventSnapshot[]; todos?: TodoItemState[]; operations: Record<string, OperationView>; approvals: Record<string, ApprovalDetailView>; sequence: number } }
   | { type: 'set_stream_status'; status: Partial<StreamStatus> }
   | { type: 'set_input'; input: Partial<InputState> }
   | { type: 'set_overlay'; overlay: OverlayState }

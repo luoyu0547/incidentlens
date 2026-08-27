@@ -121,6 +121,57 @@ def test_cli_stream_filters_by_target(tmp_path: Path) -> None:
     assert sequences == list(range(1, 51))
 
 
+def test_cli_stream_live_filter_unions_session_and_investigation(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    broker = RuntimeEventBroker(queue_size=8)
+    frames: list[dict[str, object]] = []
+
+    async def send(text: str) -> None:
+        frames.append(json.loads(text))
+
+    async def close(code: int, reason: str) -> None:
+        pass
+
+    async def scenario() -> None:
+        stream = CliEventStream(
+            events=store,
+            broker=broker,
+            filter=EventFilter(session_id="session-1"),
+            allowed_target_ids=None,
+            resolve_investigation_id=lambda _: "investigation-1",
+        )
+        task = asyncio.create_task(
+            stream.run(after_sequence=0, send=send, close=close)
+        )
+        await asyncio.sleep(0.02)
+        for event_id, payload in (
+            ("evt-session", {"session_id": "session-1"}),
+            ("evt-investigation", {"investigation_id": "investigation-1"}),
+            ("evt-other", {"investigation_id": "investigation-2"}),
+        ):
+            stored = store.append(
+                RuntimeEvent(
+                    event_id=event_id,
+                    event_type=RuntimeEventType.TOOL_PROPOSED,
+                    occurred_at=datetime(2026, 8, 10, tzinfo=UTC),
+                    payload=payload,
+                )
+            )
+            await broker.publish(stored)
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+    assert [frame["event_id"] for frame in frames if "event_id" in frame] == [
+        "evt-session",
+        "evt-investigation",
+    ]
+
+
 def test_cli_stream_sends_hello_first_and_heartbeat_on_idle(tmp_path: Path) -> None:
     store = _store(tmp_path)
     broker = RuntimeEventBroker(queue_size=4)

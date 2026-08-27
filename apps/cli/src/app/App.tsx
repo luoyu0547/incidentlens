@@ -39,6 +39,9 @@ import { SessionPicker } from '../ui/SessionPicker.js';
 import { ApprovalCard } from '../ui/ApprovalCard.js';
 import { safeApprovalText } from '../ui/ApprovalCard.js';
 import { ApprovalReasonPrompt } from '../ui/ApprovalReasonPrompt.js';
+import { TodoPanel } from '../ui/TodoPanel.js';
+import { UsageLine } from '../ui/UsageLine.js';
+import { ActivityLine } from '../ui/ActivityLine.js';
 import { ApprovalControllerImpl } from '../features/approvals/approval-controller.js';
 import { createApprovalCommands, type ApprovalCommandRuntime } from '../features/approvals/approval-commands.js';
 import { SessionSynchronizer } from '../stream/session-synchronizer.js';
@@ -103,6 +106,7 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
   // Approval decisions always refresh and render the server response.
   const approvalController = useMemo(() => new ApprovalControllerImpl({ api: deps.api }), [deps.api]);
   const [approvalPrompt, setApprovalPrompt] = useState<{ id: string; decision: 'approve' | 'reject' }>();
+  const modalInputActive = state.overlay.kind !== 'none' || approvalPrompt !== undefined;
   const approvalRuntime = useMemo<ApprovalCommandRuntime>(() => ({
     controller: approvalController,
     listPending: async () => (await deps.api.listApprovals({ status: 'pending', limit: 500 })).items,
@@ -287,7 +291,9 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
   useInput((input, key) => {
     // Handle Ctrl+C
     if (key.ctrl && input === 'c') {
-      if (state.overlay.kind !== 'none') {
+      if (approvalPrompt !== undefined) {
+        setApprovalPrompt(undefined);
+      } else if (state.overlay.kind !== 'none') {
         // Close overlay
         dispatch({ type: 'set_overlay', overlay: { kind: 'none' } });
       } else if (state.input.value.length > 0) {
@@ -303,9 +309,18 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
 
     // Handle Escape
     if (key.escape) {
-      if (state.overlay.kind !== 'none') {
+      if (approvalPrompt !== undefined) {
+        setApprovalPrompt(undefined);
+      } else if (state.overlay.kind !== 'none') {
         dispatch({ type: 'set_overlay', overlay: { kind: 'none' } });
       }
+      return;
+    }
+
+    // Modal components own stdin while they are visible. Without this guard,
+    // the main prompt and the overlay both process the same characters and
+    // Enter key, which can submit stray commands while editing wizard fields.
+    if (modalInputActive) {
       return;
     }
 
@@ -506,6 +521,10 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
         </Text>
       )}
 
+      <TodoPanel todos={state.todos} />
+      <ActivityLine activity={state.activity} />
+      <UsageLine usage={state.usage} />
+
       {/* Command Palette Overlay */}
       {state.overlay.kind === 'command-palette' && (
         <CommandPalette
@@ -591,7 +610,7 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
       )}
 
       {/* Prompt Input */}
-      {state.overlay.kind === 'none' && (
+      {state.overlay.kind === 'none' && approvalPrompt === undefined && (
         <PromptInput
           value={state.input.value}
           onChange={handleInputChange}

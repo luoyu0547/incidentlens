@@ -278,6 +278,7 @@ class AgentSessionService:
             text = "\n".join(
                 block.text for block in transcript_message.blocks if isinstance(block, TextBlock)
             )
+            text = _product_agent_text(text)
             if not text:
                 continue
             message_id = _assistant_message_id(run.agent_run_id, transcript_message.sequence)
@@ -296,13 +297,14 @@ class AgentSessionService:
             )
             count += 1
             if self._events_pub is not None:
-                self._events_pub.agent_text_delta(
-                    session_id=session_id,
-                    message_id=projected.message_id,
-                    run_id=run.agent_run_id,
-                    text=projected.content_redacted,
-                    occurred_at=_utc(now),
-                )
+                for offset in range(0, len(projected.content_redacted), 160):
+                    self._events_pub.agent_text_delta(
+                        session_id=session_id,
+                        message_id=projected.message_id,
+                        run_id=run.agent_run_id,
+                        text=projected.content_redacted[offset : offset + 160],
+                        occurred_at=_utc(now),
+                    )
                 self._events_pub.agent_message_completed(
                     session_id=session_id,
                     message_id=projected.message_id,
@@ -331,6 +333,27 @@ def _utc(value: datetime | None) -> datetime:
 def _assistant_message_id(run_id: str, sequence: int) -> str:
     digest = hashlib.sha256(f"{run_id}:{sequence}".encode()).hexdigest()[:24]
     return f"msg_{digest}"
+
+
+def _product_agent_text(content: str) -> str:
+    """Convert structured provider JSON into user-facing narrative text."""
+    try:
+        payload = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return content.strip()
+    if not isinstance(payload, dict):
+        return content.strip()
+    summaries: list[str] = []
+    for key in ("conclusions", "hypotheses"):
+        items = payload.get(key)
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict) and isinstance(item.get("summary"), str):
+                    summaries.append(item["summary"].strip())
+    stop = payload.get("stop") or payload.get("stop_signal")
+    if isinstance(stop, dict) and isinstance(stop.get("summary"), str):
+        summaries.append(stop["summary"].strip())
+    return "\n".join(summary for summary in summaries if summary)
 
 
 def _session_status(status: InvestigationStatus) -> AgentSessionStatus:

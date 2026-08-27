@@ -30,6 +30,7 @@ TOOL_EVIDENCE_READ = "evidence_read"
 TOOL_EVIDENCE_LIST = "evidence_list"
 TOOL_REGISTRY_INFO = "registry_info"
 TOOL_SERVICE_INFO = "service_info"
+TOOL_HOST_METRICS = "host_metrics"
 TOOL_HOST_READ = "host_read"
 TOOL_HOST_LIST = "host_list"
 TOOL_HOST_SEARCH = "host_search"
@@ -326,6 +327,26 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         parameters_json_schema=_obj(
             {"service_name": _SERVICE_NAME}, required=["service_name"]
         ),
+    ),
+    ToolDefinition(
+        tool_name=TOOL_HOST_METRICS,
+        concurrency_safe=True,
+        description=(
+            "Collect fixed, read-only host health metrics without accepting an "
+            "arbitrary shell command. Supports load, memory and disk sections; "
+            "the backend chooses and executes the exact commands."
+        ),
+        parameters_json_schema=_obj(
+            {
+                "sections": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "items": {"enum": ["load", "memory", "disk"]},
+                }
+            }
+        ),
+        allowed_scope=LogScope.HOST,
     ),
     ToolDefinition(
         tool_name=TOOL_HOST_READ,

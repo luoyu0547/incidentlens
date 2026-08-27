@@ -10,13 +10,14 @@ export interface ToolCardProps {
 const colors: Record<ToolBlock['status'], string> = {
   proposed: 'gray',
   running: 'yellow',
+  waiting_approval: 'yellow',
   succeeded: 'green',
   failed: 'red',
   uncertain: 'magenta',
 };
 
 const symbols: Record<ToolBlock['status'], string> = {
-  proposed: '○', running: '◎', succeeded: '●', failed: '✗', uncertain: '?',
+  proposed: '○', running: '◎', waiting_approval: '⚠', succeeded: '●', failed: '✗', uncertain: '?',
 };
 
 function colorEnabled(noColor?: boolean): boolean {

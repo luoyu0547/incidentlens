@@ -17,7 +17,7 @@ import type { ControlPlaneApi } from '../api/control-plane-api.js';
 import type { ConfigStore } from '../config/types.js';
 import type { CliAction } from '../state/cli-state.js';
 import type { KnownCliStreamEnvelope } from '@incidentlens/protocol';
-import { SessionSynchronizer, type SessionSynchronizerOptions } from './session-synchronizer.js';
+import { SessionSynchronizer, projectToolEvents, type SessionSynchronizerOptions } from './session-synchronizer.js';
 import type { EventStream, StreamCursor, StreamGap, StreamStatus } from './event-stream.js';
 import { backoffDelay } from './reconnect-policy.js';
 
@@ -608,6 +608,42 @@ describe('sessionSynchronizer', () => {
 
     controller.abort();
     await started;
+  });
+});
+
+
+describe('projectToolEvents', () => {
+  it('rebuilds tool rows without falling back to raw argument previews', () => {
+    expect(projectToolEvents([
+      {
+        schema_version: 1,
+        event_type: 'tool.proposed',
+        occurred_at: '2026-01-01T00:00:00Z',
+        sequence: 1,
+        payload: {
+          tool_call_id: 'call-1',
+          tool_name: 'registry_info',
+          arguments_preview: '{}',
+        },
+      },
+      {
+        schema_version: 1,
+        event_type: 'tool_call.completed',
+        occurred_at: '2026-01-01T00:00:01Z',
+        sequence: 2,
+        payload: {
+          tool_call_id: 'call-1',
+          tool_name: 'registry_info',
+          status: 'succeeded',
+        },
+      },
+    ])).toEqual([{
+      toolId: 'call-1',
+      toolName: 'registry_info',
+      status: 'succeeded',
+      summary: undefined,
+      error: undefined,
+    }]);
   });
 });
 

@@ -138,15 +138,21 @@ class RuntimeEventStore:
             raise ValueError("invalid event page bounds")
         clauses = ["sequence > ?"]
         params: list[object] = [after_sequence]
-        if session_id is not None:
+        if session_id is not None and investigation_id is not None:
+            # Product projection events are keyed by session, whereas the
+            # underlying investigation/tool lifecycle is keyed by
+            # investigation. A session transcript is the union of both.
+            clauses.append("(session_id = ? OR investigation_id = ?)")
+            params.extend((session_id, investigation_id))
+        elif session_id is not None:
             clauses.append("session_id = ?")
             params.append(session_id)
+        elif investigation_id is not None:
+            clauses.append("investigation_id = ?")
+            params.append(investigation_id)
         if target_id is not None:
             clauses.append("target_id = ?")
             params.append(target_id)
-        if investigation_id is not None:
-            clauses.append("investigation_id = ?")
-            params.append(investigation_id)
         if event_types:
             placeholders = ", ".join("?" for _ in event_types)
             clauses.append(f"event_type IN ({placeholders})")

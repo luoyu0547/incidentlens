@@ -7,6 +7,7 @@
 
 import type { AppDependencies } from './dependencies.js';
 import type { CliState, CliAction } from '../state/cli-state.js';
+import { projectTodoEvents, projectToolEvents } from '../stream/session-synchronizer.js';
 import { assertCompatible, type ClientCompatibility, type AgentMessageView, type ApprovalDetailView, type StreamEventEnvelope } from '@incidentlens/protocol';
 
 /**
@@ -129,6 +130,8 @@ export async function bootstrap(
                 blockId: message.message_id,
                 content: message.content,
               })),
+              tools: projectToolEvents(events.items),
+              todos: projectTodoEvents(events.items),
               operations: {},
               approvals: Object.fromEntries(
                 approvals.items.map((approval) => [approval.approval_id, approval]),

@@ -64,12 +64,19 @@ async def list_product_events(
             message="unknown event type",
         ) from exc
     store = _event_page(request)
+    effective_investigation_id = investigation_id
+    if session_id is not None and effective_investigation_id is None:
+        try:
+            session = request.app.state.runtime.agent_session_store.get_session(session_id)
+            effective_investigation_id = session.investigation_id
+        except Exception:  # noqa: BLE001 - an unknown session simply has no correlated history
+            effective_investigation_id = None
     page = store.list_page(
         after_sequence=after_sequence,
         limit=limit,
         session_id=session_id,
         target_id=target_id,
-        investigation_id=investigation_id,
+        investigation_id=effective_investigation_id,
         event_types=types,
         allowed_target_ids=allowed_targets,
     )

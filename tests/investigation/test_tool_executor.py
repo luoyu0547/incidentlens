@@ -47,6 +47,7 @@ from incidentlens_control_plane.investigation.tools import (
     TOOL_FILE_EDIT,
     TOOL_FILE_WRITE,
     TOOL_HOST_LIST,
+    TOOL_HOST_METRICS,
     TOOL_HOST_READ,
     TOOL_HOST_SEARCH,
     TOOL_HOST_STAT,
@@ -1664,6 +1665,36 @@ async def test_shell_exposes_model_visible_output_beyond_preview(tmp_path: Path)
 
     assert outcome.status is ToolCallStatus.SUCCEEDED
     assert "FINAL_CELL=201" in outcome.summary
+
+
+@pytest.mark.asyncio
+async def test_host_metrics_is_fixed_read_only_and_never_requests_approval(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(
+        tmp_path,
+        transport_factory=HarnessTransportFactory(
+            shell_output=b"healthy metrics", shell_status=0
+        ),
+    )
+    run = _new_run(harness.investigations)
+
+    outcome = await harness.executor.execute(
+        tool_request(
+            TOOL_HOST_METRICS,
+            sections=["load", "memory", "disk"],
+        ),
+        run,
+        now=NOW,
+    )
+
+    assert outcome.status is ToolCallStatus.SUCCEEDED
+    assert harness.approvals.list() == ()
+    assert len(harness.factory.transports) == 1
+    assert "host metrics collected" in outcome.summary
+    stored = harness.evidence_store.get(outcome.evidence[0].evidence_id)
+    assert stored.evidence_kind is EvidenceKind.COMMAND_OUTPUT
+    assert stored.metadata["command"] == "host_metrics:load,memory,disk"
 
 
 @pytest.mark.asyncio

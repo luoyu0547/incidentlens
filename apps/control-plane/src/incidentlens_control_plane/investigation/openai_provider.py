@@ -64,6 +64,16 @@ class OpenAICompatibleProvider(ModelProvider):
             _remove_unknown_top_level_tool_arguments(
                 result_payload, request.tool_schemas
             )
+            if _needs_initial_registry_check(request, result_payload):
+                # Some OpenAI-compatible models answer the strict JSON prompt
+                # with an empty object despite receiving function schemas. Keep
+                # the run evidence-first by making the mandatory first
+                # observation explicit; subsequent turns remain model-driven.
+                result_payload["tool_requests"] = [{
+                    "tool_call_id": "auto_registry_info",
+                    "tool_name": "registry_info",
+                    "arguments": {},
+                }]
             usage = response.get("usage", {})
             result_payload["usage"] = ProviderUsage(
                 input_tokens=int(usage.get("prompt_tokens", 0)),
@@ -78,6 +88,33 @@ class OpenAICompatibleProvider(ModelProvider):
             raise ProviderOutputFormatError(
                 f"OpenAI-compatible API 返回的结构化调查回合无效：{str(exc)[:500]}",
             ) from exc
+
+
+def _needs_initial_registry_check(
+    request: ConversationRequest, payload: dict[str, object]
+) -> bool:
+    """Return whether an empty first turn must gather registry evidence."""
+    if (
+        payload.get("tool_requests")
+        or payload.get("hypotheses")
+        or payload.get("conclusions")
+        or payload.get("stop_signal")
+    ):
+        return False
+    if not any(schema.tool_name == "registry_info" for schema in request.tool_schemas):
+        return False
+    saw_remote_request = False
+    saw_tool_result = False
+    for message in request.messages:
+        for block in message.blocks:
+            if isinstance(block, ToolResultBlock):
+                saw_tool_result = True
+            elif isinstance(block, TextBlock) and any(
+                word in block.text.lower()
+                for word in ("服务器", "远程", "remote", "server", "日志", "log")
+            ):
+                saw_remote_request = True
+    return saw_remote_request and not saw_tool_result
 
 def _message_payload(message: TranscriptMessage) -> dict[str, object]:
     if message.role is MessageRole.ASSISTANT:
@@ -565,4 +602,16 @@ Todo 与复杂工作：
   请求收集证据；不得因为尚无工具结果就直接停止。
 输出模板：
 {"tool_requests":[],"hypotheses":[],"conclusions":[],"child_delegation":null,
-"stop_signal":{"stop_reason":"missing_evidence","summary":"需要收集证据"},"usage":{}}"""
+ "stop_signal":{"stop_reason":"missing_evidence","summary":"需要收集证据"},"usage":{}}"""
+
+# Avoid invisible no-op turns for remote checks: the first response must gather
+# registry evidence before the model chooses subsequent tool ordering.
+_SYSTEM_PROMPT += (
+    "首轮执行约束：用户要求检查远程服务器、服务状态或日志且尚无证据时，必须先提出一个 "
+    "registry_info tool_request（arguments 为空对象），可同时提出 todo_write；不得以空 "
+    "tool_requests 或 stop_signal 结束首轮。"
+)
+_SYSTEM_PROMPT += (
+    "系统负载、内存或磁盘容量检查必须优先使用 host_metrics；不得用 shell_exec 代替 "
+    "host_metrics。只有专用只读工具无法表达的诊断才可提出 shell_exec。"
+)

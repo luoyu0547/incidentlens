@@ -49,16 +49,30 @@ async def cli_events(
     if runtime is None:
         await websocket.close(code=4401, reason="runtime unavailable")
         return
+    # Tool/run events are intentionally keyed by investigation rather than
+    # session (they predate the product-session projection). Resolve the
+    # session once at handshake so the live stream can apply an equivalent
+    # investigation filter and never leak another session's tool rows.
+    effective_investigation_id = investigation_id
+    if session_id is not None and effective_investigation_id is None:
+        try:
+            session = runtime.agent_session_store.get_session(session_id)
+            effective_investigation_id = session.investigation_id
+        except Exception:  # noqa: BLE001 - invalid session is handled by stream auth
+            effective_investigation_id = None
     stream = CliEventStream(
         events=runtime.events,
         broker=runtime.broker,
         filter=EventFilter(
             session_id=session_id,
             target_id=target_id,
-            investigation_id=investigation_id,
+            investigation_id=effective_investigation_id,
             event_types=tuple(event_type or ()),
         ),
         allowed_target_ids=principal.allowed_target_ids,
+        resolve_investigation_id=lambda current_session_id: (
+            runtime.agent_session_store.get_session(current_session_id).investigation_id
+        ),
         heartbeat_seconds=runtime.settings.stream_heartbeat_seconds,
     )
 

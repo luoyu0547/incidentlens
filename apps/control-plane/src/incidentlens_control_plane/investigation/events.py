@@ -293,9 +293,44 @@ class InvestigationEventPublisher:
             tool_call_id=tool_call_id,
             provider_tool_call_id=provider_tool_call_id,
             tool_name=tool_name,
+            summary=self._tool_display_summary(tool_name, arguments),
             arguments_preview=self._preview(arguments),
             status="proposed",
         )
+
+    @staticmethod
+    def _tool_display_summary(tool_name: str, arguments: dict[str, Any]) -> str:
+        """Return a bounded product-facing description, never raw argument JSON."""
+        if tool_name == "registry_info":
+            return "确认已注册的调查范围"
+        if tool_name == "todo_write":
+            todos = arguments.get("todos")
+            count = len(todos) if isinstance(todos, list) else 0
+            return f"更新调查计划（{count} 项）"
+        if tool_name == "host_metrics":
+            sections = arguments.get("sections")
+            labels = {"load": "负载", "memory": "内存", "disk": "磁盘"}
+            selected = sections if isinstance(sections, list) else ["load", "memory", "disk"]
+            visible = "、".join(labels.get(str(item), str(item)) for item in selected)
+            return f"检查主机{visible}"
+        if tool_name in {"host_read", "container_read"}:
+            path = arguments.get("path")
+            return f"读取文件 {path}" if isinstance(path, str) else "读取文件"
+        if tool_name in {"host_list", "container_list"}:
+            path = arguments.get("path")
+            return f"列出目录 {path}" if isinstance(path, str) else "列出目录"
+        if tool_name in {"host_search", "container_search"}:
+            path = arguments.get("path")
+            query = arguments.get("query")
+            if isinstance(path, str) and isinstance(query, str):
+                return f"在 {path} 中搜索 {query}"
+            return "搜索文件"
+        if tool_name == "shell_exec":
+            command = arguments.get("command")
+            return f"执行受控命令 {command}" if isinstance(command, str) else "执行受控命令"
+        if tool_name.startswith("log_"):
+            return "查询已脱敏日志"
+        return "执行受控调查步骤"
 
     def policy_decided(
         self,
@@ -331,6 +366,14 @@ class InvestigationEventPublisher:
             run_id=run.agent_run_id,
             investigation_id=run.investigation_id,
             total=len(items),
+            items=[
+                {
+                    "todo_id": item.todo_id,
+                    "content": item.content,
+                    "status": item.status.value,
+                }
+                for item in items
+            ],
             **counts,
         )
 
@@ -431,13 +474,18 @@ class InvestigationEventPublisher:
         )
 
     def tool_call_started(
-        self, tool_call: ToolCall, *, occurred_at: datetime | None = None
+        self,
+        tool_call: ToolCall,
+        *,
+        investigation_id: str | None = None,
+        occurred_at: datetime | None = None,
     ) -> RuntimeEvent:
         return self.emit(
             RuntimeEventType.TOOL_CALL_STARTED,
             occurred_at=occurred_at,
             tool_call_id=tool_call.tool_call_id,
             run_id=tool_call.agent_run_id,
+            investigation_id=investigation_id,
             tool_name=tool_call.tool_name,
             status=tool_call.status.value,
         )
@@ -447,6 +495,7 @@ class InvestigationEventPublisher:
         tool_call: ToolCall,
         *,
         previous: str,
+        investigation_id: str | None = None,
         occurred_at: datetime | None = None,
     ) -> RuntimeEvent:
         return self.emit(
@@ -454,6 +503,7 @@ class InvestigationEventPublisher:
             occurred_at=occurred_at,
             tool_call_id=tool_call.tool_call_id,
             run_id=tool_call.agent_run_id,
+            investigation_id=investigation_id,
             tool_name=tool_call.tool_name,
             previous=previous,
             status=tool_call.status.value,
@@ -462,13 +512,18 @@ class InvestigationEventPublisher:
         )
 
     def tool_call_completed(
-        self, tool_call: ToolCall, *, occurred_at: datetime | None = None
+        self,
+        tool_call: ToolCall,
+        *,
+        investigation_id: str | None = None,
+        occurred_at: datetime | None = None,
     ) -> RuntimeEvent:
         return self.emit(
             RuntimeEventType.TOOL_CALL_COMPLETED,
             occurred_at=occurred_at,
             tool_call_id=tool_call.tool_call_id,
             run_id=tool_call.agent_run_id,
+            investigation_id=investigation_id,
             tool_name=tool_call.tool_name,
             status=tool_call.status.value,
             approval_id=tool_call.approval_id,

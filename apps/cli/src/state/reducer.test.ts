@@ -57,6 +57,7 @@ describe('reducer', () => {
         messageId: 'msg-1',
         blockId: 'block-1',
         content: 'Hello World',
+        finalized: false,
       });
     });
 
@@ -184,6 +185,7 @@ describe('reducer', () => {
         messageId: 'msg-1',
         blockId: 'block-1',
         content: 'First',
+        finalized: false,
       });
     });
   });
@@ -211,6 +213,52 @@ describe('reducer', () => {
         toolName: 'search_logs',
         status: 'proposed',
       });
+    });
+
+    it('accepts the backend tool_call_id field', () => {
+      const state = createInitialState();
+      const newState = reducer(state, {
+        type: 'stream_event',
+        event: {
+          event_type: 'tool.proposed',
+          sequence: 1,
+          tool_call_id: 'call-1',
+          tool_name: 'registry_info',
+          arguments_preview: '{}',
+        },
+      });
+
+      expect(newState.messages[0]).toMatchObject({
+        kind: 'tool',
+        toolId: 'call-1',
+        toolName: 'registry_info',
+        status: 'proposed',
+      });
+      expect(newState.messages[0]).toHaveProperty('summary', undefined);
+    });
+
+    it('projects waiting approval without marking the tool complete', () => {
+      const proposed = reducer(createInitialState(), {
+        type: 'stream_event',
+        event: {
+          event_type: 'tool.proposed',
+          sequence: 1,
+          tool_call_id: 'call-1',
+          tool_name: 'shell_exec',
+          summary: '执行受控命令 uptime',
+        },
+      });
+      const waiting = reducer(proposed, {
+        type: 'stream_event',
+        event: {
+          event_type: 'tool_call.status_changed',
+          sequence: 2,
+          tool_call_id: 'call-1',
+          status: 'waiting_approval',
+        },
+      });
+
+      expect(waiting.messages[0]).toMatchObject({ status: 'waiting_approval' });
     });
 
     it('handles tool running event', () => {
@@ -335,6 +383,98 @@ describe('reducer', () => {
     });
   });
 
+  describe('todo projection', () => {
+    it('projects todo.changed into persistent plan state', () => {
+      const state = reducer(createInitialState(), {
+        type: 'stream_event',
+        event: {
+          event_type: 'todo.changed',
+          sequence: 1,
+          items: [
+            { todo_id: 't1', content: '检查负载', status: 'in_progress' },
+            { todo_id: 't2', content: '检查磁盘', status: 'pending' },
+          ],
+        },
+      });
+
+      expect(state.todos).toEqual([
+        { todoId: 't1', content: '检查负载', status: 'in_progress' },
+        { todoId: 't2', content: '检查磁盘', status: 'pending' },
+      ]);
+    });
+  });
+
+  describe('usage projection', () => {
+    it('accumulates model round token usage', () => {
+      const first = reducer(createInitialState(), {
+        type: 'stream_event',
+        event: {
+          event_type: 'model_round.completed',
+          sequence: 1,
+          input_tokens: 1200,
+          output_tokens: 300,
+        },
+      });
+      const second = reducer(first, {
+        type: 'stream_event',
+        event: {
+          event_type: 'model_round.completed',
+          sequence: 2,
+          input_tokens: 800,
+          output_tokens: 200,
+        },
+      });
+
+      expect(second.usage).toEqual({ rounds: 2, inputTokens: 2000, outputTokens: 500 });
+    });
+  });
+
+  describe('agent activity projection', () => {
+    it('shows a running model round and clears it on completion', () => {
+      const running = reducer(createInitialState(), {
+        type: 'stream_event',
+        event: {
+          event_type: 'model_round.started',
+          sequence: 1,
+          round_number: 2,
+          occurred_at: '2026-08-27T01:00:00Z',
+        },
+      });
+      expect(running.activity).toEqual({
+        kind: 'model',
+        round: 2,
+        startedAt: '2026-08-27T01:00:00Z',
+      });
+
+      const completed = reducer(running, {
+        type: 'stream_event',
+        event: { event_type: 'model_round.completed', sequence: 2 },
+      });
+      expect(completed.activity).toEqual({ kind: 'idle' });
+    });
+
+    it('renders a safe provider-format failure and clears activity', () => {
+      const running = {
+        ...createInitialState(),
+        activity: { kind: 'model' as const, round: 2, startedAt: '2026-08-27T01:00:00Z' },
+      };
+      const failed = reducer(running, {
+        type: 'stream_event',
+        event: {
+          event_type: 'agent_run.failed',
+          sequence: 1,
+          run_id: 'run-1',
+          reason_preview: "OpenAI-compatible API 返回的结构化调查回合无效：Expecting ',' delimiter",
+        },
+      });
+      expect(failed.activity).toEqual({ kind: 'idle' });
+      expect(failed.messages.at(-1)).toMatchObject({
+        kind: 'system',
+        content: '调查失败：模型返回格式无效，已停止本轮调查',
+      });
+    });
+  });
+
   describe('unknown events', () => {
     it('advances cursor without UI mutation', () => {
       const state = createInitialState();
@@ -431,6 +571,8 @@ describe('createInitialState', () => {
     expect(state.messages).toEqual([]);
     expect(state.operations).toEqual({});
     expect(state.approvals).toEqual({});
+    expect(state.todos).toEqual([]);
+    expect(state.usage).toEqual({ rounds: 0, inputTokens: 0, outputTokens: 0 });
     expect(state.stream.connected).toBe(false);
     expect(state.stream.lastSequence).toBe(0);
   });

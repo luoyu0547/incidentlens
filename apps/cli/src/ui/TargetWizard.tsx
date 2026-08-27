@@ -214,6 +214,10 @@ export function TargetWizard({
     }
 
     setError(undefined);
+    // Move the routing ref immediately, before React commits the render for
+    // the next field. A fast terminal can deliver the next character in that
+    // gap; leaving the ref stale would append it to the previous field.
+    fieldRef.current = next;
     setField(next);
   };
 
