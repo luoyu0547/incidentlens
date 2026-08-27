@@ -38,7 +38,6 @@ import { TargetWizard, RemoveTargetPrompt } from '../ui/TargetWizard.js';
 import { SessionPicker } from '../ui/SessionPicker.js';
 import { ApprovalCard } from '../ui/ApprovalCard.js';
 import { safeApprovalText } from '../ui/ApprovalCard.js';
-import { ApprovalReasonPrompt } from '../ui/ApprovalReasonPrompt.js';
 import { TodoPanel } from '../ui/TodoPanel.js';
 import { UsageLine } from '../ui/UsageLine.js';
 import { ActivityLine } from '../ui/ActivityLine.js';
@@ -105,13 +104,19 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
 
   // Approval decisions always refresh and render the server response.
   const approvalController = useMemo(() => new ApprovalControllerImpl({ api: deps.api }), [deps.api]);
+  // Do not resurrect stale approvals from prior CLI runs into a fresh
+  // operator session. New approvals created after this baseline remain
+  // visible and actionable.
+  const approvalBaselineRef = useRef(Date.now());
+  const approveAllRef = useRef(false);
+  const autoApprovingIdsRef = useRef(new Set<string>());
   const [approvalPrompt, setApprovalPrompt] = useState<{ id: string; decision: 'approve' | 'reject' }>();
   const modalInputActive = state.overlay.kind !== 'none' || approvalPrompt !== undefined;
   const approvalRuntime = useMemo<ApprovalCommandRuntime>(() => ({
     controller: approvalController,
     listPending: async () => (await deps.api.listApprovals({ status: 'pending', limit: 500 })).items,
     getCurrentApprovalId: () => Object.values(stateRef.current.approvals).find((a) => a.decision_status === 'pending')?.approval_id,
-    openReasonPrompt: (id, decision) => setApprovalPrompt({ id, decision }),
+    openReasonPrompt: (id, decision) => { void approvalController.decide(id, decision); },
     showDiff: (approval) => dispatch({ type: 'system_message', content: safeApprovalText(approval.diff) ?? 'No safe diff available.', timestamp: deps.now() }),
   }), [approvalController, deps, dispatch]);
 
@@ -287,6 +292,51 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
     }
   }, [state.bootstrap, deps, dispatch]);
 
+  // Approval requests can be linked to an investigation run without a
+  // session_id (for example, a target-scoped cloud investigation).  Fetch the
+  // server-authoritative pending queue globally so those requests still
+  // render an actionable ApprovalCard instead of only the passive
+  // "waiting for approval" activity line.
+  useEffect(() => {
+    if (state.bootstrap !== 'ready') return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const page = await deps.api.listApprovals({ status: 'pending', limit: 500 });
+        if (cancelled) return;
+        // Keep the active request focused. Historical pending records from
+        // prior runs must not stack above the prompt and obscure the current
+        // tool call.
+        dispatch({ type: 'clear_approvals' });
+        const fresh = page.items.filter((approval) => {
+          const created = Date.parse(approval.created_at);
+          return Number.isFinite(created) && created >= approvalBaselineRef.current;
+        });
+        for (const approval of fresh.slice(-1)) {
+          dispatch({ type: 'set_approval', approval });
+          if (approveAllRef.current && !autoApprovingIdsRef.current.has(approval.approval_id)) {
+            autoApprovingIdsRef.current.add(approval.approval_id);
+            void approvalController.decide(approval.approval_id, 'approve')
+              .then((updated) => dispatch({ type: 'set_approval', approval: updated }))
+              .catch((error) => {
+                autoApprovingIdsRef.current.delete(approval.approval_id);
+                dispatch({ type: 'system_message', content: `Error: ${error instanceof Error ? error.message : 'Approval decision failed'}`, timestamp: deps.now() });
+              });
+          }
+        }
+      } catch {
+        // Stream/snapshot recovery remains authoritative; a failed refresh is
+        // non-fatal and must not hide already-rendered approval cards.
+      }
+    };
+    void refresh();
+    const timer = setInterval(() => void refresh(), 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [state.bootstrap, deps.api, dispatch, approvalController, deps]);
+
   // Handle keyboard input
   useInput((input, key) => {
     // Handle Ctrl+C
@@ -321,6 +371,16 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
     // the main prompt and the overlay both process the same characters and
     // Enter key, which can submit stray commands while editing wizard fields.
     if (modalInputActive) {
+      return;
+    }
+
+    // ApprovalCard owns arrow/enter navigation while a pending approval is
+    // visible. Prevent raw escape sequences from being appended to the main
+    // prompt, which would disable the card's navigation on the next render.
+    const hasPendingApproval = Object.values(state.approvals).some(
+      (approval) => approval.decision_status === 'pending',
+    );
+    if (hasPendingApproval && (key.up || key.down || input === '\u001b[A' || input === '\u001b[B' || input === '\u001bOA' || input === '\u001bOB')) {
       return;
     }
 
@@ -371,6 +431,19 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
         return;
       }
 
+      const pendingApproval = Object.values(stateRef.current.approvals).find(
+        (approval) => approval.decision_status === 'pending',
+      );
+      const decision = value.trim().toLowerCase();
+      if (pendingApproval && (decision === 'yes' || decision === 'no' || decision === 'yes all')) {
+        if (decision === 'yes all') approveAllRef.current = true;
+        const approve = decision !== 'no';
+        void approvalController.decide(pendingApproval.approval_id, approve ? 'approve' : 'reject')
+          .then((updated) => dispatch({ type: 'set_approval', approval: updated }))
+          .catch((error) => dispatch({ type: 'system_message', content: `Error: ${error instanceof Error ? error.message : 'Approval decision failed'}`, timestamp: deps.now() }));
+        return;
+      }
+
       const parsed = parseInput(value);
 
       switch (parsed.kind) {
@@ -410,7 +483,7 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
       // Clear input
       dispatch({ type: 'set_input', input: { value: '' } });
     },
-    [dispatch, registry, commandContext, intoMessages, sessionController, deps]
+    [dispatch, registry, commandContext, intoMessages, sessionController, approvalController, deps]
   );
 
   // Handle input change
@@ -481,40 +554,6 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
 
       {/* Conversation */}
       <Conversation messages={state.messages} />
-      {Object.values(state.approvals).filter((approval) => approval.decision_status === 'pending').map((approval) => (
-        <ApprovalCard
-          key={approval.approval_id}
-          approval={approval}
-          focused={state.input.focused}
-          promptEmpty={state.input.value.length === 0}
-          overlayActive={state.overlay.kind !== 'none' || approvalPrompt !== undefined}
-          onAction={(action) => {
-            void approvalController.refresh(approval.approval_id).then((latest) => {
-              dispatch({ type: 'set_approval', approval: latest });
-              if (action === 'diff') approvalRuntime.showDiff(latest);
-              else if (latest.decision_status === 'pending') approvalRuntime.openReasonPrompt(latest.approval_id, action);
-            }).catch((error) => dispatch({ type: 'system_message', content: `Error: ${error instanceof Error ? error.message : 'Approval refresh failed'}`, timestamp: deps.now() }));
-          }}
-        />
-      ))}
-      {approvalPrompt && (
-        <ApprovalReasonPrompt
-          decision={approvalPrompt.decision}
-          onCancel={() => setApprovalPrompt(undefined)}
-          onSubmit={(reason) => {
-            const prompt = approvalPrompt;
-            setApprovalPrompt(undefined);
-            void approvalController.refresh(prompt.id).then((latest) => {
-              dispatch({ type: 'set_approval', approval: latest });
-              if (latest.decision_status !== 'pending') throw new Error(`Approval is ${latest.decision_status}`);
-              return approvalController.decide(prompt.id, prompt.decision, reason);
-            }).then((updated) => {
-              dispatch({ type: 'set_approval', approval: updated });
-            }).catch((error) => dispatch({ type: 'system_message', content: `Error: ${error instanceof Error ? error.message : 'Approval decision failed'}`, timestamp: deps.now() }));
-          }}
-        />
-      )}
-
       {Object.values(state.approvals).some((approval) => approval.decision_status === 'pending') && (
         <Text color="yellow" dimColor>
           {Object.values(state.approvals).filter((a) => a.decision_status === 'pending').length} pending approval(s)
@@ -524,6 +563,32 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
       <TodoPanel todos={state.todos} />
       <ActivityLine activity={state.activity} />
       <UsageLine usage={state.usage} />
+
+      {/* Keep the active approval at the bottom, immediately above the prompt,
+          so the operator can inspect and act without losing the live status. */}
+      {!approvalPrompt && Object.values(state.approvals).filter((approval) => approval.decision_status === 'pending').map((approval) => (
+        <ApprovalCard
+          key={approval.approval_id}
+          approval={approval}
+          focused={state.input.focused}
+          promptEmpty={state.input.value.length === 0}
+          overlayActive={state.overlay.kind !== 'none' || approvalPrompt !== undefined}
+          onAction={(action) => {
+            if (action === 'approve_all') approveAllRef.current = true;
+            void approvalController.refresh(approval.approval_id).then((latest) => {
+              dispatch({ type: 'set_approval', approval: latest });
+              if (action === 'diff') approvalRuntime.showDiff(latest);
+              else if (latest.decision_status === 'pending') {
+                void approvalController.decide(
+                  latest.approval_id,
+                  action === 'approve_all' ? 'approve' : action,
+                ).then((updated) => dispatch({ type: 'set_approval', approval: updated }))
+                  .catch((error) => dispatch({ type: 'system_message', content: `Error: ${error instanceof Error ? error.message : 'Approval decision failed'}`, timestamp: deps.now() }));
+              }
+            }).catch((error) => dispatch({ type: 'system_message', content: `Error: ${error instanceof Error ? error.message : 'Approval refresh failed'}`, timestamp: deps.now() }));
+          }}
+        />
+      ))}
 
       {/* Command Palette Overlay */}
       {state.overlay.kind === 'command-palette' && (

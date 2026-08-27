@@ -487,17 +487,7 @@ export const ApiVersionViewSchema = {
 
 export const ApprovalDecisionRequestSchema = {
     additionalProperties: false,
-    properties: {
-        reason: {
-            maxLength: 1000,
-            minLength: 1,
-            title: 'Reason',
-            type: 'string'
-        }
-    },
-    required: [
-        'reason'
-    ],
+    properties: {},
     title: 'ApprovalDecisionRequest',
     type: 'object'
 } as const;

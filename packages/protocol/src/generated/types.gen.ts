@@ -288,10 +288,7 @@ export type ApiVersionView = {
  * ApprovalDecisionRequest
  */
 export type ApprovalDecisionRequest = {
-    /**
-     * Reason
-     */
-    reason: string;
+    [key: string]: never;
 };
 
 /**

@@ -5,7 +5,7 @@ import type { ApprovalDetailView } from '@incidentlens/protocol';
 /** Server-authoritative approval operations. */
 export interface ApprovalController {
   refresh(id: string): Promise<ApprovalDetailView>;
-  decide(id: string, decision: 'approve' | 'reject', reason: string): Promise<ApprovalDetailView>;
+  decide(id: string, decision: 'approve' | 'reject'): Promise<ApprovalDetailView>;
 }
 
 export interface ApprovalControllerOptions {
@@ -28,17 +28,8 @@ export class ApprovalControllerImpl implements ApprovalController {
     return this.api.getApproval(id);
   }
 
-  async decide(
-    id: string,
-    decision: 'approve' | 'reject',
-    reason: string,
-  ): Promise<ApprovalDetailView> {
-    const trimmedReason = reason.trim();
-    if (trimmedReason === '') {
-      throw new Error('A reason is required to decide an approval.');
-    }
-
-    return this.api.decideApproval(id, decision, { reason: trimmedReason }, {
+  async decide(id: string, decision: 'approve' | 'reject'): Promise<ApprovalDetailView> {
+    return this.api.decideApproval(id, decision, {}, {
       idempotencyKey: createIdempotencyKey(),
     });
   }

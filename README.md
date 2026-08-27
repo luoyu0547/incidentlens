@@ -4,6 +4,23 @@
 
 IncidentLens 将项目注册、脱敏日志、证据、受限 Agent 调查、人工审批、变更备份和调查报告串成一条可审计的诊断链路。它不是故障注入演示，也不会在远程服务器部署 IncidentLens agent，更不会把通用 SSH Shell 交给模型。
 
+## 演示
+
+在真实 Tencent CVM 微服务目标上，Agent 从受限证据开始调查，展示每一条工具调用和完整命令，
+在风险操作前暂停等待操作员审批，再继续执行与远程验证。CLI、Web 和控制面共享同一条持久化调查链路。
+
+[![观看 IncidentLens CLI Agent 演示](docs/assets/demo-run-20260828-final/cli-approval.png)](docs/assets/demo-run-20260828-final/incidentlens-cli-agent-demo-30s.mov)
+
+> [观看 30 秒 CLI Agent 演示视频](docs/assets/demo-run-20260828-final/incidentlens-cli-agent-demo-30s.mov) ·
+> 仅录制 CLI Terminal 窗口，不包含桌面或其他应用。
+
+| CLI：工具调用、调查计划与审批 | Web：实时工作区总览 |
+| --- | --- |
+| ![CLI Agent 调查过程](docs/assets/demo-run-20260828-final/cli-agent-final.png) | ![Web 工作区总览](docs/assets/demo-run-20260828-final/web-overview.png) |
+
+审批卡会展示精确命令，并提供 `yes`、`no`、`yes all` 三个选择；使用 ↑/↓ 移动、Enter 确认。
+`yes all` 只作用于当前对话 session，审批请求不要求或保存理由。
+
 ### Tencent CVM 真实 Agent 闭环
 
 2026-08-24 完成了一次受控 Tencent CVM 真实验收。配置的 `deepseek-v4-flash` 通过正常
@@ -71,6 +88,55 @@ uv run pytest -q
 # 启动 API
 uv run uvicorn incidentlens_control_plane.main:app --reload
 ```
+
+### 外部终端演示与云端微服务验收
+
+为了录屏时让 CLI、Web 和后端各自保持清晰可见，使用 macOS 外部 Terminal 分别启动三个进程。
+Web 开发服务器需要读取演示 token，才能通过 Vite 代理访问控制面：
+
+```bash
+# Terminal 1 — API / Agent runtime
+set -a; source .env; source .env.demo; set +a
+uv run uvicorn incidentlens_control_plane.main:app --host 0.0.0.0 --port 8000
+
+# Terminal 2 — Web
+set -a; source .env.demo; set +a
+npm run dev --workspace @incidentlens/web -- --host 0.0.0.0 --port 5173
+
+# Terminal 3 — CLI
+export INCIDENTLENS_TOKEN=demo-token INCIDENTLENS_API_URL=http://localhost:8000
+node apps/cli/dist/cli.js
+```
+
+云端 acceptance 微服务部署到题目提供的服务器：
+
+```bash
+./scripts/cloud_acceptance_target.sh provision
+./scripts/cloud_acceptance_target.sh status
+```
+
+默认目标是 SSH 配置中的 `incidentlens-tencent`（`ubuntu@43.138.132.41`），也可用 `--host` 或 `INCIDENTLENS_CLOUD_HOST` 覆盖。Compose 将 gateway、order stable/canary、payment、inventory 与 PostgreSQL 作为隔离微服务启动，服务端口只绑定云主机 loopback；停止使用 `./scripts/cloud_acceptance_target.sh stop`。
+
+最终演示素材位于 [`docs/assets/demo-run-20260828-final/`](docs/assets/demo-run-20260828-final/)；
+视频固定裁切为 CLI Terminal 窗口，Web 使用浏览器完整页面截图。
+
+#### 2026-08-27 实际联调与修复记录
+
+本次运行直接控制 macOS Terminal，分别保持 API、Vite 和 CLI 窗口可见；没有用 Codex 内置终端
+承载演示进程。外部窗口截图保存在
+[`docs/assets/demo-run-20260827/`](docs/assets/demo-run-20260827/)，其中 `cli-terminal.png`、
+`web-terminal.png`、`api-terminal.png` 分别记录三条进程链路，`full-screen.png` 为同屏证据。
+
+云端目标使用 SSH 配置别名 `incidentlens-tencent`（`ubuntu@43.138.132.41`）。Agent 调查前的
+真实故障矩阵为 stable/10=201、stable/500=429、canary/10=503、canary/500=503。定位到的两个
+缺陷是支付服务 `PAYMENT_REJECT_ABOVE=100` 错误拒绝大额订单，以及 canary 订单服务
+`DB_PORT=55432` 与 Compose 内部 PostgreSQL 端口不一致。修复后重新构建受影响容器并复查，
+四个组合均返回 201（stable/10、stable/500、canary/10、canary/500）。
+
+结论：问题已完整复现、定位、修复并由云端请求矩阵验证通过；修复只改变 acceptance 目标的
+两个配置值，没有上传本地源码，也没有暴露通用 SSH Shell。录屏应覆盖 CLI 的工具调用、证据
+摘要、精确 diff、审批和复查输出；若环境未授予屏幕录制权限，应以这些 PNG 和外部 Terminal
+滚动输出作为可复核证据，不把“未录到视频”表述成“已完成录屏”。
 
 运行数据默认存储在 `~/.incidentlens`；若要隔离一次本地体验：
 

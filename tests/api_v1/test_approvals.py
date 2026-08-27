@@ -296,7 +296,7 @@ def test_list_get_and_decide_resolve_facade_target_authorization(client: TestCli
     decide_hidden = client.post(
         f"{ROUTE}/{hidden}/approve",
         headers=_idem(SCOPED_B_TOKEN, "approve-hidden-collision"),
-        json={"reason": "Looks fine."},
+        json={},
     )
     assert decide_hidden.status_code == 404
     assert decide_hidden.json()["error"]["code"] == "resource_not_found"
@@ -323,7 +323,7 @@ def test_missing_facade_binding_fails_closed_for_list_get_and_decision(
     decide_response = client.post(
         f"{ROUTE}/{orphan}/approve",
         headers=_idem(OPERATOR_A_TOKEN, "approve-orphan"),
-        json={"reason": "Approved."},
+        json={},
     )
     assert decide_response.status_code == 404
     assert decide_response.json()["error"]["code"] == "resource_not_found"
@@ -339,27 +339,29 @@ def test_get_and_decide_hide_unauthorized_target(client: TestClient) -> None:
     decide_response = client.post(
         f"{ROUTE}/{approval_id}/approve",
         headers=_idem(SCOPED_B_TOKEN, "approve-hidden"),
-        json={"reason": "Looks fine."},
+        json={},
     )
     assert decide_response.status_code == 404
     assert decide_response.json()["error"]["code"] == "resource_not_found"
 
 
-def test_approve_requires_reason_and_scope(client: TestClient) -> None:
+def test_approve_requires_scope_but_no_reason(client: TestClient) -> None:
     approval_id = _seed_approval(client, approval_id_target="tgt-a")
 
-    missing_reason = client.post(
+    approved = client.post(
         f"{ROUTE}/{approval_id}/approve",
         headers=_idem(OPERATOR_A_TOKEN, "approve-missing"),
         json={},
     )
-    assert missing_reason.status_code == 422
-    assert missing_reason.json()["error"]["code"] == "request_validation_failed"
+    assert approved.status_code == 200
+    assert approved.json()["decision_reason"] is None
+
+    approval_id = _seed_approval(client, approval_id_target="tgt-a")
 
     read_only = client.post(
         f"{ROUTE}/{approval_id}/approve",
         headers=_idem(READ_ONLY_TOKEN, "approve-readonly"),
-        json={"reason": "Approved."},
+        json={},
     )
     assert read_only.status_code == 403
     assert read_only.json()["error"]["code"] == "permission_denied"
@@ -370,30 +372,30 @@ def test_body_actor_is_rejected(client: TestClient) -> None:
     response = client.post(
         f"{ROUTE}/{approval_id}/approve",
         headers=_idem(OPERATOR_A_TOKEN, "approve-extra-field"),
-        json={"reason": "Approved.", "decided_by": "admin"},
+        json={"decided_by": "admin"},
     )
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "request_validation_failed"
 
 
-def test_approve_is_idempotent_and_persists_actor_reason(client: TestClient) -> None:
+def test_approve_is_idempotent_and_persists_actor_without_reason(client: TestClient) -> None:
     approval_id = _seed_approval(client, approval_id_target="tgt-a", linked=True)
     headers = _idem(OPERATOR_A_TOKEN, "approve-1")
 
     first = client.post(
         f"{ROUTE}/{approval_id}/approve",
         headers=headers,
-        json={"reason": "Reviewed exact diff and rollback plan."},
+        json={},
     )
     assert first.status_code == 200, first.text
     assert first.json()["decision_status"] == "approved"
     assert first.json()["decided_by"] == "operator-a"
-    assert first.json()["decision_reason"] == "Reviewed exact diff and rollback plan."
+    assert first.json()["decision_reason"] is None
 
     replay = client.post(
         f"{ROUTE}/{approval_id}/approve",
         headers=headers,
-        json={"reason": "Reviewed exact diff and rollback plan."},
+        json={},
     )
     assert replay.status_code == 200
     assert replay.headers.get("Idempotency-Replayed") == "true"
@@ -434,14 +436,14 @@ def test_contradictory_decision_is_conflict(client: TestClient) -> None:
     approved = client.post(
         f"{ROUTE}/{approval_id}/approve",
         headers=_idem(OPERATOR_A_TOKEN, "approve-2"),
-        json={"reason": "Approved."},
+        json={},
     )
     assert approved.status_code == 200
 
     rejected = client.post(
         f"{ROUTE}/{approval_id}/reject",
         headers=_idem(OPERATOR_A_TOKEN, "reject-1"),
-        json={"reason": "Actually reject."},
+        json={},
     )
     assert rejected.status_code == 409
     assert rejected.json()["error"]["code"] == "approval_already_decided"
@@ -456,7 +458,7 @@ def test_expired_approval_is_conflict(client: TestClient) -> None:
     response = client.post(
         f"{ROUTE}/{approval_id}/approve",
         headers=_idem(OPERATOR_A_TOKEN, "approve-expired"),
-        json={"reason": "Too late."},
+        json={},
     )
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "approval_expired"
@@ -476,7 +478,7 @@ def test_decision_remains_committed_when_downstream_fails(
     response = client.post(
         f"{ROUTE}/{approval_id}/approve",
         headers=_idem(OPERATOR_A_TOKEN, "approve-downstream-fail"),
-        json={"reason": "Reviewed exact diff and rollback plan."},
+        json={},
     )
     assert response.status_code == 200, response.text
     body = response.json()
@@ -549,7 +551,7 @@ def test_shell_gateway_created_approval_preserves_linkage_for_v1_decision(
     response = client.post(
         f"{ROUTE}/{approval_id}/approve",
         headers=_idem(OPERATOR_A_TOKEN, "approve-shell-linkage"),
-        json={"reason": "Approved exact shell action."},
+        json={},
     )
 
     assert response.status_code == 200, response.text
@@ -581,11 +583,10 @@ def test_same_key_retry_resumes_matching_decision_after_crash_window(
 ) -> None:
     approval_id = _seed_approval(client, approval_id_target="tgt-a", linked=True)
     runtime = client.app.state.runtime
-    reason = "Reviewed exact diff and rollback plan."
     seeded = runtime.approvals.get(approval_id)
     assert seeded is not None
     decision_now = seeded.created_at + timedelta(minutes=1)
-    request_body = json.dumps({"reason": reason}, sort_keys=True, separators=(",", ":"))
+    request_body = "{}"
     request_sha256 = idempotency_request_sha256(
         method="POST",
         route_key="/api/v1/approvals/{approval_id}/approve",
@@ -598,7 +599,7 @@ def test_same_key_retry_resumes_matching_decision_after_crash_window(
             approval_id,
             now=decision_now,
             actor="operator-a",
-            reason=reason,
+            reason=None,
             route_key="/api/v1/approvals/{approval_id}/approve",
             idempotency_key="approve-retry",
             request_sha256=request_sha256,
@@ -632,7 +633,7 @@ def test_same_key_retry_resumes_matching_decision_after_crash_window(
     response = client.post(
         f"{ROUTE}/{approval_id}/approve",
         headers=_idem(OPERATOR_A_TOKEN, "approve-retry"),
-        json={"reason": reason},
+        json={},
     )
 
     assert response.status_code == 200, response.text
@@ -649,7 +650,7 @@ def test_same_key_retry_resumes_matching_decision_after_crash_window(
     replay = client.post(
         f"{ROUTE}/{approval_id}/approve",
         headers=_idem(OPERATOR_A_TOKEN, "approve-retry"),
-        json={"reason": reason},
+        json={},
     )
     assert replay.status_code == 200
     assert replay.headers.get("Idempotency-Replayed") == "true"
@@ -660,11 +661,10 @@ def test_fresh_key_cannot_resume_matching_decision_after_crash_window(
 ) -> None:
     approval_id = _seed_approval(client, approval_id_target="tgt-a", linked=True)
     runtime = client.app.state.runtime
-    reason = "Reviewed exact diff and rollback plan."
     seeded = runtime.approvals.get(approval_id)
     assert seeded is not None
     decision_now = seeded.created_at + timedelta(minutes=1)
-    request_body = json.dumps({"reason": reason}, sort_keys=True, separators=(",", ":"))
+    request_body = "{}"
     request_sha256 = idempotency_request_sha256(
         method="POST",
         route_key="/api/v1/approvals/{approval_id}/approve",
@@ -677,7 +677,7 @@ def test_fresh_key_cannot_resume_matching_decision_after_crash_window(
             approval_id,
             now=decision_now,
             actor="operator-a",
-            reason=reason,
+            reason=None,
             route_key="/api/v1/approvals/{approval_id}/approve",
             idempotency_key="approve-original",
             request_sha256=request_sha256,
@@ -703,7 +703,7 @@ def test_fresh_key_cannot_resume_matching_decision_after_crash_window(
     response = client.post(
         f"{ROUTE}/{approval_id}/approve",
         headers=_idem(OPERATOR_A_TOKEN, "approve-fresh"),
-        json={"reason": reason},
+        json={},
     )
 
     assert response.status_code == 409

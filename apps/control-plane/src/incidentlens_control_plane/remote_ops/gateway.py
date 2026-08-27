@@ -186,6 +186,7 @@ class Gateway:
             risk=request.risk.value,
             preview={
                 "preview": "Shell action requires explicit approval.",
+                "command": request.command,
                 "impact": "Runs a guarded shell action against the target service.",
             },
         )

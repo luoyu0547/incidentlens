@@ -18,17 +18,11 @@ describe('ApprovalControllerImpl', () => {
     expect(api.getApproval).toHaveBeenCalledWith('approval-1');
   });
 
-  it('requires a non-whitespace reason before mutating', async () => {
-    const api = { decideApproval: vi.fn() } as unknown as ControlPlaneApi;
-    await expect(new ApprovalControllerImpl({ api }).decide('approval-1', 'approve', '  ')).rejects.toThrow('A reason is required');
-    expect(api.decideApproval).not.toHaveBeenCalled();
-  });
-
   it('returns only the server-persisted result and does not manufacture success', async () => {
     const persisted = approval({ decision_status: 'approved', status: 'approved', downstream_status: 'processing' });
     const api = { decideApproval: vi.fn().mockResolvedValue(persisted) } as unknown as ControlPlaneApi;
-    await expect(new ApprovalControllerImpl({ api }).decide('approval-1', 'approve', 'validated impact')).resolves.toBe(persisted);
-    expect(api.decideApproval).toHaveBeenCalledWith('approval-1', 'approve', { reason: 'validated impact' }, expect.objectContaining({ idempotencyKey: expect.any(String) }));
+    await expect(new ApprovalControllerImpl({ api }).decide('approval-1', 'approve')).resolves.toBe(persisted);
+    expect(api.decideApproval).toHaveBeenCalledWith('approval-1', 'approve', {}, expect.objectContaining({ idempotencyKey: expect.any(String) }));
   });
 });
 

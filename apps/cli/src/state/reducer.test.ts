@@ -22,6 +22,16 @@ function makeOperation(overrides: Partial<OperationView> = {}): OperationView {
 }
 
 describe('reducer', () => {
+  it('renders an actionable pending approval shape when approval.requested arrives', () => {
+    const state = createInitialState();
+    const next = reducer(state, {
+      type: 'stream_event',
+      event: { sequence: 1, event_type: 'approval.requested', approval_id: 'apr-1' },
+    });
+    expect(next.approvals['apr-1']?.approval_id).toBe('apr-1');
+    expect(next.approvals['apr-1']?.decision_status).toBe('pending');
+  });
+
   describe('text delta merge', () => {
     it('merges text deltas by message and block ID', () => {
       const state = createInitialState();

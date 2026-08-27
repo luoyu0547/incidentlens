@@ -162,6 +162,7 @@ export type CliAction =
   | { type: 'clear_target' }
   | { type: 'set_session'; session: AgentSessionView }
   | { type: 'set_approval'; approval: ApprovalDetailView }
+  | { type: 'clear_approvals' }
   | { type: 'update_operation'; operation: OperationView }
   | { type: 'stream_event'; event: any }
   | { type: 'gap_snapshot'; snapshot: { messages: ConversationItem[]; tools?: ToolEventSnapshot[]; todos?: TodoItemState[]; operations: Record<string, OperationView>; approvals: Record<string, ApprovalDetailView>; sequence: number } }

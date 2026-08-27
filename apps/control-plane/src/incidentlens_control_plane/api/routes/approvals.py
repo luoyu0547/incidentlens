@@ -60,8 +60,6 @@ _RESUMABLE_DOWNSTREAM_STATUSES = frozenset(
 class ApprovalDecisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    reason: str = Field(min_length=1, max_length=1000)
-
 
 class ApprovalDecisionConflictProblem(ApiProblem):
     status_code: ClassVar[int] = 409
@@ -214,6 +212,11 @@ def _changeset_diff_summary(request: Request, changeset_id: str | None) -> str |
 
 def _detail_view(request: Request, record: ApprovalRecord) -> ApprovalDetailView:
     preview = dict(record.preview)
+    # Shell approvals created by older/runtime paths may keep the canonical
+    # command only in the intent payload. Surface that exact command in the
+    # operator preview so approval is never a blind consent.
+    if "command" not in preview and isinstance(record.intent.get("command"), str):
+        preview["command"] = record.intent["command"]
     derived_diff = _changeset_diff_summary(request, record.changeset_id)
     if record.changeset_id:
         changeset = request.app.state.runtime.change_store.get(record.changeset_id)
@@ -238,7 +241,11 @@ def _detail_view(request: Request, record: ApprovalRecord) -> ApprovalDetailView
             proposal_id=record.proposal_id,
         ),
         risk=record.risk,
-        preview=_bounded(preview.get("preview")) or _bounded(preview.get("summary")),
+        preview=(
+            _bounded(preview.get("command"))
+            or _bounded(preview.get("preview"))
+            or _bounded(preview.get("summary"))
+        ),
         diff=derived_diff,
         impact=_bounded(preview.get("impact")),
         verification=_bounded(preview.get("verification")),
@@ -516,7 +523,7 @@ async def approve_approval(
                 approval_id,
                 now=datetime.now(UTC),
                 actor=principal.principal_id,
-                reason=body.reason,
+                reason=None,
                 route_key=_APPROVE_ROUTE_KEY,
                 idempotency_key=request.headers.get("Idempotency-Key", ""),
                 request_sha256=request_sha256,
@@ -528,7 +535,7 @@ async def approve_approval(
                     approval_id=approval_id,
                     decision_status=ApprovalDecisionStatus.APPROVED,
                     actor=principal.principal_id,
-                    reason=body.reason,
+                    reason=None,
                     route_key=_APPROVE_ROUTE_KEY,
                     idempotency_key=request.headers.get("Idempotency-Key", ""),
                     request_sha256=request_sha256,
@@ -603,7 +610,7 @@ async def reject_approval(
                 approval_id,
                 now=datetime.now(UTC),
                 actor=principal.principal_id,
-                reason=body.reason,
+                reason=None,
                 route_key=_REJECT_ROUTE_KEY,
                 idempotency_key=request.headers.get("Idempotency-Key", ""),
                 request_sha256=request_sha256,
@@ -615,7 +622,7 @@ async def reject_approval(
                     approval_id=approval_id,
                     decision_status=ApprovalDecisionStatus.REJECTED,
                     actor=principal.principal_id,
-                    reason=body.reason,
+                    reason=None,
                     route_key=_REJECT_ROUTE_KEY,
                     idempotency_key=request.headers.get("Idempotency-Key", ""),
                     request_sha256=request_sha256,

@@ -74,6 +74,9 @@ export function reducer(state: CliState, action: CliAction): CliState {
         approvals: { ...state.approvals, [action.approval.approval_id]: action.approval },
       };
 
+    case 'clear_approvals':
+      return { ...state, approvals: {} };
+
     case 'update_operation':
       return updateOperation(state, action.operation);
 
@@ -339,7 +342,25 @@ function handleStreamEvent(state: CliState, event: any): CliState {
         stream: newStream,
         approvals: {
           ...state.approvals,
-          [event.approval_id]: { id: event.approval_id, status: 'pending' } as any,
+          // Keep the event's identifier in the same shape consumed by the
+          // renderer.  The previous `{ id, status }` placeholder could never
+          // satisfy the `decision_status === 'pending'` guard in App, so an
+          // approval request was silently reduced to a status line with no
+          // actionable card.  The synchronizer will replace this partial view
+          // with the authoritative detail snapshot when available.
+          [event.approval_id]: {
+            approval_id: event.approval_id,
+            status: 'pending',
+            decision_status: 'pending',
+            intent_summary: '等待服务器返回审批详情…',
+            risk: 'approval_required',
+            preview: '审批详情同步中',
+            impact: null,
+            diff: null,
+            verification: null,
+            rollback: null,
+            downstream_status: 'pending',
+          } as any,
         },
       };
 

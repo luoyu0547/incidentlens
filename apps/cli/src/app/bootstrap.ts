@@ -7,8 +7,7 @@
 
 import type { AppDependencies } from './dependencies.js';
 import type { CliState, CliAction } from '../state/cli-state.js';
-import { projectTodoEvents, projectToolEvents } from '../stream/session-synchronizer.js';
-import { assertCompatible, type ClientCompatibility, type AgentMessageView, type ApprovalDetailView, type StreamEventEnvelope } from '@incidentlens/protocol';
+import { assertCompatible, type ClientCompatibility } from '@incidentlens/protocol';
 
 /**
  * Protocol versions this CLI understands. The control plane declares its
@@ -19,34 +18,6 @@ const CLIENT_COMPATIBILITY: ClientCompatibility = {
   min_protocol_version: '1.0.0',
   max_protocol_version: '1.0.0',
 };
-
-function dedupeById<T>(items: readonly T[], getId: (item: T) => string): T[] {
-  return Array.from(new Map(items.map((item) => [getId(item), item])).values());
-}
-
-async function fetchAllMessages(deps: AppDependencies, sessionId: string): Promise<AgentMessageView[]> {
-  const all: AgentMessageView[] = [];
-  for (let offset = 0;; offset += 500) {
-    const page = await deps.api.listMessages(sessionId, { limit: 500, offset });
-    all.push(...page);
-    if (page.length < 500) return dedupeById(all, (message) => message.message_id);
-  }
-}
-
-async function fetchAllApprovals(deps: AppDependencies, sessionId: string): Promise<{ items: ApprovalDetailView[] }> {
-  return deps.api.listApprovals({ sessionId, status: 'pending', limit: 500 });
-}
-
-async function fetchAllEvents(deps: AppDependencies, sessionId: string): Promise<{ items: StreamEventEnvelope[]; latest_sequence: number }> {
-  const items: StreamEventEnvelope[] = [];
-  let afterSequence = 0;
-  for (;;) {
-    const page = await deps.api.listEvents({ sessionId, afterSequence, limit: 500 });
-    items.push(...page.items);
-    if (!page.has_more || page.items.length === 0) return { items: Array.from(new Map(items.map((event) => [String(event.event_id ?? `${event.sequence}`), event])).values()), latest_sequence: 0 };
-    afterSequence = page.next_after_sequence;
-  }
-}
 
 /**
  * Bootstrap the application.
@@ -106,44 +77,10 @@ export async function bootstrap(
       // Target load failed, continue without target
     }
 
-    // 6. Load last session
-    if (profile?.lastSessionId) {
-      try {
-        const session = await deps.api.getSession(profile.lastSessionId);
-        if (session) {
-          dispatch({ type: 'set_session', session });
-          const [messages, approvals, events] = await Promise.all([
-            fetchAllMessages(deps, session.session_id),
-            fetchAllApprovals(deps, session.session_id),
-            fetchAllEvents(deps, session.session_id),
-          ]);
-          const sequence = events.items.reduce(
-            (latest, event) => Math.max(latest, event.sequence ?? 0),
-            profile?.lastSequenceBySession[session.session_id] ?? 0,
-          );
-          dispatch({
-            type: 'gap_snapshot',
-            snapshot: {
-              messages: messages.map((message) => ({
-                kind: 'text' as const,
-                messageId: message.message_id,
-                blockId: message.message_id,
-                content: message.content,
-              })),
-              tools: projectToolEvents(events.items),
-              todos: projectTodoEvents(events.items),
-              operations: {},
-              approvals: Object.fromEntries(
-                approvals.items.map((approval) => [approval.approval_id, approval]),
-              ),
-              sequence,
-            },
-          });
-        }
-      } catch {
-        // Session load failed, continue without session
-      }
-    }
+    // A fresh CLI launch is a fresh conversation. Historical session state is
+    // loaded only through the explicit /resume command, never implicitly from
+    // the persisted lastSessionId. This prevents old tools and approvals from
+    // appearing before the operator has submitted a new request.
 
     // 7. Bootstrap complete
     dispatch({ type: 'bootstrap_complete', state: 'ready' });
