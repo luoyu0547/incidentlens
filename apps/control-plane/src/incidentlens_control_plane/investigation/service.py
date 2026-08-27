@@ -41,6 +41,7 @@ from incidentlens_control_plane.investigation.store import (
     Checkpoint,
     InvestigationNotFound,
     InvestigationStore,
+    TranscriptMessage,
 )
 from incidentlens_control_plane.investigation.tool_executor import ToolExecutor, ToolOutcome
 from incidentlens_control_plane.investigation.types import (
@@ -113,6 +114,15 @@ class InvestigationService:
         )
 
     # -- lifecycle ------------------------------------------------------------
+
+    def list_transcript_messages(self, agent_run_id: str) -> tuple[TranscriptMessage, ...]:
+        """Expose the durable transcript projection to facade services.
+
+        Agent-session projection deliberately depends on this high-level
+        service rather than reaching into the store. Keep the delegation
+        read-only and preserve the store's oldest-first ordering.
+        """
+        return self._store.list_transcript_messages(agent_run_id)
 
     def create_investigation(
         self,
