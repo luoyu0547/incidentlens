@@ -18,7 +18,9 @@ interface ConversationProps {
 export function Conversation({ messages }: ConversationProps): React.ReactElement | null {
   // Streaming can briefly create an empty text block before its first delta.
   // Do not render that placeholder as a large empty bordered card.
-  const visibleMessages = messages.filter((item) => item.kind !== 'text' || item.content.trim().length > 0);
+  const visibleMessages = messages.filter(
+    (item) => item.kind !== 'text' || (typeof item.content === 'string' && item.content.trim().length > 0),
+  );
 
   if (visibleMessages.length === 0) {
     return null;
