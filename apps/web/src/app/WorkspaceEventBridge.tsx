@@ -43,5 +43,5 @@ export function WorkspaceEventBridge() {
     'authentication-error': '工作区认证失败',
     closed: '工作区连接已关闭',
   } satisfies Record<WorkspaceEventStatus, string>;
-  return <span role="status" data-workspace-status={status}>{statusMessage[status]}</span>;
+  return <span className={`workspace-status workspace-status--${status}`} role="status" data-workspace-status={status}>{statusMessage[status]}</span>;
 }

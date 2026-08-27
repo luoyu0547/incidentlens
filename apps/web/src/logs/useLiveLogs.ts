@@ -32,6 +32,8 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
   const pausedRef = useRef(false);
   const retries = useRef(0);
   const generation = useRef(0);
+  const webSocketFactoryRef = useRef(options.webSocketFactory);
+  webSocketFactoryRef.current = options.webSocketFactory;
   const maxRetries = options.maxRetries ?? MAX_RETRIES;
   const backoffMs = options.backoffMs ?? 250;
 
@@ -46,7 +48,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let recovering = false;
     let socketGeneration = 0;
-    const wsFactory = options.webSocketFactory ?? ((url: string) => new WebSocket(url));
+    const wsFactory = webSocketFactoryRef.current ?? ((url: string) => new WebSocket(url));
     const initialQuery = query();
     const socketUrl = `${window.location.origin.replace(/^http/, 'ws')}/ws/v1/logs`;
     const backfill = async (authoritative = false) => {
@@ -97,7 +99,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
             const parsed = parseLogStreamEvent(JSON.parse(String(message.data)));
             if ('kind' in parsed) return;
             if (parsed.event_type === 'log.record') { const record = parsed.payload as LogRecordView; append(record); if (parsed.cursor) { cursorRef.current = parsed.cursor; setLastCursor(parsed.cursor); send(JSON.stringify(serializeLogAck(parsed.cursor))); } }
-            else if (parsed.event_type === 'stream.slow_consumer' && parsed.payload?.action === 'ack' && typeof parsed.payload.last_cursor === 'string') send(JSON.stringify(serializeLogAck(parsed.payload.last_cursor)))
+            else if (parsed.event_type === 'stream.slow_consumer' && typeof parsed.payload?.last_cursor === 'string') send(JSON.stringify(serializeLogAck(parsed.payload.last_cursor)))
             else if (parsed.event_type === 'log.subscribed') setStatus(pausedRef.current ? 'paused' : 'live');
             else if (parsed.event_type === 'stream.gap') {
               recovering = true;
@@ -129,7 +131,7 @@ export function useLiveLogs(serviceId: string, search: LogRouteSearch, options: 
     };
     void connect(true);
     return () => { disposed = true; socketGeneration += 1; if (retryTimer) clearTimeout(retryTimer); closeSocket(); };
-  }, [serviceId, JSON.stringify(search), append, closeSocket, options.webSocketFactory, options.enabled, maxRetries, backoffMs]);
+  }, [serviceId, JSON.stringify(search), append, closeSocket, options.enabled, maxRetries, backoffMs]);
 
   const pause = useCallback(() => { pausedRef.current = true; const command = serializeLogPause(); assertReadOnlyLogAction(command.action); socketRef.current?.send(JSON.stringify(command)); setStatus('paused'); }, []);
   const resume = useCallback(() => { pausedRef.current = false; setUnreadCount(0); const command = serializeLogResume(cursorRef.current); assertReadOnlyLogAction(command.action); socketRef.current?.send(JSON.stringify(command)); setStatus('connecting'); }, []);

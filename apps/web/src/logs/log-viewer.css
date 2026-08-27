@@ -1,9 +1,12 @@
-.log-viewer { display: grid; gap: var(--space-3); }
+.log-viewer { display: grid; gap: var(--space-4); }
+.log-viewer > .log-viewer__heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
+.log-viewer__heading h3 { margin: 0; }
 .log-viewer__toolbar { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: end; }
 .log-viewer__toolbar label { display: grid; gap: var(--space-1); color: var(--color-muted); }
 .log-viewer__toolbar input, .log-viewer__toolbar select { min-height: 2.25rem; padding: var(--space-2); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
 .log-viewer__toolbar input:focus-visible, .log-viewer__toolbar select:focus-visible, .log-viewer button:focus-visible { outline: 2px solid #9bd2f5; outline-offset: 2px; }
-.log-viewer__status { color: var(--color-muted); }
+.log-viewer__status { display: inline-flex; align-items: center; gap: 0.35rem; margin: 0; color: var(--color-muted); font-size: 0.82rem; }
+.log-viewer__status::before { width: 0.45rem; height: 0.45rem; border-radius: 50%; background: currentColor; content: ''; }
 .log-viewer__viewport { overflow: auto; height: min(360px, 60vh); border: 1px solid var(--color-border); background: #10161d; color: #e8edf2; border-radius: var(--radius-md); }
 .log-viewer__records { min-width: max-content; margin: 0; padding: var(--space-2) 0; list-style: none; }
 .log-viewer__records li { display: grid; grid-template-columns: 13rem 6rem minmax(24rem, 1fr) auto auto; gap: var(--space-3); padding: var(--space-1) var(--space-3); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre; }
@@ -11,4 +14,6 @@
 .log-viewer__severity { font-weight: 700; }
 .log-viewer__severity--error, .log-viewer__severity--critical { color: #ff9b91; }
 .log-viewer__severity--warn { color: #f5c96a; }
+.log-viewer__toolbar button { min-height: 2.25rem; padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-muted); }
+.log-viewer__toolbar button:hover { background: var(--color-border); }
 @media (max-width: 640px) { .log-viewer__records li { grid-template-columns: 11rem 5rem minmax(20rem, 1fr) auto auto; } }

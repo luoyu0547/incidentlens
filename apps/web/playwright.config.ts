@@ -7,6 +7,11 @@ export default defineConfig({
   use: {
     baseURL: 'http://localhost:4173',
     trace: 'on-first-retry',
+    // macOS 13 cannot run Playwright's bundled Chromium; use the installed
+    // Chrome channel by default there while keeping CI/Linux on the bundle.
+    ...((process.env.PLAYWRIGHT_CHANNEL || (process.platform === 'darwin' ? 'chrome' : undefined))
+      ? { channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome' }
+      : {}),
   },
   webServer: {
     command: 'npm run build && npm run preview',

@@ -32,16 +32,15 @@ export function ApprovalCard({ approval, focused, promptEmpty, overlayActive, on
     if (action) onAction(action);
   }, { isActive: hotkeysActive });
 
-  return <Box flexDirection="column" borderStyle="round" borderColor={focused ? 'yellow' : 'gray'} paddingX={1}>
-    <Text bold>Approval {approval.approval_id}</Text>
-    <Text>Intent: {approval.intent_summary}</Text>
-    <Text>Risk: {approval.risk}  Expires: {approval.expires_at}</Text>
+  return <Box flexDirection="column" marginTop={1} marginBottom={1} borderStyle="round" borderColor={focused ? 'yellow' : 'gray'} paddingX={1}>
+    <Text bold color="yellow">Approval {approval.approval_id} · 需要审批</Text>
+    <Text color="gray">Intent</Text><Text>{safeApprovalText(approval.intent_summary) ?? '未提供'}</Text>
+    <Text color="gray">Risk {approval.risk} · Expires {approval.expires_at}</Text>
     {safeApprovalText(approval.diff) && <Text>Diff: {safeApprovalText(approval.diff)}</Text>}
     {safeApprovalText(approval.impact) && <Text>Impact: {safeApprovalText(approval.impact)}</Text>}
     {safeApprovalText(approval.verification) && <Text>Verification: {safeApprovalText(approval.verification)}</Text>}
     {safeApprovalText(approval.rollback) && <Text>Rollback: {safeApprovalText(approval.rollback)}</Text>}
-    <Text>Decision persisted: {approval.decision_status}</Text>
-    <Text>Downstream: {approval.downstream_status}</Text>
-    {hotkeysActive && <Text color="gray">A approve, R reject, D diff</Text>}
+    <Text color="gray">Decision persisted: <Text color={approval.decision_status === 'pending' ? 'yellow' : 'green'}>{approval.decision_status}</Text> · Downstream: {approval.downstream_status}</Text>
+    {hotkeysActive && <Text color="gray">A approve · R reject · D diff  ·  [A] [R] [D]</Text>}
   </Box>;
 }

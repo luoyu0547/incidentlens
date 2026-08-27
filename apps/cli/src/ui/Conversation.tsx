@@ -21,7 +21,7 @@ export function Conversation({ messages }: ConversationProps): React.ReactElemen
   }
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" marginTop={1}>
       {messages.map((item, index) => (
         <ConversationItem key={getItemKey(item, index)} item={item} />
       ))}
@@ -56,14 +56,14 @@ function ConversationItem({ item }: { item: ConversationItem }): React.ReactElem
       return <ToolBlockView block={item} />;
     case 'approval':
       return (
-        <Box>
-          <Text color="yellow">[Approval: {item.approvalId}]</Text>
+        <Box marginBottom={1} paddingX={1} borderStyle="single" borderColor="yellow">
+          <Text color="yellow" bold>[Approval: {item.approvalId}]</Text>
         </Box>
       );
     case 'system':
       return (
-        <Box>
-          <Text color="gray">{item.content}</Text>
+        <Box marginBottom={1}>
+          <Text color="gray">· {item.content}</Text>
         </Box>
       );
   }
@@ -74,8 +74,8 @@ function ConversationItem({ item }: { item: ConversationItem }): React.ReactElem
  */
 function TextBlockView({ block }: { block: TextBlock }): React.ReactElement {
   return (
-    <Box>
-      <Text>{block.content}</Text>
+    <Box marginBottom={1} paddingLeft={1} borderStyle="single" borderColor={block.finalized ? 'cyan' : 'gray'}>
+      <Text color={block.finalized ? undefined : 'gray'}>{block.content}</Text>
     </Box>
   );
 }
@@ -88,9 +88,10 @@ function ToolBlockView({ block }: { block: ToolBlock }): React.ReactElement {
   const statusIcon = getStatusIcon(block.status);
 
   return (
-    <Box>
+    <Box marginBottom={1}>
       <Text color={statusColor}>{statusIcon}</Text>
-      <Text> {block.toolName}</Text>
+      <Text bold> {block.toolName}</Text>
+      <Text color="gray"> · {block.status}</Text>
       {block.error && <Text color="red"> ({block.error})</Text>}
     </Box>
   );

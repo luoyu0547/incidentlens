@@ -18,7 +18,7 @@ export function ServicePage() {
   if (!service) return <p>正在加载服务…</p>;
 
   return (
-    <div>
+    <div className="service-page">
       <ServiceHeader service={service} />
       <ServiceFacts service={service} />
       <ServiceIssues issueIds={service.issue_ids} />

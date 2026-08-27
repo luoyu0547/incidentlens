@@ -17,7 +17,10 @@ export function AppShell() {
     <div className="app-shell">
       <a className="app-shell__skip-link" href="#main-content">跳转到主要内容</a>
       <header className="app-shell__header">
-        <h1>IncidentLens</h1>
+        <div className="app-shell__brand">
+          <span className="app-shell__brand-mark" aria-hidden="true">IL</span>
+          <h1>IncidentLens</h1>
+        </div>
         <Navigation />
         <WorkspaceEventBridge />
       </header>

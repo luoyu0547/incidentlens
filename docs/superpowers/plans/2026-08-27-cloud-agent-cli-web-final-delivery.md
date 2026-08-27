@@ -274,7 +274,7 @@ npm run build --workspace @incidentlens/cli
 **Interfaces:**
 - Produces a complete local verification matrix; no cloud claim is made unless every required local gate passes.
 
-- [ ] **Step 1: Run all contract and backend gates**
+- [x] **Step 1: Run all contract and backend gates**
 
 ```bash
 uv run python scripts/check_product_contracts.py
@@ -297,7 +297,7 @@ npm run web:e2e
 npm pack --workspace @incidentlens/cli --dry-run
 ```
 
-- [ ] **Step 3: Verify FastAPI static embedding and wheel contents**
+- [x] **Step 3: Verify FastAPI static embedding and wheel contents**
 
 ```bash
 uv build
@@ -306,7 +306,7 @@ uv run pytest tests/web/test_spa_assets.py tests/reports/ tests/acceptance/test_
 
 Inspect the wheel to confirm hashed SPA assets are present, API/WS/event routes are not swallowed by SPA fallback, and no absolute backend URL is bundled.
 
-- [ ] **Step 4: Update the delivery index only with observed results**
+- [x] **Step 4: Update the delivery index only with observed results**
 
 Mark individual phases/tasks complete only after their command output and relevant browser/PTY evidence exist. Leave live-model or cloud checks unchecked if skipped.
 

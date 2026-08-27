@@ -64,15 +64,25 @@ export async function routeJson(page: Page, path: string, body: unknown) {
 export async function installCommonRoutes(page: Page) {
   await routeJson(page, '/overview', overview);
   await page.route('**/api/v1/services/*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(service) }));
+  await page.route('**/api/v1/issues**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ has_more: false, next_cursor: null, items: [issue] }) }));
   await page.route('**/api/v1/issues/iss-1', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(issue) }));
   await page.route('**/api/v1/evidence/ev-1', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ content_redacted: '脱敏日志', provenance: { evidence_ref_id: ids.evidence, service_id: ids.service, target_id: ids.target, log_cursor: 'c10', created_at: overview.generated_at, evidence_kind: 'log_record', source_kind: 'file', severity: 'error' } }) }));
-  await page.route('**/api/v1/issues**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ has_more: false, next_cursor: null, items: [issue] }) }));
 }
 
-export async function installLogSocket(page: Page, onMessage: (message: Record<string, unknown>, socket: WebSocketRoute) => void) {
+export async function installLogSocket(
+  page: Page,
+  onMessage: (message: Record<string, unknown>, socket: WebSocketRoute) => void,
+  onOpen?: (url: string) => void,
+  onClientFrame?: (message: Record<string, unknown>) => void,
+) {
   await page.routeWebSocket('**/ws/v1/logs', (socket) => {
+    onOpen?.(socket.url());
     socket.onMessage((message) => {
-      try { onMessage(JSON.parse(String(message)) as Record<string, unknown>, socket); } catch { /* malformed client frames are ignored */ }
+      try {
+        const parsed = JSON.parse(String(message)) as Record<string, unknown>;
+        onClientFrame?.(parsed);
+        onMessage(parsed, socket);
+      } catch { /* malformed client frames are ignored */ }
     });
   });
 }

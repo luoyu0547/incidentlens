@@ -15,14 +15,13 @@ test.describe('服务日志', () => {
       ], null)) });
     });
     page.on('request', (request) => { if (request.url().includes('/api/v1/')) methods.push(request.method()); });
-    page.on('websocket', (socket) => sockets.push(socket.url()));
     await installLogSocket(page, (message, socket) => {
       if (message.action === 'subscribe') {
         expect(message).toMatchObject({ action: 'subscribe', service_id: ids.service, target_id: ids.target, cursor: cursors[2] });
         socket.send(JSON.stringify(logEvent('log.subscribed', cursors[2], { service_id: ids.service })));
         socket.send(JSON.stringify(logEvent('log.record', cursors[3], log(3, 'live record'))));
       }
-    });
+    }, (url) => sockets.push(url));
     await page.goto(`/services/${ids.service}?mode=live&target=${ids.target}`);
     await expect(page.getByRole('heading', { name: '服务详情' })).toBeVisible();
     await expect(page.getByText('latest')).toBeVisible();

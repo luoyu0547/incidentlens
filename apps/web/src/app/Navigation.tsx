@@ -11,7 +11,7 @@ import { Link } from '@tanstack/react-router';
  */
 export function Navigation() {
   return (
-    <nav>
+    <nav className="app-shell__nav" aria-label="主导航">
       <Link to="/">总览</Link>
       <Link to="/issues">问题</Link>
     </nav>

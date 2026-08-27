@@ -22,8 +22,10 @@ test.describe('read-only web boundary', () => {
   test('shows no mutation controls on every read-only route', async ({ page }) => {
     for (const route of routes) {
       await page.goto(route);
-      await expect(page.locator('button, [role="button"], input, select, textarea')).not.toContainText(forbiddenControl);
-      await expect(page.locator('a')).not.toContainText(forbiddenControl);
+      const controls = page.locator('button, [role="button"], input, select, textarea');
+      for (const text of await controls.allTextContents()) expect(text).not.toMatch(forbiddenControl);
+      const links = page.locator('a');
+      for (const text of await links.allTextContents()) expect(text).not.toMatch(forbiddenControl);
     }
   });
 
@@ -41,7 +43,7 @@ test.describe('read-only web boundary', () => {
         socket.send(JSON.stringify(logEvent('log.subscribed', 'c1', { service_id: ids.service })));
         socket.send(JSON.stringify(logEvent('log.record', 'c2', log(2, 'readonly live'))));
       }
-    });
+    }, (url) => socketUrls.push(url), (frame) => frames.push(frame));
     await page.goto(`/services/${ids.service}?mode=live`);
     await expect(page.getByText('readonly live')).toBeVisible();
     await page.waitForLoadState('networkidle');

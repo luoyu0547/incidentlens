@@ -20,15 +20,15 @@ export function StatusLine({
   pendingApprovals,
 }: StatusLineProps): React.ReactElement {
   return (
-    <Box>
+    <Box marginTop={1} paddingX={1} borderStyle="single" borderColor={streamConnected ? 'green' : 'red'}>
       <Text color={streamConnected ? 'green' : 'red'}>
         {streamConnected ? '●' : '○'}
       </Text>
-      <Text color="gray"> Connected</Text>
+      <Text color={streamConnected ? 'green' : 'red'}> {streamConnected ? 'Connected' : 'Disconnected'}</Text>
       {pendingApprovals > 0 && (
         <>
           <Text color="gray"> | </Text>
-          <Text color="yellow">{pendingApprovals} pending approval(s)</Text>
+          <Text color="yellow" bold>{pendingApprovals} pending approval(s)</Text>
         </>
       )}
     </Box>

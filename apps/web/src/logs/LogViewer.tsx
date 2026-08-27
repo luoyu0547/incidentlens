@@ -20,8 +20,8 @@ export function LogViewer({ serviceId, targetId, initialSearch, onSearchChange }
   useEffect(() => { setAnchoredRecords([]); }, [search.anchor]);
   const invalidRange = logSearchError(search);
   const history = useLogHistory(serviceId, search);
-  const live = useLiveLogs(serviceId, { ...search, target: search.target ?? targetId }, { enabled: search.mode === 'live' });
-  const recordsBase = search.mode === 'live' ? live.records : (history.data?.pages.flatMap((page) => page.items) ?? []);
+  const live = useLiveLogs(serviceId, { ...search, target: search.target ?? (targetId || undefined) }, { enabled: search.mode === 'live' });
+  const recordsBase = search.mode === 'live' ? live.records : Array.from(new Map((history.data?.pages.flatMap((page) => page.items) ?? []).map((record) => [record.log_id, record])).values());
   const records = [...recordsBase, ...anchoredRecords.filter((r) => !recordsBase.some((x) => x.log_id === r.log_id))];
   const anchor = useMemo(() => search.anchor ? { service: serviceId, log_id: search.anchor, cursor: search.cursor, context: search.context } : null, [search.anchor, search.cursor, search.context, serviceId]);
   const scrollTo = (logId: string) => document.querySelector(`[data-log-id="${CSS.escape(logId)}"]`)?.scrollIntoView({ block: 'center' });
@@ -40,15 +40,14 @@ export function LogViewer({ serviceId, targetId, initialSearch, onSearchChange }
   const error = search.mode === 'live' ? live.error : history.error;
   const status = search.mode === 'live' ? live.status : undefined;
   return <section className="log-viewer" aria-label="日志查看器">
-    <h2>日志</h2>
+    <div className="log-viewer__heading"><h2>日志</h2><span className="log-viewer__status" aria-hidden="true">只读观察</span></div>
     <LogToolbar search={search} onChange={update} />
     <StreamStatus mode={search.mode} isFetching={search.mode === 'history' ? history.isFetching : status === 'backfilling'} error={error} />
     {search.mode === 'live' && <p className="log-viewer__status" role="status">{status === 'gap' ? '正在恢复日志间隙…' : status === 'reconnecting' ? '正在重新连接日志流…' : status === 'error' ? '日志流认证失败或无法恢复。' : status === 'live' ? '日志流已连接' : '正在连接日志流…'}</p>}
-    {search.mode === 'history' && history.hasNextPage && <button type="button" onClick={() => void history.fetchNextPage()} disabled={history.isFetchingNextPage}>加载更早日志</button>}
     {invalidRange ? <ErrorNotice title="筛选条件无效" message={invalidRange} /> : null}
     {error ? <ErrorNotice message="日志加载失败，筛选条件已保留。" /> : null}
     {!invalidRange && !error && !history.isPending && records.length === 0 ? <EmptyState title="暂无日志" description="当前筛选条件没有匹配的日志记录。" /> : null}
     {records.length > 0 ? <VirtualLogViewport records={records} follow={search.follow} onLocate={scrollTo} paused={search.mode === 'live' && status === 'paused'} unreadCount={live.unreadCount} onResume={search.mode === 'live' ? () => live.resume() : undefined} onPrepend={search.mode === 'history' && history.hasNextPage ? () => void history.fetchNextPage() : undefined} /> : null}
-    {locator.anchorId && locator.present && <p role="status">已定位日志 {locator.anchorId}</p>}
+    {locator.anchorId && locator.present && <p role="status" aria-label={`已定位日志 ${locator.anchorId}`}>已定位日志 {locator.anchorId}</p>}
   </section>;
 }

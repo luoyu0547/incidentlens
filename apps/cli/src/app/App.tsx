@@ -371,11 +371,9 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
   // Show loading state
   if (state.bootstrap === 'loading') {
     return (
-      <Box flexDirection="column">
-        <Text bold color="blue">
-          IncidentLens
-        </Text>
-        <Text color="gray">Loading...</Text>
+      <Box flexDirection="column" paddingX={1}>
+        <Text bold color="cyan">◆ IncidentLens</Text>
+        <Text color="gray">Loading workspace…</Text>
       </Box>
     );
   }
@@ -383,10 +381,8 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
   // Show authentication required
   if (state.bootstrap === 'authentication-required') {
     return (
-      <Box flexDirection="column">
-        <Text bold color="blue">
-          IncidentLens
-        </Text>
+      <Box flexDirection="column" paddingX={1}>
+        <Text bold color="cyan">◆ IncidentLens</Text>
         <Text color="yellow">Authentication required</Text>
         <Text color="gray">Please set INCIDENTLENS_TOKEN environment variable</Text>
       </Box>
@@ -396,10 +392,8 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
   // Show incompatible
   if (state.bootstrap === 'incompatible') {
     return (
-      <Box flexDirection="column">
-        <Text bold color="blue">
-          IncidentLens
-        </Text>
+      <Box flexDirection="column" paddingX={1}>
+        <Text bold color="cyan">◆ IncidentLens</Text>
         <Text color="red">Incompatible version</Text>
       </Box>
     );
@@ -411,18 +405,16 @@ export function App({ dependencies: deps, initialState }: AppProps): React.React
   const sessionPickerOpen = state.overlay.kind === 'session-picker';
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" paddingX={1}>
       {/* Header */}
-      <Box>
-        <Text bold color="blue">
-          IncidentLens
-        </Text>
-        <Text color="gray"> | </Text>
-        <Text>{state.target?.name ?? 'No target'}</Text>
+      <Box borderStyle="single" borderColor="cyan" paddingX={1}>
+        <Text bold color="cyan">◆ IncidentLens</Text>
+        <Text color="gray">  /  </Text>
+        <Text color={state.target ? 'white' : 'gray'}>{state.target?.name ?? 'No target'}</Text>
         {state.session && (
           <>
-            <Text color="gray"> | </Text>
-            <Text>{state.session.title}</Text>
+            <Text color="gray">  /  </Text>
+            <Text color="white">{state.session.title}</Text>
           </>
         )}
       </Box>

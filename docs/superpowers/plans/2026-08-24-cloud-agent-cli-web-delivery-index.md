@@ -8,6 +8,14 @@
 
 **Tech Stack:** Python/FastAPI/SQLite/AsyncSSH; TypeScript/npm workspaces; React Ink; Vite React; generated OpenAPI and JSON Schema contracts
 
+## 本次本地门禁记录（2026-08-27）
+
+- Web 单测：15 个测试文件、75 个测试通过；类型检查、构建、协议漂移检查通过。
+- Web E2E：11/11 通过，覆盖实际 `/ws/v1/logs`、历史日志、结构化字段、证据定位、断线重连、gap 权威回补和 slow-consumer ACK。
+- Python：产品契约 35 个操作通过；定向验收 11 通过；SPA/报告/调查定向测试 27 通过；Ruff 通过；`uv build` 生成 sdist/wheel，wheel 含哈希 SPA 资源。
+- CLI：构建、类型检查、单元测试 204/209 通过；5 个 PTY 测试受当前 macOS `node-pty` 的 `posix_spawnp failed` 环境错误阻塞。仓库级 `verify:cli` 还受既有全仓 ESLint/Prettier 基线问题阻塞，未将其误报为通过。
+- 云端：已通过 SSH 重建 `/opt/incidentlens-target`，保留旧目录备份；本次未执行危险变更、审批或云端发布声明。
+
 **Spec:** `docs/superpowers/specs/2026-08-24-cloud-agent-cli-web-observability-design.md`
 
 ## Plans

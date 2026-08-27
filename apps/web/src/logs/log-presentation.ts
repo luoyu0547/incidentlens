@@ -53,7 +53,7 @@ export function presentLogBody(record: LogRecordView): LogBodyPresentation {
   } else if (typeof value === 'string') {
     try { value = JSON.parse(value) as unknown; } catch { return { kind: 'text', text: record.message }; }
   }
-  return { kind: 'json', value, summary: jsonSummary(value) };
+  return { kind: 'json', value, summary: `${record.message} · ${jsonSummary(value)}` };
 }
 
 export function presentationText(presentation: LogBodyPresentation): string {

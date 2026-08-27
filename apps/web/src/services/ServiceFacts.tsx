@@ -9,7 +9,7 @@ function Observation({ value }: { readonly value?: string | null }) {
 
 export function ServiceFacts({ service }: { readonly service: ServiceDetailView }) {
   return (
-    <section aria-label="服务状态">
+    <section className="service-facts" aria-label="服务状态">
       <h3>服务状态</h3>
       <dl>
         <dt>服务</dt>
@@ -20,7 +20,7 @@ export function ServiceFacts({ service }: { readonly service: ServiceDetailView 
         <dd><Observation value={service.last_observed_at} /></dd>
       </dl>
       {service.instances.map((instance) => (
-        <article key={instance.target_id}>
+        <article className="service-facts__instance" key={instance.target_id}>
           <h4>{instance.target_name}</h4>
           <dl>
             <dt>目标</dt>

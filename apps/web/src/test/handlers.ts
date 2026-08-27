@@ -9,7 +9,6 @@
 import { http, HttpResponse } from 'msw';
 import {
   overviewFixture,
-  targetsFixture,
   targetServicesFixture,
   serviceFixture,
   logPageFixture,
@@ -20,7 +19,7 @@ import {
   evidenceFixture,
 } from './fixtures';
 
-const API_ROOT = 'http://localhost:3000/api/v1';
+const API_ROOT = '/api/v1';
 
 export const handlers = [
   http.get('/events/v1/workspace', () => new HttpResponse(null, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })),
@@ -41,7 +40,7 @@ export const handlers = [
 
   http.get(`${API_ROOT}/investigations`, () => HttpResponse.json(investigationPageFixture)),
 
-  http.get(/\/api\/v1\/investigations\/[^/]+\/summary$/, () => HttpResponse.json(investigationFixture)),
+  http.get('http://localhost:3000/api/v1/investigations/:investigationId/summary', () => HttpResponse.json(investigationFixture)),
 
   http.get(`${API_ROOT}/evidence/:evidenceRefId`, () => HttpResponse.json(evidenceFixture)),
 ];

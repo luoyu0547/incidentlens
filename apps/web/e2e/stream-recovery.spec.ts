@@ -82,10 +82,7 @@ test.describe('日志流恢复', () => {
         socket.send(JSON.stringify(logEvent('log.subscribed', cursors[10], { service_id: ids.service })));
         void slowConsumerReleased.then(() => socket.send(JSON.stringify(logEvent('stream.slow_consumer', null, { action: 'ack', last_cursor: cursors[10] }))));
       }
-    });
-    page.on('websocket', (socket) => socket.on('framesent', (frame) => {
-      try { frames.push(JSON.parse(String(frame)) as Record<string, unknown>); } catch { /* ignore */ }
-    }));
+    }, undefined, (frame) => frames.push(frame));
     await page.goto(`/services/${ids.service}?mode=live`);
     await expect(page.getByText('日志流已连接')).toBeVisible();
     frames.length = 0;

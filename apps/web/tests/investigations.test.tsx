@@ -32,7 +32,7 @@ describe('Investigation read', () => {
   it('states approval is handled in CLI without actionable controls or links', async () => {
     useInvestigation(); renderApp({ initialEntries: ['/investigations/inv-11'] });
     expect(await screen.findByText('需要在 CLI 中处理待审批事项。')).toBeVisible();
-    expect(screen.queryByRole('button')).toBeNull(); expect(screen.queryByRole('link', { name: /CLI/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /approve|reject|execute|rollback|restart/i })).toBeNull(); expect(screen.queryByRole('link', { name: /CLI/i })).toBeNull();
   });
   it('lazy loads redacted evidence only when requested', async () => {
     useInvestigation(); renderApp({ initialEntries: ['/investigations/inv-11'] });

@@ -45,6 +45,14 @@ import type {
  */
 export const DEFAULT_BASE_URL = '/api/v1';
 
+// The browser facade may be exercised from a jsdom realm while the generated
+// SDK's Request implementation comes from Node/undici. The read-only surface
+// does not need to abort in-flight snapshots, so omit the signal at this
+// boundary and avoid passing a cross-realm AbortSignal to Request.
+function webSafeSignal(_signal?: AbortSignal): undefined {
+  return undefined;
+}
+
 /**
  * Reduced page shape returned by {@link WebReadonlyClient.listTargets}. The
  * generated `ListTargetsResponse` is a bare array, so the "page" is the array
@@ -228,35 +236,35 @@ export function createWebReadonlyClient(options?: WebReadonlyClientOptions): Web
 
   return {
     getOverview: async (signal?: AbortSignal): Promise<OverviewView> =>
-      unwrap<OverviewView>(await getOverview({ client: sdk, signal })),
+      unwrap<OverviewView>(await getOverview({ client: sdk, signal: webSafeSignal(signal) })),
     listTargets: async (signal?: AbortSignal): Promise<TargetPage> =>
-      unwrap<TargetPage>(await listTargets({ client: sdk, signal })),
+      unwrap<TargetPage>(await listTargets({ client: sdk, signal: webSafeSignal(signal) })),
     listTargetServices: async (targetId: string, signal?: AbortSignal): Promise<TargetServicePage> =>
-      unwrap<TargetServicePage>(await listTargetServices({ client: sdk, path: { target_id: targetId }, signal })),
+      unwrap<TargetServicePage>(await listTargetServices({ client: sdk, path: { target_id: targetId }, signal: webSafeSignal(signal) })),
     getService: async (serviceId: string, signal?: AbortSignal): Promise<ServiceDetailView> =>
-      unwrap<ServiceDetailView>(await getService({ client: sdk, path: { service_id: serviceId }, signal })),
+      unwrap<ServiceDetailView>(await getService({ client: sdk, path: { service_id: serviceId }, signal: webSafeSignal(signal) })),
     getServiceLogs: async (
       serviceId: string,
       query: ServiceLogQuery,
       signal?: AbortSignal,
     ): Promise<LogPage> =>
-      unwrap<LogPage>(await listServiceLogs({ client: sdk, path: { service_id: serviceId }, query, signal })),
+      unwrap<LogPage>(await listServiceLogs({ client: sdk, path: { service_id: serviceId }, query, signal: webSafeSignal(signal) })),
     listIssues: async (query: IssueListQuery, signal?: AbortSignal): Promise<IssuePage> =>
-      unwrap<IssuePage>(await listIssues({ client: sdk, query, signal })),
+      unwrap<IssuePage>(await listIssues({ client: sdk, query, signal: webSafeSignal(signal) })),
     getIssue: async (issueId: string, signal?: AbortSignal): Promise<IssueView> =>
-      unwrap<IssueView>(await getIssue({ client: sdk, path: { issue_id: issueId }, signal })),
+      unwrap<IssueView>(await getIssue({ client: sdk, path: { issue_id: issueId }, signal: webSafeSignal(signal) })),
     listInvestigations: async (
       query: InvestigationListQuery,
       signal?: AbortSignal,
     ): Promise<InvestigationSummaryPage> =>
       unwrap<InvestigationSummaryPage>(
-        await listInvestigationSummaries({ client: sdk, query, signal }),
+        await listInvestigationSummaries({ client: sdk, query, signal: webSafeSignal(signal) }),
       ),
     getInvestigationSummary: async (id: string, signal?: AbortSignal): Promise<InvestigationSummaryView> =>
       unwrap<InvestigationSummaryView>(
-        await getInvestigationSummary({ client: sdk, path: { investigation_id: id }, signal }),
+        await getInvestigationSummary({ client: sdk, path: { investigation_id: id }, signal: webSafeSignal(signal) }),
       ),
     getEvidence: async (id: string, signal?: AbortSignal): Promise<EvidenceDetailView> =>
-      unwrap<EvidenceDetailView>(await getEvidence({ client: sdk, path: { evidence_ref_id: id }, signal })),
+      unwrap<EvidenceDetailView>(await getEvidence({ client: sdk, path: { evidence_ref_id: id }, signal: webSafeSignal(signal) })),
   };
 }
