@@ -104,6 +104,15 @@ export function reducer(state: CliState, action: CliAction): CliState {
         ],
       };
 
+    case 'user_message':
+      return {
+        ...state,
+        messages: [
+          ...state.messages,
+          { kind: 'user', messageId: action.messageId, content: action.content },
+        ],
+      };
+
     case 'clear_messages':
       return { ...state, messages: [] };
 
@@ -176,7 +185,9 @@ function mergeTextDelta(
   messages: readonly ConversationItem[],
   event: any
 ): readonly ConversationItem[] {
-  const { message_id, block_id, delta } = event;
+  const { message_id, block_id } = event;
+  // The wire event uses `text`; older fixtures use `delta`.
+  const delta = typeof event.delta === 'string' ? event.delta : typeof event.text === 'string' ? event.text : '';
 
   // Find existing block
   const existingIndex = messages.findIndex(
@@ -258,6 +269,7 @@ function updateToolStatus(
       ...existing,
       status: newStatus,
       error: event.error,
+      summary: event.summary ?? event.result ?? existing.summary,
     };
 
     return [
@@ -274,6 +286,7 @@ function updateToolStatus(
     toolName: event.tool_name || 'unknown',
     status: newStatus,
     error: event.error,
+    summary: event.summary ?? event.result,
   };
 
   return [...messages, newBlock];

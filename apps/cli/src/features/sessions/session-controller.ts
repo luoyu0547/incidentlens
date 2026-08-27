@@ -157,6 +157,14 @@ export class SessionController implements SessionController {
 
     const session = await this.resolveSession();
 
+    // Echo the operator's prompt immediately so the transcript shows the
+    // submitted text while the Agent is still running.
+    this.dispatch?.({
+      type: 'user_message',
+      messageId: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      content: text,
+    });
+
     const idempotencyKey =
       this.pendingSend?.sessionId === session.session_id
         ? this.pendingSend.idempotencyKey

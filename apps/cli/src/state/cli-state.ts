@@ -53,6 +53,7 @@ export type OverlayState =
  */
 export type ConversationItem =
   | TextBlock
+  | UserMessage
   | ToolBlock
   | ApprovalBlock
   | SystemMessage;
@@ -66,6 +67,13 @@ export interface TextBlock {
   readonly blockId: string;
   readonly content: string;
   readonly finalized?: boolean;
+}
+
+/** Message entered by the operator, shown immediately on submit. */
+export interface UserMessage {
+  readonly kind: 'user';
+  readonly messageId: string;
+  readonly content: string;
 }
 
 /**
@@ -129,4 +137,5 @@ export type CliAction =
   | { type: 'set_input'; input: Partial<InputState> }
   | { type: 'set_overlay'; overlay: OverlayState }
   | { type: 'system_message'; content: string; timestamp: Date }
+  | { type: 'user_message'; messageId: string; content: string }
   | { type: 'clear_messages' };

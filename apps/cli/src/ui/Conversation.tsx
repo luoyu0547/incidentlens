@@ -42,6 +42,8 @@ function getItemKey(item: ConversationItem, index: number): string {
   switch (item.kind) {
     case 'text':
       return `text-${item.messageId}-${item.blockId}`;
+    case 'user':
+      return `user-${item.messageId}`;
     case 'tool':
       return `tool-${item.toolId}`;
     case 'approval':
@@ -58,6 +60,13 @@ function ConversationItem({ item }: { item: ConversationItem }): React.ReactElem
   switch (item.kind) {
     case 'text':
       return <TextBlockView block={item} />;
+    case 'user':
+      return (
+        <Box marginBottom={1} paddingLeft={1} borderStyle="single" borderColor="magenta">
+          <Text color="magenta" bold>❯ </Text>
+          <Text color="white">{item.content}</Text>
+        </Box>
+      );
     case 'tool':
       return <ToolBlockView block={item} />;
     case 'approval':
@@ -98,6 +107,7 @@ function ToolBlockView({ block }: { block: ToolBlock }): React.ReactElement {
       <Text color={statusColor}>{statusIcon}</Text>
       <Text bold> {block.toolName}</Text>
       <Text color="gray"> · {block.status}</Text>
+      {block.summary && <Text color="gray"> — {block.summary}</Text>}
       {block.error && <Text color="red"> ({block.error})</Text>}
     </Box>
   );
