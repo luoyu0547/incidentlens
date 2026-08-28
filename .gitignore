@@ -13,7 +13,6 @@ dist/
 *.tsbuildinfo
 .DS_Store
 .superpowers/
-docs/superpowers/
 **/task-*-report.md
 OPTIMIZATION_SUGGESTIONS.md
 apps/web/dist/
