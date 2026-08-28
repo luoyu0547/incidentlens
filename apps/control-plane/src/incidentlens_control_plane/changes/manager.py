@@ -905,9 +905,16 @@ class ChangeManager:
     ) -> tuple[RemotePathPolicy, tuple[PurePosixPath, ...]]:
         if self._projects is not None:
             record = self._projects.get(request.files[0].project_id)
+            project_protected = tuple(
+                dict.fromkeys(
+                    path
+                    for registered_service in record.services
+                    for path in registered_service.protected_remote_paths
+                )
+            )
             for svc in record.services:
                 if svc.compose_service == request.files[0].service:
-                    return RemotePathPolicy(svc), svc.protected_remote_paths
+                    return RemotePathPolicy(svc), project_protected
             raise ChangeApplyError(
                 f"service {request.files[0].service!r} not found in "
                 f"project {request.files[0].project_id!r}"

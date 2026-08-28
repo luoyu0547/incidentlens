@@ -1,0 +1,174 @@
+/**
+ * CLI state types for IncidentLens.
+ *
+ * Defines the shape of the application state that drives the UI.
+ * This is a pure projection of server events and HTTP snapshots.
+ */
+
+import type { TargetView, AgentSessionView, OperationView, ApprovalDetailView } from '@incidentlens/protocol';
+
+/**
+ * Bootstrap state affects UI rendering and command availability.
+ */
+export type BootstrapState =
+  | 'loading'
+  | 'ready'
+  | 'authentication-required'
+  | 'incompatible';
+
+/**
+ * Stream connection status.
+ */
+export interface StreamStatus {
+  readonly connected: boolean;
+  readonly lastSequence: number;
+  readonly error?: string;
+}
+
+/**
+ * Input state for the prompt.
+ */
+export interface InputState {
+  readonly focused: boolean;
+  readonly value: string;
+}
+
+export interface UsageState {
+  readonly rounds: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+}
+
+export interface AgentActivityState {
+  readonly kind: 'idle' | 'model';
+  readonly round?: number;
+  readonly startedAt?: string;
+}
+
+/**
+ * Overlay state for modals and wizards.
+ */
+export type OverlayState =
+  | { kind: 'none' }
+  | { kind: 'command-palette'; query: string }
+  | {
+      kind: 'target-wizard';
+      mode: 'create' | 'edit';
+      target?: TargetView;
+      step: string;
+    }
+  | { kind: 'confirmation'; target: TargetView; onConfirm: () => void }
+  | { kind: 'session-picker' };
+
+/**
+ * Conversation item - safe UI projection of messages and tool updates.
+ */
+export type ConversationItem =
+  | TextBlock
+  | UserMessage
+  | ToolBlock
+  | ApprovalBlock
+  | SystemMessage;
+
+/**
+ * Text block from agent response.
+ */
+export interface TextBlock {
+  readonly kind: 'text';
+  readonly messageId: string;
+  readonly blockId: string;
+  readonly content: string;
+  readonly finalized?: boolean;
+}
+
+/** Message entered by the operator, shown immediately on submit. */
+export interface UserMessage {
+  readonly kind: 'user';
+  readonly messageId: string;
+  readonly content: string;
+}
+
+/**
+ * Tool execution block.
+ */
+export interface ToolBlock {
+  readonly kind: 'tool';
+  readonly toolId: string;
+  readonly toolName: string;
+  readonly status: 'proposed' | 'running' | 'waiting_approval' | 'succeeded' | 'failed' | 'uncertain';
+  readonly error?: string;
+  readonly summary?: string;
+}
+
+export interface TodoItemState {
+  readonly todoId: string;
+  readonly content: string;
+  readonly status: 'pending' | 'in_progress' | 'completed';
+}
+
+/** Durable tool row returned by the event-history snapshot. */
+export interface ToolEventSnapshot {
+  readonly toolId: string;
+  readonly toolName: string;
+  readonly status: ToolBlock['status'];
+  readonly error?: string;
+  readonly summary?: string;
+}
+
+/**
+ * Approval request block.
+ */
+export interface ApprovalBlock {
+  readonly kind: 'approval';
+  readonly approvalId: string;
+  readonly status: 'pending' | 'approved' | 'rejected' | 'expired';
+}
+
+/**
+ * System message (e.g., status updates, errors).
+ */
+export interface SystemMessage {
+  readonly kind: 'system';
+  readonly content: string;
+  readonly timestamp: Date;
+  readonly id?: string;
+}
+
+/**
+ * Complete CLI application state.
+ */
+export interface CliState {
+  readonly bootstrap: BootstrapState;
+  readonly target?: TargetView;
+  readonly session?: AgentSessionView;
+  readonly messages: readonly ConversationItem[];
+  readonly operations: Readonly<Record<string, OperationView>>;
+  readonly activeOperationId?: string;
+  readonly approvals: Readonly<Record<string, ApprovalDetailView>>;
+  readonly todos: readonly TodoItemState[];
+  readonly usage: UsageState;
+  readonly activity: AgentActivityState;
+  readonly stream: StreamStatus;
+  readonly input: InputState;
+  readonly overlay: OverlayState;
+}
+
+/**
+ * Actions that can modify the state.
+ */
+export type CliAction =
+  | { type: 'bootstrap_complete'; state: BootstrapState }
+  | { type: 'set_target'; target: TargetView }
+  | { type: 'clear_target' }
+  | { type: 'set_session'; session: AgentSessionView }
+  | { type: 'set_approval'; approval: ApprovalDetailView }
+  | { type: 'clear_approvals' }
+  | { type: 'update_operation'; operation: OperationView }
+  | { type: 'stream_event'; event: any }
+  | { type: 'gap_snapshot'; snapshot: { messages: ConversationItem[]; tools?: ToolEventSnapshot[]; todos?: TodoItemState[]; operations: Record<string, OperationView>; approvals: Record<string, ApprovalDetailView>; sequence: number } }
+  | { type: 'set_stream_status'; status: Partial<StreamStatus> }
+  | { type: 'set_input'; input: Partial<InputState> }
+  | { type: 'set_overlay'; overlay: OverlayState }
+  | { type: 'system_message'; content: string; timestamp: Date }
+  | { type: 'user_message'; messageId: string; content: string }
+  | { type: 'clear_messages' };

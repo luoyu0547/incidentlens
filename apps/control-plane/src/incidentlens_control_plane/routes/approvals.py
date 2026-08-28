@@ -19,6 +19,10 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from incidentlens_control_plane.approvals.service import (
+    ApprovalAlreadyDecided,
+    ApprovalExpired,
+)
 from incidentlens_control_plane.approvals.store import ApprovalNotFound
 from incidentlens_control_plane.approvals.types import ApprovalRecord, ApprovalStatus
 from incidentlens_control_plane.routes import get_runtime
@@ -87,7 +91,7 @@ async def approve_approval(request: Request, approval_id: str) -> dict[str, Any]
     runtime = get_runtime(request)
     try:
         record = await runtime.approvals.approve(approval_id)
-    except ApprovalNotFound:
+    except (ApprovalNotFound, ApprovalExpired, ApprovalAlreadyDecided):
         raise HTTPException(
             status_code=409, detail="Approval not found or already decided"
         )
@@ -101,7 +105,7 @@ async def reject_approval(request: Request, approval_id: str) -> dict[str, Any]:
     runtime = get_runtime(request)
     try:
         record = await runtime.approvals.reject(approval_id)
-    except ApprovalNotFound:
+    except (ApprovalNotFound, ApprovalExpired, ApprovalAlreadyDecided):
         raise HTTPException(
             status_code=409, detail="Approval not found or already decided"
         )

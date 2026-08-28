@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -38,6 +39,7 @@ from typing import Any
 
 from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
+from incidentlens_control_plane.events.types import RuntimeEventType
 from incidentlens_control_plane.evidence.service import EvidenceService
 from incidentlens_control_plane.investigation.compactor import (
     CompactionCircuitOpen,
@@ -63,9 +65,11 @@ from incidentlens_control_plane.investigation.provider import (
     ProviderContextMismatch,
     ProviderCrash,
     ProviderError,
+    ProviderOutputFormatError,
     ProviderOutputRejected,
     ProviderOutputValidator,
     RunCheckpoint,
+    ToolRequest,
     ToolSchema,
 )
 from incidentlens_control_plane.investigation.state_machine import (
@@ -85,6 +89,7 @@ from incidentlens_control_plane.investigation.store import (
     RoundConflict,
 )
 from incidentlens_control_plane.investigation.tool_executor import ToolExecutor
+from incidentlens_control_plane.investigation.tools import TOOL_TODO_WRITE
 from incidentlens_control_plane.investigation.transcript import TranscriptService
 from incidentlens_control_plane.investigation.types import (
     AgentBudget,
@@ -111,8 +116,12 @@ from incidentlens_control_plane.investigation.types import (
 )
 from incidentlens_control_plane.logs.redaction import redact_message
 from incidentlens_control_plane.logs.types import LogScope
+from incidentlens_control_plane.project_memory.types import ProjectMemoryExtractionRequest
 from incidentlens_control_plane.project_registry.store import ProjectRegistryStore
-from incidentlens_control_plane.project_registry.types import TargetRegistration
+from incidentlens_control_plane.project_registry.types import (
+    ServiceRegistration,
+    TargetRegistration,
+)
 from incidentlens_control_plane.remote_ops.sessions import SessionManager
 
 
@@ -154,6 +163,7 @@ class AgentOrchestrator:
         context_manager: AgentContextManager | None = None,
         transcript: TranscriptService | None = None,
         hooks: HookRunner | None = None,
+        memory_collector: Callable[[ProjectMemoryExtractionRequest], None] | None = None,
     ) -> None:
         if global_child_limit < 1:
             raise ValueError("global_child_limit must be >= 1")
@@ -172,6 +182,7 @@ class AgentOrchestrator:
         self._context = context_manager or AgentContextManager(store, now=self._now)
         self._transcript = transcript or TranscriptService(store)
         self._hooks = hooks or HookRunner()
+        self._memory_collector = memory_collector
         self._events_pub = (
             InvestigationEventPublisher(events, broker)
             if events is not None and broker is not None
@@ -359,10 +370,41 @@ class AgentOrchestrator:
             AgentRunStatus.PAUSED_UNCERTAIN_STATE,
         }:
             # Resume re-evaluates the pause condition under current budgets.
+            # A missing-evidence pause exhausted a *consecutive stagnation*
+            # window. An explicit operator resume grants a fresh window while
+            # preserving every cumulative round/tool/time/output counter.
+            if run.status is AgentRunStatus.PAUSED_MISSING_EVIDENCE:
+                run = self._bump_usage(
+                    run, consecutive_no_new_evidence_rounds=0
+                )
+                investigation = self._bump_investigation_usage(
+                    investigation, consecutive_no_new_evidence_rounds=0
+                )
+                self._store.update_agent_run(run)
+                self._store.update_investigation(investigation)
+            elif run.status is AgentRunStatus.PAUSED_BUDGET:
+                run = self._grant_remaining_investigation_capacity(
+                    run, investigation
+                )
+                self._store.update_agent_run(run)
             run = self._transition_run(run, AgentRunStatus.RUNNING, now=now)
             self._transition_investigation(
                 investigation, InvestigationStatus.RUNNING, now=now
             )
+            try:
+                self._append_resume_continuation(run.agent_run_id, now)
+            except Exception as exc:  # noqa: BLE001 - never send a corrupt tail
+                run = self._store.get_agent_run(agent_run_id)
+                investigation = self._store.get_investigation(run.investigation_id)
+                self._pause(
+                    run,
+                    investigation,
+                    AgentRunStatus.PAUSED_UNCERTAIN_STATE,
+                    now=now,
+                    reason=f"resume transcript append failed: {exc}",
+                    stop_reason=StopReason.UNCERTAIN_STATE,
+                )
+                return self._store.get_agent_run(agent_run_id)
             return None
         if run.status is AgentRunStatus.CREATED:
             run = self._transition_run(run, AgentRunStatus.RUNNING, now=now)
@@ -408,9 +450,14 @@ class AgentOrchestrator:
             return self._store.get_agent_run(agent_run_id)
 
         self._write_checkpoint(run, sequence=before_seq, round_number=round_number, now=now)
+        if self._events_pub is not None:
+            self._events_pub.model_round_started(
+                run, round_number=round_number, occurred_at=self._now()
+            )
+        provider_started = time.monotonic()
 
         try:
-            request = self._build_request(run, investigation, round_number, child_reports)
+            request = await self._build_request(run, investigation, round_number, child_reports)
         except Exception as exc:  # noqa: BLE001 - a corrupt transcript must pause, not crash
             self._pause(
                 run, investigation, AgentRunStatus.PAUSED_UNCERTAIN_STATE,
@@ -484,6 +531,22 @@ class AgentOrchestrator:
         run = self._bump_usage(run, rounds=run.usage.rounds + 1)
         self._store.update_agent_run(run)
         run = self._store.get_agent_run(agent_run_id)
+        if self._events_pub is not None:
+            stop_reason = (
+                result.stop_signal.stop_reason.value
+                if result.stop_signal is not None
+                else None
+            )
+            self._events_pub.model_round_completed(
+                run,
+                round_number=round_number,
+                input_tokens=result.usage.input_tokens,
+                output_tokens=result.usage.output_tokens,
+                output_bytes=result.usage.output_bytes,
+                duration_ms=int((time.monotonic() - provider_started) * 1_000),
+                stop_reason=stop_reason,
+                occurred_at=self._now(),
+            )
         self._append_round_summary(run, round_number, result.usage, now)
 
         run = self._bump_usage(
@@ -493,14 +556,31 @@ class AgentOrchestrator:
         self._store.update_agent_run(run)
         run = self._store.get_agent_run(agent_run_id)
 
-        validator = ProviderOutputValidator(request, run)
-        try:
-            validator.validate(result)
-        except (ProviderOutputRejected, ProviderContextMismatch) as exc:
-            run, investigation = await self._drain_all_children(
-                run, investigation, pending_children, child_reports, now
-            )
-            return self._fail(run, investigation, now, reason=str(exc))
+        # Provider IDs only correlate blocks inside this turn. Persist and execute
+        # harness-allocated IDs so two runs may safely receive the same provider ID.
+        result = self._namespace_tool_requests(run, result)
+        if self._events_pub is not None:
+            for proposal in result.tool_requests:
+                self._events_pub.tool_proposed(
+                    run,
+                    tool_call_id=proposal.tool_call_id,
+                    provider_tool_call_id=proposal.provider_tool_call_id,
+                    tool_name=proposal.tool_name,
+                    arguments=proposal.arguments,
+                    occurred_at=self._now(),
+                )
+                self._events_pub.policy_decided(
+                    run,
+                    tool_call_id=proposal.tool_call_id,
+                    tool_name=proposal.tool_name,
+                    decision="approval_required"
+                    if self._executor.requires_approval(proposal.tool_name)
+                    else "allowed",
+                    requires_approval=self._executor.requires_approval(
+                        proposal.tool_name
+                    ),
+                    occurred_at=self._now(),
+                )
 
         # Step 4: append the assistant message BEFORE executing any tool or
         # spawning any child (append-before-act).  On an append failure the
@@ -520,6 +600,8 @@ class AgentOrchestrator:
         for proposal in result.hypotheses:
             hypothesis = self._materialize_hypothesis(run, proposal, now)
             self._store.create_hypothesis(hypothesis)
+            if self._events_pub is not None:
+                self._events_pub.hypothesis_changed(hypothesis, occurred_at=now)
             run = run.model_copy(
                 update={"hypotheses": run.hypotheses + (hypothesis,)}
             )
@@ -646,9 +728,50 @@ class AgentOrchestrator:
 
     async def _call_provider(self, request: ConversationRequest) -> AgentTurnResult:
         retries = 0
+        current_request = request
         while True:
             try:
-                return await self._provider.generate_turn(request)
+                result = await self._provider.generate_turn(current_request)
+                run = self._store.get_agent_run(
+                    current_request.checkpoint.agent_run_id
+                )
+                ProviderOutputValidator(current_request, run).validate(result)
+                return result
+            except ProviderOutputFormatError as exc:
+                if retries >= self._max_provider_retries:
+                    raise ProviderError(str(exc), retryable=False) from exc
+                retries += 1
+                run = self._store.get_agent_run(request.checkpoint.agent_run_id)
+                if (
+                    AGENT_RUN_STATE_MACHINE.is_terminal(run.status)
+                    or run.status is AgentRunStatus.CANCEL_REQUESTED
+                ):
+                    raise ProviderError(str(exc), retryable=False) from exc
+                correction = TranscriptMessage(
+                    agent_run_id=run.agent_run_id,
+                    sequence=(
+                        max(
+                            (message.sequence for message in current_request.messages),
+                            default=0,
+                        )
+                        + 1
+                    ),
+                    role=MessageRole.USER,
+                    blocks=(
+                        TextBlock(
+                            text=(
+                                "Your previous JSON did not match AgentTurnResult: "
+                                f"{str(exc)[:500]}. Re-emit the same intended turn as "
+                                "one valid JSON object. Use `summary` for each conclusion "
+                                "and do not add fields outside the supplied schema."
+                            )
+                        ),
+                    ),
+                    created_at=self._now(),
+                )
+                current_request = current_request.model_copy(
+                    update={"messages": (*current_request.messages, correction)}
+                )
             except ProviderError as exc:
                 if not exc.retryable or retries >= self._max_provider_retries:
                     raise
@@ -659,8 +782,48 @@ class AgentOrchestrator:
                     or run.status is AgentRunStatus.CANCEL_REQUESTED
                 ):
                     raise exc
+            except ProviderOutputRejected as exc:
+                if retries >= self._max_provider_retries:
+                    raise ProviderError(str(exc), retryable=False) from exc
+                retries += 1
+                run = self._store.get_agent_run(request.checkpoint.agent_run_id)
+                if (
+                    AGENT_RUN_STATE_MACHINE.is_terminal(run.status)
+                    or run.status is AgentRunStatus.CANCEL_REQUESTED
+                ):
+                    raise ProviderError(str(exc), retryable=False) from exc
+                next_sequence = (
+                    max(
+                        (message.sequence for message in current_request.messages),
+                        default=0,
+                    )
+                    + 1
+                )
+                correction = TranscriptMessage(
+                    agent_run_id=run.agent_run_id,
+                    sequence=next_sequence,
+                    role=MessageRole.USER,
+                    blocks=(
+                        TextBlock(
+                            text=(
+                                "Your previous structured turn was rejected by the "
+                                f"harness: {str(exc)[:500]}. Re-emit the intended "
+                                "action using only an explicitly provided tool name; "
+                                "never call protocol wrapper names such as tool_use."
+                            )
+                        ),
+                    ),
+                    created_at=self._now(),
+                )
+                current_request = current_request.model_copy(
+                    update={
+                        "messages": (*current_request.messages, correction)
+                    }
+                )
+            except ProviderContextMismatch:
+                raise
 
-    def _build_request(
+    async def _build_request(
         self,
         run: AgentRun,
         investigation: Investigation,
@@ -669,10 +832,22 @@ class AgentOrchestrator:
     ) -> ConversationRequest:
         project = self._projects.get(investigation.project_id)
         service = next(
-            item for item in project.services if item.compose_service == investigation.service
+            (
+                item
+                for item in project.services
+                if item.compose_service == investigation.service
+            ),
+            ServiceRegistration(compose_service="host")
+            if not project.services and investigation.service == "host"
+            else None,
         )
+        if service is None:
+            raise ValueError(
+                f"service {investigation.service!r} not found in project "
+                f"{investigation.project_id!r}"
+            )
         tool_schemas = self._executor.tool_schemas(scope=run.scope.scope)
-        context = self._context.build(
+        context = await self._context.prepare(
             run, investigation, tool_schemas, child_reports=tuple(child_reports)
         )
         return ConversationRequest(
@@ -751,6 +926,60 @@ class AgentOrchestrator:
         )
         self._transcript.append_message(message)
 
+    def _append_resume_continuation(self, agent_run_id: str, now: datetime) -> None:
+        """Append the explicit user action when a paused transcript ends assistant-side.
+
+        Hidden provider reasoning is intentionally not persisted. Some
+        thinking-mode APIs reject an assistant-ended resumed request unless
+        that hidden field is replayed. An operator resume is instead represented
+        as a normal, auditable user continuation. Approval resumes already end
+        with a user-side tool result and need no additional message.
+        """
+        messages = self._store.list_transcript_messages(agent_run_id)
+        if not messages or messages[-1].role is not MessageRole.ASSISTANT:
+            return
+        self._transcript.append_message(
+            TranscriptMessage(
+                agent_run_id=agent_run_id,
+                sequence=messages[-1].sequence + 1,
+                role=MessageRole.USER,
+                blocks=(
+                    TextBlock(
+                        text=(
+                            "Operator explicitly resumed this paused run. Continue from "
+                            "the durable checkpoint and current evidence."
+                        )
+                    ),
+                ),
+                created_at=now,
+            )
+        )
+
+    def _namespace_tool_requests(
+        self, run: AgentRun, result: AgentTurnResult
+    ) -> AgentTurnResult:
+        """Replace provider-local tool IDs with harness-allocated identities."""
+        if not result.tool_requests:
+            return result
+        requests = tuple(
+            ToolRequest(
+                tool_call_id=self.allocate_tool_call_id(
+                    run.agent_run_id, request.tool_call_id
+                ),
+                provider_tool_call_id=request.tool_call_id,
+                tool_name=request.tool_name,
+                arguments=request.arguments,
+            )
+            for request in result.tool_requests
+        )
+        return result.model_copy(update={"tool_requests": requests})
+
+    @staticmethod
+    def allocate_tool_call_id(run_id: str, provider_id: str) -> str:
+        """Allocate an opaque, globally unique internal ID for one proposal."""
+        suffix = uuid.uuid4().hex[:16]
+        return f"tool-{run_id[:40]}-{suffix}"[:120]
+
     def _assistant_message(
         self, run: AgentRun, result: AgentTurnResult, now: datetime
     ) -> TranscriptMessage:
@@ -760,38 +989,43 @@ class AgentOrchestrator:
         delegation, the stop signal and any textual status remain a bounded text
         JSON block (the structured copy stays in the domain stores).
         """
-        if result.tool_requests:
-            blocks = tuple(
+        payload = {
+            "hypotheses": [
+                proposal.model_dump(mode="json")
+                for proposal in result.hypotheses
+            ],
+            "conclusions": [
+                conclusion.model_dump(mode="json")
+                for conclusion in result.conclusions
+            ],
+            "delegation": (
+                result.child_delegation.model_dump(mode="json")
+                if result.child_delegation is not None
+                else None
+            ),
+            "stop": (
+                result.stop_signal.model_dump(mode="json")
+                if result.stop_signal is not None
+                else None
+            ),
+        }
+        text = json.dumps(payload, default=str, sort_keys=True)[:100_000]
+        blocks = (
+            *(
                 ToolUseBlock(
                     tool_call_id=request.tool_call_id,
                     tool_name=request.tool_name,
                     arguments=request.arguments,
                 )
                 for request in result.tool_requests
-            )
-        else:
-            payload = {
-                "hypotheses": [
-                    proposal.model_dump(mode="json")
-                    for proposal in result.hypotheses
-                ],
-                "conclusions": [
-                    conclusion.model_dump(mode="json")
-                    for conclusion in result.conclusions
-                ],
-                "delegation": (
-                    result.child_delegation.model_dump(mode="json")
-                    if result.child_delegation is not None
-                    else None
-                ),
-                "stop": (
-                    result.stop_signal.model_dump(mode="json")
-                    if result.stop_signal is not None
-                    else None
-                ),
-            }
-            text = json.dumps(payload, default=str, sort_keys=True)[:100_000]
-            blocks = (TextBlock(text=text),)
+            ),
+            # Tool-use turns must preserve the model's bounded planning state
+            # too.  Otherwise hypotheses declared alongside observations are
+            # persisted in SQLite but disappear from the next provider turn,
+            # making it impossible for the model to coordinate a genuine
+            # multi-path investigation or decide when compaction is due.
+            TextBlock(text=text),
+        )
         return TranscriptMessage(
             agent_run_id=run.agent_run_id,
             sequence=self._next_sequence(run.agent_run_id),
@@ -884,6 +1118,10 @@ class AgentOrchestrator:
                     investigation, InvestigationStatus.COMPLETED, now=now,
                     stop_reason=StopReason.COMPLETED,
                 )
+                # Verified parent completion is durable now; extraction is
+                # scheduled without waiting so it can never hold the loop or
+                # alter the completion state already persisted above.
+                self._collect_memory_after_completion(run, investigation, stop_signal, now)
             return self._store.get_agent_run(run.agent_run_id)
         if reason is StopReason.MISSING_EVIDENCE:
             self._pause(run, investigation, AgentRunStatus.PAUSED_MISSING_EVIDENCE, now=now,
@@ -917,6 +1155,71 @@ class AgentOrchestrator:
         if reason is StopReason.FAILED:
             return self._fail(run, investigation, now, reason=stop_signal.summary)
         return self._fail(run, investigation, now, reason=f"unhandled stop reason {reason.value}")
+
+    # -- project memory extraction scheduling ---------------------------------
+
+    def _collect_memory_after_completion(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        stop_signal: Any,
+        now: datetime,
+    ) -> None:
+        """Schedule automatic extraction right after a persisted parent completion.
+
+        The notifier is optional and best-effort: an absent collector, a build
+        failure, or an enqueue failure never alters the completion already
+        persisted and never raises into the loop.  Any failure is surfaced as a
+        redacted ``agent_hook`` event.
+        """
+        if self._memory_collector is None:
+            return
+        try:
+            request = self._build_memory_extraction_request(run, investigation, stop_signal)
+            self._memory_collector(request)
+        except Exception as exc:  # noqa: BLE001 - memory never blocks completion
+            self._emit_memory_schedule_failure(run, investigation, exc, now)
+
+    def _build_memory_extraction_request(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        stop_signal: Any,
+    ) -> ProjectMemoryExtractionRequest:
+        conclusions = self._store.list_conclusions(agent_run_id=run.agent_run_id)
+        session = self._store.get_latest_session_memory(run.agent_run_id)
+        summary = getattr(stop_signal, "summary", "") or ""
+        return ProjectMemoryExtractionRequest(
+            investigation=investigation,
+            agent_run_id=run.agent_run_id,
+            owned_evidence_ids=tuple(
+                reference.evidence_id for reference in run.evidence
+            ),
+            conclusion_summaries=tuple(item.summary for item in conclusions),
+            session_memory_snapshot=session.model_dump_json() if session is not None else "",
+            verification_summary=summary,
+        )
+
+    def _emit_memory_schedule_failure(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        exc: BaseException,
+        now: datetime,
+    ) -> None:
+        if self._events_pub is None:
+            return
+        message = str(exc) or type(exc).__name__
+        self._events_pub.emit(
+            RuntimeEventType.AGENT_HOOK,
+            occurred_at=now,
+            hook_type="project_memory",
+            agent_run_id=run.agent_run_id,
+            investigation_id=investigation.investigation_id,
+            action_name="schedule_extraction",
+            status="failed",
+            metadata={"reason": message[:240]},
+        )
 
     def _finish_round_counters(
         self,
@@ -959,7 +1262,11 @@ class AgentOrchestrator:
         self, run: AgentRun, investigation: Investigation, now: datetime, *, reason: str
     ) -> AgentRun:
         self._transition_run(
-            run, AgentRunStatus.FAILED, now=now, stop_reason=StopReason.FAILED
+            run,
+            AgentRunStatus.FAILED,
+            now=now,
+            stop_reason=StopReason.FAILED,
+            failure_reason=reason,
         )
         if run.kind is AgentRunKind.PARENT:
             self._transition_investigation(
@@ -979,6 +1286,11 @@ class AgentOrchestrator:
         stop_reason: StopReason,
     ) -> None:
         self._transition_run(run, run_status, now=now, stop_reason=stop_reason)
+        if self._events_pub is not None:
+            current = self._store.get_agent_run(run.agent_run_id)
+            self._events_pub.safety_state_changed(
+                current, status=run_status.value, reason=reason, occurred_at=now
+            )
         if run.kind is AgentRunKind.PARENT:
             self._transition_investigation(
                 investigation, self._investigation_pause(run_status), now=now,
@@ -1000,6 +1312,42 @@ class AgentOrchestrator:
             if axis in reason:
                 return stop_reason
         return StopReason.BUDGET_OUTPUT
+
+    @staticmethod
+    def _grant_remaining_investigation_capacity(
+        run: AgentRun, investigation: Investigation
+    ) -> AgentRun:
+        """Let an explicitly resumed run consume the investigation's unused budget.
+
+        Per-run limits are checkpoints inside the harder investigation-wide
+        limits.  A resume may cross the former, but never grants one additional
+        investigation round or tool call.
+        """
+        budget_updates: dict[str, int] = {}
+        if run.stop_reason is StopReason.BUDGET_TOOL_CALLS:
+            remaining = max(
+                0,
+                investigation.budget.max_tool_calls
+                - investigation.usage.tool_calls,
+            )
+            budget_updates["max_tool_calls"] = min(
+                500,
+                max(run.budget.max_tool_calls, run.usage.tool_calls + remaining),
+            )
+        elif run.stop_reason is StopReason.BUDGET_ROUNDS:
+            remaining = max(
+                0,
+                investigation.budget.max_rounds - investigation.usage.rounds,
+            )
+            budget_updates["max_rounds"] = min(
+                200,
+                max(run.budget.max_rounds, run.usage.rounds + remaining),
+            )
+        if not budget_updates:
+            return run
+        return run.model_copy(
+            update={"budget": run.budget.model_copy(update=budget_updates)}
+        )
 
     @staticmethod
     def _investigation_pause(run_status: AgentRunStatus) -> InvestigationStatus:
@@ -1360,6 +1708,17 @@ class AgentOrchestrator:
         run = self._store.get_agent_run(run.agent_run_id)
         investigation = self._store.get_investigation(investigation.investigation_id)
 
+        if (
+            request.tool_name == TOOL_TODO_WRITE
+            and outcome.status is ToolCallStatus.SUCCEEDED
+            and self._events_pub is not None
+        ):
+            self._events_pub.todo_changed(
+                run,
+                self._store.list_todos(run.agent_run_id),
+                occurred_at=now,
+            )
+
         if outcome.status is ToolCallStatus.UNCERTAIN:
             run, investigation = self._pause_round(
                 run, investigation, AgentRunStatus.PAUSED_UNCERTAIN_STATE, now=now,
@@ -1408,7 +1767,11 @@ class AgentOrchestrator:
             )
             compact_status = "failed"
             try:
-                await self._context.semantic_compact(run, manual=True)
+                memory = await self._context.semantic_compact(run, manual=True)
+                if self._events_pub is not None:
+                    self._events_pub.context_compacted(
+                        run, memory, mode="manual", occurred_at=self._now()
+                    )
                 compact_status = "completed"
                 result_block = ToolResultBlock(
                     tool_call_id=block.tool_call_id,
@@ -1461,6 +1824,9 @@ class AgentOrchestrator:
         tool_call = ToolCall(
             tool_call_id=request.tool_call_id,
             agent_run_id=run.agent_run_id,
+            provider_tool_call_id=(
+                request.provider_tool_call_id or request.tool_call_id
+            ),
             tool_name=request.tool_name,
             status=ToolCallStatus.PLANNED,
             idempotency_key=request.tool_call_id,
@@ -1494,18 +1860,32 @@ class AgentOrchestrator:
             approval_id=approval_id,
         )
         if self._events_pub is not None:
+            investigation_id = self._store.get_agent_run(
+                updated.agent_run_id
+            ).investigation_id
             if previous != updated.status.value:
                 self._events_pub.tool_call_status_changed(
-                    updated, previous=previous, occurred_at=now
+                    updated,
+                    previous=previous,
+                    investigation_id=investigation_id,
+                    occurred_at=now,
                 )
             if (
                 previous == ToolCallStatus.PLANNED.value
                 and updated.status
                 in (ToolCallStatus.RUNNING, ToolCallStatus.WAITING_APPROVAL)
             ):
-                self._events_pub.tool_call_started(updated, occurred_at=now)
+                self._events_pub.tool_call_started(
+                    updated,
+                    investigation_id=investigation_id,
+                    occurred_at=now,
+                )
             if TOOL_CALL_STATE_MACHINE.is_terminal(updated.status):
-                self._events_pub.tool_call_completed(updated, occurred_at=now)
+                self._events_pub.tool_call_completed(
+                    updated,
+                    investigation_id=investigation_id,
+                    occurred_at=now,
+                )
         return updated
 
     # -- child delegation -----------------------------------------------------
@@ -1649,6 +2029,8 @@ class AgentOrchestrator:
                 status=run.status.value,
                 metadata={"parent_run_id": package.parent_run_id},
             )
+            if self._events_pub is not None:
+                self._events_pub.child_run_started(run, occurred_at=self._now())
             async with self._child_semaphore:
                 if run.scope.scope is LogScope.CONTAINER:
                     container_session_id = await self._spawn_container_session(run)
@@ -2090,7 +2472,11 @@ class AgentOrchestrator:
         # missing-evidence stop and are surfaced by the pause logic instead.
         if not conclusion.evidence_ids:
             return
-        self._store.create_conclusion(run.agent_run_id, run.investigation_id, conclusion, now=now)
+        stored = self._store.create_conclusion(
+            run.agent_run_id, run.investigation_id, conclusion, now=now
+        )
+        if self._events_pub is not None:
+            self._events_pub.conclusion_created(run, stored, occurred_at=now)
 
     def _append_evidence(
         self,
@@ -2206,6 +2592,7 @@ class AgentOrchestrator:
         *,
         now: datetime,
         stop_reason: StopReason | None = None,
+        failure_reason: str | None = None,
     ) -> AgentRun:
         previous = run.status.value
         updated = self._store.transition_agent_run_status(
@@ -2219,7 +2606,9 @@ class AgentOrchestrator:
             if target is AgentRunStatus.COMPLETED:
                 self._events_pub.agent_run_completed(updated, occurred_at=now)
             elif target is AgentRunStatus.FAILED:
-                self._events_pub.agent_run_failed(updated, occurred_at=now)
+                self._events_pub.agent_run_failed(
+                    updated, reason=failure_reason, occurred_at=now
+                )
             elif target is AgentRunStatus.CANCELLED:
                 self._events_pub.agent_run_cancelled(updated, occurred_at=now)
             if previous == AgentRunStatus.CREATED.value and target is AgentRunStatus.RUNNING:

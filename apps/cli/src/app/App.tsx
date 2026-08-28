@@ -1,0 +1,688 @@
+/**
+ * Main App component for IncidentLens CLI.
+ *
+ * Renders the single-column conversation shell with:
+ * - IncidentLens header
+ * - Current target/session status
+ * - Conversation history
+ * - Status line
+ * - Prompt input
+ * - Overlays: command palette, target wizard, typed remove confirmation
+ */
+
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Box, Text, useInput, useApp } from 'ink';
+import type { AppDependencies } from './dependencies.js';
+import { bootstrap } from './bootstrap.js';
+import type { CliState, CliAction } from '../state/cli-state.js';
+import { createInitialState, reducer } from '../state/reducer.js';
+import { parseInput } from '../commands/parser.js';
+import { executeCommand } from '../commands/execute-command.js';
+import type { CommandContext, CommandResult } from '../commands/types.js';
+import { createCommandRegistry } from '../commands/registry.js';
+import { TargetController } from '../features/targets/target-controller.js';
+import {
+  createTargetCommands,
+  type TargetCommandRuntime,
+} from '../features/targets/target-commands.js';
+import { SessionController } from '../features/sessions/session-controller.js';
+import {
+  createSessionCommands,
+  type SessionCommandRuntime,
+} from '../features/sessions/session-commands.js';
+import type { AgentSessionView } from '@incidentlens/protocol';
+import { Conversation } from '../ui/Conversation.js';
+import { PromptInput } from '../ui/PromptInput.js';
+import { CommandPalette } from '../ui/CommandPalette.js';
+import { TargetWizard, RemoveTargetPrompt } from '../ui/TargetWizard.js';
+import { SessionPicker } from '../ui/SessionPicker.js';
+import { ApprovalCard } from '../ui/ApprovalCard.js';
+import { safeApprovalText } from '../ui/ApprovalCard.js';
+import { TodoPanel } from '../ui/TodoPanel.js';
+import { UsageLine } from '../ui/UsageLine.js';
+import { ActivityLine } from '../ui/ActivityLine.js';
+import { ApprovalControllerImpl } from '../features/approvals/approval-controller.js';
+import { createApprovalCommands, type ApprovalCommandRuntime } from '../features/approvals/approval-commands.js';
+import { SessionSynchronizer } from '../stream/session-synchronizer.js';
+
+interface AppProps {
+  readonly dependencies: AppDependencies;
+  readonly initialState?: Partial<CliState>;
+}
+
+/**
+ * Main App component.
+ */
+export function App({ dependencies: deps, initialState }: AppProps): React.ReactElement {
+  const [state, setState] = useState<CliState>(() => ({
+    ...createInitialState(),
+    ...initialState,
+  }));
+
+  const { exit } = useApp();
+
+  // Dispatch function for state updates
+  const dispatch = useCallback((action: CliAction) => {
+    setState((prev) => reducer(prev, action));
+  }, []);
+
+  // Latest state ref so stable runtime callbacks never read stale state.
+  const stateRef = useRef<CliState>(state);
+  stateRef.current = state;
+
+  // Sessions loaded into the picker overlay.
+  const [pickerSessions, setPickerSessions] = useState<readonly AgentSessionView[]>([]);
+  const [pickerError, setPickerError] = useState<string | undefined>(undefined);
+
+  // Target controller shared by commands and the wizard.
+  const controller = useMemo(
+    () =>
+      new TargetController({
+        api: deps.api,
+        configStore: deps.configStore,
+        profileName: 'default',
+        dispatch,
+      }),
+    [deps.api, deps.configStore, dispatch]
+  );
+
+  // Session controller shared by session commands and natural-language
+  // submits. It implements no-target blocking, create-on-first-message,
+  // and durable-operation tracking that mirrors into state.operations.
+  const sessionController = useMemo(
+    () =>
+      new SessionController({
+        api: deps.api,
+        configStore: deps.configStore,
+        profileName: 'default',
+        dispatch,
+        onOperationProgress: (operation) =>
+          dispatch({ type: 'update_operation', operation }),
+      }),
+    [deps.api, deps.configStore, dispatch]
+  );
+
+  // Approval decisions always refresh and render the server response.
+  const approvalController = useMemo(() => new ApprovalControllerImpl({ api: deps.api }), [deps.api]);
+  // Do not resurrect stale approvals from prior CLI runs into a fresh
+  // operator session. New approvals created after this baseline remain
+  // visible and actionable.
+  const approvalBaselineRef = useRef(Date.now());
+  const approveAllRef = useRef(false);
+  const autoApprovingIdsRef = useRef(new Set<string>());
+  const [approvalPrompt, setApprovalPrompt] = useState<{ id: string; decision: 'approve' | 'reject' }>();
+  const modalInputActive = state.overlay.kind !== 'none' || approvalPrompt !== undefined;
+  const approvalRuntime = useMemo<ApprovalCommandRuntime>(() => ({
+    controller: approvalController,
+    listPending: async () => (await deps.api.listApprovals({ status: 'pending', limit: 500 })).items,
+    getCurrentApprovalId: () => Object.values(stateRef.current.approvals).find((a) => a.decision_status === 'pending')?.approval_id,
+    openReasonPrompt: (id, decision) => { void approvalController.decide(id, decision); },
+    showDiff: (approval) => dispatch({ type: 'system_message', content: safeApprovalText(approval.diff) ?? 'No safe diff available.', timestamp: deps.now() }),
+  }), [approvalController, deps, dispatch]);
+
+  // Keep the session controller's view of the active target/session in
+  // sync with the reducer on every render.
+  sessionController.sync(state.target, state.session);
+
+  // A stream is opened only after bootstrap has produced an authoritative
+  // session snapshot. Aborting this controller is a clean client shutdown;
+  // it never issues a server cancellation.
+  const synchronizerRef = useRef<SessionSynchronizer | undefined>(undefined);
+  useEffect(() => {
+    if (state.bootstrap !== 'ready' || !state.session) {
+      return;
+    }
+    const synchronizer = new SessionSynchronizer({
+      api: deps.api,
+      configStore: deps.configStore,
+      profileName: 'default',
+      eventStream: deps.eventStream as never,
+      host: {
+        dispatch,
+        onCursorAdvance: () => {
+          // Cursor persistence is owned by the synchronizer and follows
+          // reducer dispatch for every accepted event.
+        },
+      },
+    });
+    synchronizerRef.current = synchronizer;
+    const controller = new AbortController();
+    void deps.configStore.load('default').then((profile) => {
+      if (controller.signal.aborted) return;
+      synchronizer.setInitialCursor(
+        state.session!.session_id,
+        profile?.lastSequenceBySession[state.session!.session_id] ?? state.stream.lastSequence,
+      );
+      void synchronizer.start(controller.signal);
+    });
+    return () => {
+      controller.abort();
+      synchronizerRef.current = undefined;
+    };
+  }, [state.bootstrap, state.session?.session_id, deps, dispatch]);
+
+  // Load sessions when the picker opens.
+  useEffect(() => {
+    if (state.overlay.kind === 'session-picker') {
+      void sessionController
+        .list()
+        .then((sessions) => setPickerSessions(sessions))
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : 'Failed to load sessions';
+          setPickerError(message);
+        });
+    }
+  }, [state.overlay.kind, sessionController]);
+
+  // Context used for command availability checks.
+  const commandContext: CommandContext = useMemo(
+    () => ({
+      target: state.target,
+      session: state.session,
+      bootstrap: state.bootstrap,
+      capabilities: new Set<string>(),
+    }),
+    [state.target, state.session, state.bootstrap]
+  );
+
+  // Runtime callbacks backing the /target command group.
+  const targetRuntime = useMemo<TargetCommandRuntime>(
+    () => ({
+      controller,
+      openWizard: (mode, target) =>
+        dispatch({
+          type: 'set_overlay',
+          overlay: { kind: 'target-wizard', mode, target, step: 'name' },
+        }),
+      openRemoveConfirmation: (target) =>
+        dispatch({
+          type: 'set_overlay',
+          overlay: {
+            kind: 'confirmation',
+            target,
+            onConfirm: () => {
+              void controller
+                .remove(target.target_id)
+                .then(() => {
+                  if (stateRef.current.target?.target_id === target.target_id) {
+                    dispatch({ type: 'clear_target' });
+                  }
+                  dispatch({
+                    type: 'system_message',
+                    content: `Removed target ${target.name}`,
+                    timestamp: deps.now(),
+                  });
+                })
+                .catch((error) => {
+                  const message =
+                    error instanceof Error ? error.message : 'Failed to remove target';
+                  dispatch({
+                    type: 'system_message',
+                    content: `Error: ${message}`,
+                    timestamp: deps.now(),
+                  });
+                });
+            },
+          },
+        }),
+      status: (text) => dispatch({ type: 'system_message', content: text, timestamp: deps.now() }),
+      error: (text) =>
+        dispatch({
+          type: 'system_message',
+          content: `Error: ${text}`,
+          timestamp: deps.now(),
+        }),
+    }),
+    [controller, dispatch, deps]
+  );
+
+  // Runtime callbacks backing the /session command group.
+  const sessionRuntime = useMemo<SessionCommandRuntime>(
+    () => ({
+      controller: sessionController,
+      openPicker: () =>
+        dispatch({ type: 'set_overlay', overlay: { kind: 'session-picker' } }),
+      status: (text) => dispatch({ type: 'system_message', content: text, timestamp: deps.now() }),
+      error: (text) =>
+        dispatch({
+          type: 'system_message',
+          content: `Error: ${text}`,
+          timestamp: deps.now(),
+        }),
+    }),
+    [sessionController, dispatch, deps]
+  );
+
+  // Command registry populated with the /target and /session command groups.
+  const registry = useMemo(
+    () =>
+      createCommandRegistry(
+        [...createTargetCommands(targetRuntime), ...createSessionCommands(sessionRuntime), ...createApprovalCommands(approvalRuntime)],
+        commandContext,
+      ),
+    [targetRuntime, sessionRuntime, approvalRuntime, commandContext]
+  );
+
+  // Surface a CommandResult as a system message in the conversation.
+  const intoMessages = useCallback(
+    (result: CommandResult) => {
+      if (result.kind === 'message') {
+        dispatch({ type: 'system_message', content: result.text, timestamp: deps.now() });
+      } else if (result.kind === 'error') {
+        dispatch({
+          type: 'system_message',
+          content: `Error: ${result.message}`,
+          timestamp: deps.now(),
+        });
+      } else if (result.kind === 'navigate') {
+        dispatch({
+          type: 'system_message',
+          content: `Navigating to ${result.target}…`,
+          timestamp: deps.now(),
+        });
+      }
+    },
+    [dispatch, deps]
+  );
+
+  // Bootstrap on mount
+  useEffect(() => {
+    if (state.bootstrap === 'loading') {
+      void bootstrap(deps, dispatch);
+    }
+  }, [state.bootstrap, deps, dispatch]);
+
+  // Approval requests can be linked to an investigation run without a
+  // session_id (for example, a target-scoped cloud investigation).  Fetch the
+  // server-authoritative pending queue globally so those requests still
+  // render an actionable ApprovalCard instead of only the passive
+  // "waiting for approval" activity line.
+  useEffect(() => {
+    if (state.bootstrap !== 'ready') return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const page = await deps.api.listApprovals({ status: 'pending', limit: 500 });
+        if (cancelled) return;
+        // Keep the active request focused. Historical pending records from
+        // prior runs must not stack above the prompt and obscure the current
+        // tool call.
+        dispatch({ type: 'clear_approvals' });
+        const fresh = page.items.filter((approval) => {
+          const created = Date.parse(approval.created_at);
+          return Number.isFinite(created) && created >= approvalBaselineRef.current;
+        });
+        for (const approval of fresh.slice(-1)) {
+          dispatch({ type: 'set_approval', approval });
+          if (approveAllRef.current && !autoApprovingIdsRef.current.has(approval.approval_id)) {
+            autoApprovingIdsRef.current.add(approval.approval_id);
+            void approvalController.decide(approval.approval_id, 'approve')
+              .then((updated) => dispatch({ type: 'set_approval', approval: updated }))
+              .catch((error) => {
+                autoApprovingIdsRef.current.delete(approval.approval_id);
+                dispatch({ type: 'system_message', content: `Error: ${error instanceof Error ? error.message : 'Approval decision failed'}`, timestamp: deps.now() });
+              });
+          }
+        }
+      } catch {
+        // Stream/snapshot recovery remains authoritative; a failed refresh is
+        // non-fatal and must not hide already-rendered approval cards.
+      }
+    };
+    void refresh();
+    const timer = setInterval(() => void refresh(), 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [state.bootstrap, deps.api, dispatch, approvalController, deps]);
+
+  // Handle keyboard input
+  useInput((input, key) => {
+    // Handle Ctrl+C
+    if (key.ctrl && input === 'c') {
+      if (approvalPrompt !== undefined) {
+        setApprovalPrompt(undefined);
+      } else if (state.overlay.kind !== 'none') {
+        // Close overlay
+        dispatch({ type: 'set_overlay', overlay: { kind: 'none' } });
+      } else if (state.input.value.length > 0) {
+        // Clear input
+        dispatch({ type: 'set_input', input: { value: '' } });
+      } else {
+        // Exit
+        deps.exit();
+        exit();
+      }
+      return;
+    }
+
+    // Handle Escape
+    if (key.escape) {
+      if (approvalPrompt !== undefined) {
+        setApprovalPrompt(undefined);
+      } else if (state.overlay.kind !== 'none') {
+        dispatch({ type: 'set_overlay', overlay: { kind: 'none' } });
+      }
+      return;
+    }
+
+    // Modal components own stdin while they are visible. Without this guard,
+    // the main prompt and the overlay both process the same characters and
+    // Enter key, which can submit stray commands while editing wizard fields.
+    if (modalInputActive) {
+      return;
+    }
+
+    // ApprovalCard owns arrow/enter navigation while a pending approval is
+    // visible. Prevent raw escape sequences from being appended to the main
+    // prompt, which would disable the card's navigation on the next render.
+    const hasPendingApproval = Object.values(state.approvals).some(
+      (approval) => approval.decision_status === 'pending',
+    );
+    if (hasPendingApproval && (key.up || key.down || input === '\u001b[A' || input === '\u001b[B' || input === '\u001bOA' || input === '\u001bOB')) {
+      return;
+    }
+
+    // Route the terminal's actual stdin into the visible prompt. Keeping this
+    // here (alongside the global escape handling) means the prompt works in a
+    // real interactive Terminal, not only in component tests.
+    // Ink normally marks Enter as `key.return`, but macOS Terminal and
+    // pseudo-terminals may deliver a raw CR/LF byte (or a chunk containing
+    // text followed by CR/LF) without that annotation. Split such chunks into
+    // complete submissions so commands cannot accumulate in the prompt.
+    if (input.includes('\r') || input.includes('\n')) {
+      let pending = state.input.value;
+      for (const part of input.split(/\r\n|\r|\n/)) {
+        pending += part;
+        if (pending.trim().length > 0) {
+          handleSubmit(pending);
+          pending = '';
+        }
+      }
+      dispatch({ type: 'set_input', input: { value: pending } });
+      return;
+    }
+
+    if (key.return) {
+      if (state.input.value.trim().length > 0) {
+        handleSubmit(state.input.value);
+        dispatch({ type: 'set_input', input: { value: '' } });
+      }
+      return;
+    }
+
+    if (key.backspace || key.delete) {
+      if (state.input.value.length > 0) {
+        dispatch({ type: 'set_input', input: { value: state.input.value.slice(0, -1) } });
+      }
+      return;
+    }
+
+    if (input.length > 0 && !key.ctrl && !key.meta) {
+      dispatch({ type: 'set_input', input: { value: state.input.value + input } });
+    }
+  });
+
+  // Handle input submission
+  const handleSubmit = useCallback(
+    (value: string) => {
+      if (value.trim() === '') {
+        return;
+      }
+
+      const pendingApproval = Object.values(stateRef.current.approvals).find(
+        (approval) => approval.decision_status === 'pending',
+      );
+      const decision = value.trim().toLowerCase();
+      if (pendingApproval && (decision === 'yes' || decision === 'no' || decision === 'yes all')) {
+        if (decision === 'yes all') approveAllRef.current = true;
+        const approve = decision !== 'no';
+        void approvalController.decide(pendingApproval.approval_id, approve ? 'approve' : 'reject')
+          .then((updated) => dispatch({ type: 'set_approval', approval: updated }))
+          .catch((error) => dispatch({ type: 'system_message', content: `Error: ${error instanceof Error ? error.message : 'Approval decision failed'}`, timestamp: deps.now() }));
+        return;
+      }
+
+      const parsed = parseInput(value);
+
+      switch (parsed.kind) {
+        case 'empty':
+          // Do nothing
+          break;
+
+        case 'message':
+          // Send as natural language message through the session
+          // controller (no-target blocking + create-on-first-message).
+          void sessionController
+            .sendNaturalLanguage(value)
+            .catch((error) => {
+              const text = error instanceof Error ? error.message : 'Failed to send message';
+              dispatch({
+                type: 'system_message',
+                content: `Error: ${text}`,
+                timestamp: deps.now(),
+              });
+            });
+          break;
+
+        case 'command':
+          // Route through the command registry.
+          void executeCommand(parsed.invocation, registry, commandContext).then(intoMessages);
+          break;
+
+        case 'incomplete-command':
+          // Show command palette
+          dispatch({
+            type: 'set_overlay',
+            overlay: { kind: 'command-palette', query: parsed.query },
+          });
+          break;
+      }
+
+      // Clear input
+      dispatch({ type: 'set_input', input: { value: '' } });
+    },
+    [dispatch, registry, commandContext, intoMessages, sessionController, approvalController, deps]
+  );
+
+  // Handle input change
+  const handleInputChange = useCallback(
+    (value: string) => {
+      dispatch({ type: 'set_input', input: { value } });
+    },
+    [dispatch]
+  );
+
+  // Show loading state
+  if (state.bootstrap === 'loading') {
+    return (
+      <Box flexDirection="column" paddingX={1}>
+        <Text bold color="cyan">◆ IncidentLens</Text>
+        <Text color="gray">Loading workspace…</Text>
+      </Box>
+    );
+  }
+
+  // Show authentication required
+  if (state.bootstrap === 'authentication-required') {
+    return (
+      <Box flexDirection="column" paddingX={1}>
+        <Text bold color="cyan">◆ IncidentLens</Text>
+        <Text color="yellow">Authentication required</Text>
+        <Text color="gray">Please set INCIDENTLENS_TOKEN environment variable</Text>
+      </Box>
+    );
+  }
+
+  // Show incompatible
+  if (state.bootstrap === 'incompatible') {
+    return (
+      <Box flexDirection="column" paddingX={1}>
+        <Text bold color="cyan">◆ IncidentLens</Text>
+        <Text color="red">Incompatible version</Text>
+      </Box>
+    );
+  }
+
+  // Narrowed overlay variants so closures can reference them safely.
+  const wizardOverlay = state.overlay.kind === 'target-wizard' ? state.overlay : undefined;
+  const confirmationOverlay = state.overlay.kind === 'confirmation' ? state.overlay : undefined;
+  const sessionPickerOpen = state.overlay.kind === 'session-picker';
+
+  return (
+    <Box flexDirection="column" paddingX={1}>
+      {/* Header */}
+      <Box borderStyle="round" borderColor="cyan" paddingX={1} justifyContent="space-between">
+        <Box>
+          <Text bold color="cyan">◆ IncidentLens</Text>
+          <Text color="gray">  ·  </Text>
+          <Text color={state.target ? 'white' : 'gray'}>
+            {state.target?.name ?? '未选择目标'}
+          </Text>
+          {state.session && (
+            <>
+              <Text color="gray">  ·  </Text>
+              <Text color="white">{state.session.title ?? '未命名会话'}</Text>
+            </>
+          )}
+        </Box>
+        <Text color={state.stream.connected ? 'green' : 'yellow'}>
+          {state.stream.connected ? '● 在线' : '○ 待连接'}
+        </Text>
+      </Box>
+
+      {/* Conversation */}
+      <Conversation messages={state.messages} />
+      {Object.values(state.approvals).some((approval) => approval.decision_status === 'pending') && (
+        <Text color="yellow" dimColor>
+          {Object.values(state.approvals).filter((a) => a.decision_status === 'pending').length} pending approval(s)
+        </Text>
+      )}
+
+      <TodoPanel todos={state.todos} />
+      <ActivityLine activity={state.activity} />
+      <UsageLine usage={state.usage} />
+
+      {/* Keep the active approval at the bottom, immediately above the prompt,
+          so the operator can inspect and act without losing the live status. */}
+      {!approvalPrompt && Object.values(state.approvals).filter((approval) => approval.decision_status === 'pending').map((approval) => (
+        <ApprovalCard
+          key={approval.approval_id}
+          approval={approval}
+          focused={state.input.focused}
+          promptEmpty={state.input.value.length === 0}
+          overlayActive={state.overlay.kind !== 'none' || approvalPrompt !== undefined}
+          onAction={(action) => {
+            if (action === 'approve_all') approveAllRef.current = true;
+            void approvalController.refresh(approval.approval_id).then((latest) => {
+              dispatch({ type: 'set_approval', approval: latest });
+              if (action === 'diff') approvalRuntime.showDiff(latest);
+              else if (latest.decision_status === 'pending') {
+                void approvalController.decide(
+                  latest.approval_id,
+                  action === 'approve_all' ? 'approve' : action,
+                ).then((updated) => dispatch({ type: 'set_approval', approval: updated }))
+                  .catch((error) => dispatch({ type: 'system_message', content: `Error: ${error instanceof Error ? error.message : 'Approval decision failed'}`, timestamp: deps.now() }));
+              }
+            }).catch((error) => dispatch({ type: 'system_message', content: `Error: ${error instanceof Error ? error.message : 'Approval refresh failed'}`, timestamp: deps.now() }));
+          }}
+        />
+      ))}
+
+      {/* Command Palette Overlay */}
+      {state.overlay.kind === 'command-palette' && (
+        <CommandPalette
+          query={state.overlay.query}
+          commands={registry.getAvailable(commandContext)}
+          selectedIndex={0}
+          onSelect={(cmd) => {
+            void executeCommand({ path: [...cmd.path], args: '' }, registry, commandContext).then(
+              intoMessages
+            );
+            dispatch({ type: 'set_overlay', overlay: { kind: 'none' } });
+          }}
+          onCancel={() => dispatch({ type: 'set_overlay', overlay: { kind: 'none' } })}
+          focused={true}
+        />
+      )}
+
+      {/* Session Picker Overlay */}
+      {sessionPickerOpen &&
+        (pickerError ? (
+          <Box>
+            <Text color="red">Error loading sessions: {pickerError}</Text>
+          </Box>
+        ) : (
+          <SessionPicker
+            sessions={pickerSessions}
+            onSelect={(session) => {
+              void sessionController.select(session).catch((error) => {
+                const message = error instanceof Error ? error.message : 'Failed to select session';
+                dispatch({
+                  type: 'system_message',
+                  content: `Error: ${message}`,
+                  timestamp: deps.now(),
+                });
+              });
+              dispatch({
+                type: 'system_message',
+                content: `Selected session ${session.session_id} (${session.title ?? 'untitled'})`,
+                timestamp: deps.now(),
+              });
+              setPickerSessions([]);
+              setPickerError(undefined);
+              dispatch({ type: 'set_overlay', overlay: { kind: 'none' } });
+            }}
+            onCancel={() => {
+              setPickerSessions([]);
+              setPickerError(undefined);
+              dispatch({ type: 'set_overlay', overlay: { kind: 'none' } });
+            }}
+            focused={true}
+          />
+        ))}
+
+      {/* Target Wizard Overlay */}
+      {wizardOverlay && (
+        <TargetWizard
+          mode={wizardOverlay.mode}
+          target={wizardOverlay.target}
+          controller={controller}
+          onComplete={(target) => {
+            dispatch({ type: 'set_target', target });
+            dispatch({ type: 'set_overlay', overlay: { kind: 'none' } });
+            dispatch({
+              type: 'system_message',
+              content: `Saved target ${target.name}`,
+              timestamp: deps.now(),
+            });
+          }}
+          onCancel={() => dispatch({ type: 'set_overlay', overlay: { kind: 'none' } })}
+        />
+      )}
+
+      {/* Typed Remove Confirmation Overlay */}
+      {confirmationOverlay && (
+        <RemoveTargetPrompt
+          target={confirmationOverlay.target}
+          onConfirm={() => {
+            confirmationOverlay.onConfirm();
+            dispatch({ type: 'set_overlay', overlay: { kind: 'none' } });
+          }}
+          onCancel={() => dispatch({ type: 'set_overlay', overlay: { kind: 'none' } })}
+        />
+      )}
+
+      {/* Prompt Input */}
+      {state.overlay.kind === 'none' && approvalPrompt === undefined && (
+        <PromptInput
+          value={state.input.value}
+          onChange={handleInputChange}
+          onSubmit={handleSubmit}
+          focused={state.input.focused}
+        />
+      )}
+    </Box>
+  );
+}

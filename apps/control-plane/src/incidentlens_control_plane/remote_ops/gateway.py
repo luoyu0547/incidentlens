@@ -22,6 +22,7 @@ from incidentlens_control_plane.project_registry.store import (
     ProjectRegistryStore,
 )
 from incidentlens_control_plane.project_registry.types import (
+    ServiceRegistration,
     TargetRegistration,
 )
 from incidentlens_control_plane.remote_ops.files import (
@@ -172,7 +173,23 @@ class Gateway:
             )
 
         # No approval ID provided - request one
-        record = await self._approvals.request(intent, now=now)
+        record = await self._approvals.request(
+            intent,
+            now=now,
+            project_id=request.project_id,
+            target_id=request.target_id,
+            service=request.service,
+            session_id=request.session_id,
+            investigation_id=request.investigation_id,
+            agent_run_id=request.agent_run_id,
+            tool_call_id=request.tool_call_id,
+            risk=request.risk.value,
+            preview={
+                "preview": "Shell action requires explicit approval.",
+                "command": request.command,
+                "impact": "Runs a guarded shell action against the target service.",
+            },
+        )
         return ShellResult(
             command=request.command,
             approved=False,
@@ -242,9 +259,16 @@ class RemoteToolGateway:
                 svc = s
                 break
         if svc is None:
-            raise ValueError(
-                f"service {service!r} not found in project {project_id!r}"
-            )
+            # Target facade registrations may intentionally have no discovered
+            # service rows yet.  A host-scoped session still needs a policy
+            # object so the first read-only agent turn can discover services
+            # instead of failing during provider-context construction.
+            if not record.services and service == "host":
+                svc = ServiceRegistration(compose_service="host")
+            else:
+                raise ValueError(
+                    f"service {service!r} not found in project {project_id!r}"
+                )
         return record, target, svc
 
     def resolve_service(
@@ -262,6 +286,8 @@ class RemoteToolGateway:
         for svc in record.services:
             if svc.compose_service == service:
                 return svc
+        if not record.services and service == "host":
+            return ServiceRegistration(compose_service="host")
         raise ValueError(f"service {service!r} not found in project {project_id!r}")
 
     def _make_scope(
@@ -552,7 +578,24 @@ class RemoteToolGateway:
         if approval_id is None:
             if self._approvals is None:
                 raise DockerActionError("approval service is not configured")
-            record = await self._approvals.request(intent)
+            record = await self._approvals.request(
+                intent,
+                project_id=request.project_id,
+                target_id=request.target_id,
+                service=request.service,
+                session_id=request.session_id,
+                investigation_id=request.investigation_id,
+                agent_run_id=request.agent_run_id,
+                tool_call_id=request.tool_call_id,
+                risk="approval_required",
+                preview={
+                    "preview": "Container action requires explicit approval.",
+                    "impact": (
+                        f"Runs docker action {request.action.value} "
+                        f"against {request.container or request.service}."
+                    ),
+                },
+            )
             await self._emit_docker_event(
                 RuntimeEventType.DOCKER_ACTION_REQUESTED,
                 request,
@@ -659,6 +702,8 @@ class RemoteToolGateway:
             "--project-directory",
             str(target.compose_working_directory),
         ]
+        for compose_file in target.compose_files:
+            argv += ["--file", str(compose_file)]
         if target.compose_project_name:
             argv += ["--project-name", target.compose_project_name]
         argv += list(compose_commands[request.action])

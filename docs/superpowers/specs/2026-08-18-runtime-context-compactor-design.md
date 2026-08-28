@@ -9,7 +9,7 @@ adding new memory features.
 ## Scope
 
 This change connects the existing `ContextCompactor` contract to the configured
-XFYUN MaaS model, wires the existing compaction settings into runtime behavior,
+OpenAI-compatible model model, wires the existing compaction settings into runtime behavior,
 and verifies automatic, manual, reactive, recovery, and failure paths.
 
 It does not change transcript grouping, Session Memory fields, evidence ownership,
@@ -38,10 +38,10 @@ literal values.
 
 ## Design
 
-### MaaS compactor
+### OpenAI-compatible compactor
 
-Add `XfyunMaaSCompactor`, implementing the existing `ContextCompactor` protocol.
-It shares the connection configuration used by `XfyunMaaSProvider`, but has a
+Add `OpenAICompatibleCompactor`, implementing the existing `ContextCompactor` protocol.
+It shares the connection configuration used by `OpenAICompatibleProvider`, but has a
 separate request builder and system instruction. The request contains only:
 
 - the prior Session Memory, if present;
@@ -62,8 +62,8 @@ authority that accepts or rejects the result.
 
 In `llm_agent` mode, `build_runtime()` creates both:
 
-- `XfyunMaaSProvider` for investigation turns; and
-- `XfyunMaaSCompactor` for semantic compaction.
+- `OpenAICompatibleProvider` for investigation turns; and
+- `OpenAICompatibleCompactor` for semantic compaction.
 
 The compactor is injected into the single runtime `AgentContextManager`. Fake mode
 does not make network calls and keeps the current deterministic behavior; tests
@@ -108,7 +108,7 @@ No periodic semantic call and no fixed-round compaction trigger are added.
 
 ## Interfaces and Files
 
-- Create `investigation/xfyun_compactor.py`: MaaS `ContextCompactor`
+- Create `investigation/openai_compactor.py`: model `ContextCompactor`
   implementation and compaction-only prompt/response conversion.
 - Modify `investigation/context.py`: consume configurable breaker and reactive-tail
   values instead of literals.
@@ -116,8 +116,8 @@ No periodic semantic call and no fixed-round compaction trigger are added.
   explicit.
 - Modify `runtime.py`: create and inject the compactor only in `llm_agent` mode.
 - Extend `tests/investigation/test_compactor.py` and
-  `tests/investigation/test_xfyun_provider.py`, or add a focused
-  `test_xfyun_compactor.py`.
+  `tests/investigation/test_openai_provider.py`, or add a focused
+  `test_openai_compactor.py`.
 - Add a runtime-composition test proving that `llm_agent` mode injects a real
   compactor without making a network request.
 
@@ -132,7 +132,7 @@ The implementation is complete when tests prove:
 5. an overflow causes one compact and one retry, then succeeds or pauses safely;
 6. compactor failure never overwrites the previous valid boundary;
 7. manual success can reset an open breaker;
-8. `llm_agent` runtime construction injects the MaaS compactor.
+8. `llm_agent` runtime construction injects the OpenAI-compatible compactor.
 
 ## Non-Goals
 

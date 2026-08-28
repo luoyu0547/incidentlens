@@ -344,6 +344,24 @@ class ChangeSetStore:
             updated_at=datetime.fromisoformat(row[10]),
         )
 
+    def list_for_incident(self, incident_id: str, limit: int = 100) -> list[ChangeSet]:
+        """Return changesets for an incident, newest first."""
+        with self._connection_factory() as conn:
+            ids = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT changeset_id FROM changesets "
+                    "WHERE incident_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (incident_id, limit),
+                ).fetchall()
+            ]
+        changesets: list[ChangeSet] = []
+        for changeset_id in ids:
+            changeset = self.get(changeset_id)
+            if changeset is not None:
+                changesets.append(changeset)
+        return changesets
+
     def transition(self, changeset_id: str, target_status: ChangeSetStatus) -> ChangeSet:
         """Transition a ChangeSet to the target status.
 

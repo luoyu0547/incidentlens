@@ -55,7 +55,7 @@ The offline suite covers the Phase 4 deterministic acceptance points:
    approval intent, backup plaintext or hidden reasoning.
 10. All Phase 1-3 tests keep passing.
 
-## Harness evaluator and real MaaS invariants
+## Harness evaluator and real model invariants
 
 The deterministic harness measures foreign evidence, scope/policy bypass, and
 unapproved mutation counts (all must equal zero), plus tool pairing and child
@@ -67,7 +67,7 @@ uv run python tests/eval/runner.py --json .incidentlens/harness-eval.json
 ```
 
 The real-model checks reuse the existing `RuntimeSettings.from_environment()`
-MaaS configuration and the disposable SSH target; they define no alternate
+model configuration and the disposable SSH target; they define no alternate
 provider configuration and remain opt-in. Without the flag, collection has no
 Docker or network side effects.
 

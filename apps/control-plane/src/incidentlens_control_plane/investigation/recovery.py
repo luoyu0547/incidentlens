@@ -31,7 +31,11 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from incidentlens_control_plane.approvals.service import ApprovalService
-from incidentlens_control_plane.approvals.types import ApprovalStatus
+from incidentlens_control_plane.approvals.types import (
+    ApprovalDownstreamStatus,
+    ApprovalRecord,
+    ApprovalStatus,
+)
 from incidentlens_control_plane.events.broker import RuntimeEventBroker
 from incidentlens_control_plane.events.store import RuntimeEventStore
 from incidentlens_control_plane.evidence.service import EvidenceService
@@ -43,6 +47,7 @@ from incidentlens_control_plane.investigation.service import InvestigationServic
 from incidentlens_control_plane.investigation.state_machine import (
     AGENT_RUN_STATE_MACHINE,
     INVESTIGATION_STATE_MACHINE,
+    TOOL_CALL_TERMINAL,
     AgentRunStatus,
     IllegalTransition,
     InvestigationStatus,
@@ -62,6 +67,8 @@ from incidentlens_control_plane.investigation.types import (
     AgentRun,
     AgentRunKind,
     Investigation,
+    RegistryProposalStatus,
+    RegistryUpdateProposal,
     StopReason,
     ToolCall,
 )
@@ -85,6 +92,24 @@ _DANGEROUS_TOOLS: frozenset[str] = frozenset(
 
 _DECIDED_APPROVAL_STATUSES: frozenset[ApprovalStatus] = frozenset(
     {ApprovalStatus.APPROVED, ApprovalStatus.REJECTED}
+)
+_RECOVERABLE_DOWNSTREAM_STATUSES: frozenset[ApprovalDownstreamStatus] = frozenset(
+    {
+        ApprovalDownstreamStatus.PENDING,
+        ApprovalDownstreamStatus.PROCESSING,
+    }
+)
+_CONSUMED_RECOVERY_STATUSES: frozenset[ApprovalDownstreamStatus] = frozenset(
+    {ApprovalDownstreamStatus.PROCESSING}
+)
+_DECIDED_POST_CLASSIFICATION_RECOVERY_STATUSES: frozenset[
+    ApprovalDownstreamStatus
+] = frozenset(
+    {
+        ApprovalDownstreamStatus.PENDING,
+        ApprovalDownstreamStatus.PROCESSING,
+        ApprovalDownstreamStatus.NOT_APPLICABLE,
+    }
 )
 
 
@@ -160,11 +185,13 @@ class RecoveryService:
         # handling may execute a tool and resume provider-loop activity, while
         # receipt delivery is a store-only recovery action with no provider turn.
         reconciled_receipts = await self._reconcile_child_report_receipts()
-        reconciled = await self._reconcile_decided_approvals()
+        reconciled_ids = await self._reconcile_decided_approvals()
         scanned = self._classify_in_flight_runs()
+        reconciled_ids.update(self._reconcile_post_classification_decided_approvals())
+        reconciled_ids.update(self._reconcile_consumed_processing_approvals())
         scanned = replace(
             scanned,
-            reconciled_approvals=reconciled,
+            reconciled_approvals=len(reconciled_ids),
             reconciled_child_receipts=reconciled_receipts,
             cancel_finalised=cancel_finalised,
         )
@@ -172,7 +199,7 @@ class RecoveryService:
         # Only audit a recovery that actually did something; an empty startup
         # is a no-op and must not inject recovery.* events into the stream.
         if self._events_pub is not None and (
-            pending or reconciled or reconciled_receipts or cancel_finalised
+            pending or reconciled_ids or reconciled_receipts or cancel_finalised
         ):
             self._events_pub.recovery_started(count=pending, occurred_at=self._now())
             self._events_pub.recovery_completed(
@@ -237,7 +264,7 @@ class RecoveryService:
                     count += 1
         return count
 
-    async def _reconcile_decided_approvals(self) -> int:
+    async def _reconcile_decided_approvals(self) -> set[str]:
         """Resolve approvals decided before the restart but never handled.
 
         An approval that was granted/rejected while the process was down has no
@@ -246,10 +273,37 @@ class RecoveryService:
         proposal, executes/rejects the exact single-use intent, and resumes the
         parked run.  PENDING approvals are left for the operator.
         """
-        reconciled = 0
+        reconciled: set[str] = set()
+        waiting_approval_ids = {
+            tool_call.approval_id
+            for tool_call in self._store.list_waiting_approval_tool_calls()
+            if tool_call.approval_id is not None
+        }
+        terminal_tool_call_approval_ids = {
+            tool_call.approval_id
+            for tool_call in self._store.list_tool_calls()
+            if tool_call.approval_id is not None and tool_call.status in TOOL_CALL_TERMINAL
+        }
+        pending_proposal_hashes = {
+            proposal.approval_intent_sha256
+            for proposal in self._store.list_pending_proposals()
+        }
         for approval in self._approvals.list():
             if approval.status not in _DECIDED_APPROVAL_STATUSES:
                 continue
+            if approval.approval_id in terminal_tool_call_approval_ids:
+                continue
+            if (
+                approval.downstream_status not in _RECOVERABLE_DOWNSTREAM_STATUSES
+                and approval.approval_id not in waiting_approval_ids
+                and approval.intent_sha256 not in pending_proposal_hashes
+            ):
+                continue
+            self._approvals.mark_downstream(
+                approval.approval_id,
+                ApprovalDownstreamStatus.PROCESSING,
+                now=self._now(),
+            )
             try:
                 outcome = await self._investigations.handle_approval_decision(
                     approval.approval_id, now=self._now()
@@ -259,10 +313,135 @@ class RecoveryService:
                     "startup reconciliation failed for approval %s",
                     approval.approval_id,
                 )
+                self._approvals.mark_downstream(
+                    approval.approval_id,
+                    ApprovalDownstreamStatus.FAILED,
+                    error_code="internal_error",
+                    now=self._now(),
+                )
                 continue
-            if outcome.matched != "none":
-                reconciled += 1
+            final_status = (
+                ApprovalDownstreamStatus.PROCESSED
+                if outcome.matched != "none"
+                else ApprovalDownstreamStatus.NOT_APPLICABLE
+            )
+            self._approvals.mark_downstream(
+                approval.approval_id,
+                final_status,
+                now=self._now(),
+            )
+            reconciled.add(approval.approval_id)
         return reconciled
+
+    def _reconcile_consumed_processing_approvals(self) -> set[str]:
+        """Terminalize consumed approvals from already-durable local state only.
+
+        This pass runs after in-flight tool classification so a crash-left
+        RUNNING dangerous tool has already been persisted as UNCERTAIN/FAILED.
+        It never calls ``handle_approval_decision`` or touches remote state.
+        """
+        reconciled: set[str] = set()
+        terminal_tool_calls_by_approval = {
+            tool_call.approval_id: tool_call
+            for tool_call in self._store.list_tool_calls()
+            if tool_call.approval_id is not None
+            and tool_call.status in TOOL_CALL_TERMINAL
+            and tool_call.status is not ToolCallStatus.CANCELLED
+        }
+        proposals_by_id = {
+            proposal.proposal_id: proposal for proposal in self._store.list_proposals()
+        }
+        for approval in self._approvals.list():
+            if approval.status is not ApprovalStatus.CONSUMED:
+                continue
+            if approval.downstream_status not in _CONSUMED_RECOVERY_STATUSES:
+                continue
+            if self._terminalize_linked_approval_from_local_state(
+                approval,
+                terminal_tool_call=terminal_tool_calls_by_approval.get(
+                    approval.approval_id
+                ),
+                proposal=(
+                    proposals_by_id.get(approval.proposal_id)
+                    if approval.proposal_id is not None
+                    else None
+                ),
+            ):
+                reconciled.add(approval.approval_id)
+        return reconciled
+
+    def _reconcile_post_classification_decided_approvals(self) -> set[str]:
+        """Terminalize decided approvals from durable local state after classification.
+
+        This catches the crash window where a decision exists, a dangerous tool
+        was already RUNNING, and pre-classification reconciliation found no
+        WAITING_APPROVAL linkage. Once classification persists the tool as a
+        terminal local state (for example ``UNCERTAIN``), this pass updates the
+        approval without any provider invocation or second consume attempt.
+        """
+        reconciled: set[str] = set()
+        terminal_tool_calls_by_approval = {
+            tool_call.approval_id: tool_call
+            for tool_call in self._store.list_tool_calls()
+            if tool_call.approval_id is not None
+            and tool_call.status in TOOL_CALL_TERMINAL
+            and tool_call.status is not ToolCallStatus.CANCELLED
+        }
+        for approval in self._approvals.list():
+            if approval.status not in _DECIDED_APPROVAL_STATUSES:
+                continue
+            if approval.downstream_status not in _DECIDED_POST_CLASSIFICATION_RECOVERY_STATUSES:
+                continue
+            if self._terminalize_linked_approval_from_local_state(
+                approval,
+                terminal_tool_call=terminal_tool_calls_by_approval.get(
+                    approval.approval_id
+                ),
+                proposal=None,
+            ):
+                reconciled.add(approval.approval_id)
+        return reconciled
+
+    def _terminalize_linked_approval_from_local_state(
+        self,
+        approval: ApprovalRecord,
+        *,
+        terminal_tool_call: ToolCall | None,
+        proposal: RegistryUpdateProposal | None,
+    ) -> bool:
+        if terminal_tool_call is not None:
+            if terminal_tool_call.status is ToolCallStatus.SUCCEEDED:
+                self._approvals.mark_downstream(
+                    approval.approval_id,
+                    ApprovalDownstreamStatus.PROCESSED,
+                    now=self._now(),
+                )
+                return True
+            self._approvals.mark_downstream(
+                approval.approval_id,
+                ApprovalDownstreamStatus.FAILED,
+                error_code=f"tool_call_{terminal_tool_call.status.value}",
+                now=self._now(),
+            )
+            return True
+
+        if proposal is None:
+            return False
+        if proposal.status is RegistryProposalStatus.APPROVED:
+            self._approvals.mark_downstream(
+                approval.approval_id,
+                ApprovalDownstreamStatus.PROCESSED,
+                now=self._now(),
+            )
+            return True
+        if proposal.status is RegistryProposalStatus.STALE:
+            self._approvals.mark_downstream(
+                approval.approval_id,
+                ApprovalDownstreamStatus.NOT_APPLICABLE,
+                now=self._now(),
+            )
+            return True
+        return False
 
     def _classify_in_flight_runs(self) -> RecoverySummary:
         """Classify the in-flight tool calls of every surviving non-terminal run.

@@ -22,6 +22,9 @@ def test_runtime_shares_hook_runner_and_delegation_validator(tmp_path: Path) -> 
     assert orchestrator._context is runtime.context_manager
     assert orchestrator._hooks is executor._hooks
     assert orchestrator._delegation is executor._delegation
+    assert orchestrator._memory_collector.__self__ is runtime.project_memory
+    assert runtime.project_memory_store is not None
+    assert runtime.project_memory is not None
 
 
     from incidentlens_control_plane.config import RuntimeSettings
@@ -48,8 +51,9 @@ def _llm_settings(tmp_path: Path) -> RuntimeSettings:
     return RuntimeSettings(
         data_dir=tmp_path / "incidentlens",
         agent_mode="llm_agent",
-        xfyun_maas_api_key="test-key",
+        llm_api_key="test-key",
         llm_active_model="spark-x",
+        llm_base_url="https://llm.example/v1",
     )
 
 
@@ -57,16 +61,17 @@ def _fake_settings(tmp_path: Path) -> RuntimeSettings:
     return RuntimeSettings(data_dir=tmp_path / "incidentlens")
 
 
-def test_llm_runtime_injects_maas_compactor(tmp_path: Path) -> None:
-    from incidentlens_control_plane.investigation.xfyun_compactor import (
-        XfyunMaaSCompactor,
+def test_llm_runtime_injects_openai_compatible_compactor(tmp_path: Path) -> None:
+    from incidentlens_control_plane.investigation.openai_compactor import (
+        OpenAICompatibleCompactor,
     )
     from incidentlens_control_plane.remote_ops.fakes import FakeTransportFactory
     from incidentlens_control_plane.runtime import build_runtime
 
     settings = _llm_settings(tmp_path)
     runtime = build_runtime(settings, transport_factory=FakeTransportFactory())
-    assert isinstance(runtime.context_manager._compactor, XfyunMaaSCompactor)
+    assert isinstance(runtime.context_manager._compactor, OpenAICompatibleCompactor)
+    assert runtime.project_memory._adapter is not None
 
 
 def test_fake_runtime_does_not_inject_network_compactor(tmp_path: Path) -> None:
@@ -76,3 +81,4 @@ def test_fake_runtime_does_not_inject_network_compactor(tmp_path: Path) -> None:
     settings = _fake_settings(tmp_path)
     runtime = build_runtime(settings, transport_factory=FakeTransportFactory())
     assert runtime.context_manager._compactor is None
+    assert runtime.project_memory._adapter is None

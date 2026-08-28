@@ -1,0 +1,223 @@
+{
+  "$defs": {
+    "JsonValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "RuntimeEventType": {
+      "enum": [
+        "project.created",
+        "project.updated",
+        "project.deleted",
+        "approval.requested",
+        "approval.approved",
+        "approval.rejected",
+        "approval.consumed",
+        "changeset.created",
+        "changeset.status_changed",
+        "changeset.rolled_back",
+        "docker_action.requested",
+        "docker_action.started",
+        "docker_action.completed",
+        "docker_action.failed",
+        "remote_session.connected",
+        "remote_session.disconnected",
+        "remote_session.failed",
+        "remote_operation.started",
+        "remote_operation.completed",
+        "log.subscription_started",
+        "log.subscription_paused",
+        "log.subscription_resumed",
+        "log.subscription_deleted",
+        "log.batch_written",
+        "log.source_rotated",
+        "log.backpressure",
+        "log.subscription_error",
+        "investigation.created",
+        "investigation.started",
+        "investigation.status_changed",
+        "investigation.completed",
+        "investigation.cancelled",
+        "investigation.failed",
+        "operation.queued",
+        "operation.running",
+        "operation.cancel_requested",
+        "operation.succeeded",
+        "operation.failed",
+        "operation.cancelled",
+        "operation.uncertain",
+        "agent_run.started",
+        "agent_run.status_changed",
+        "agent_run.completed",
+        "agent_run.failed",
+        "agent_run.cancelled",
+        "agent_hook",
+        "agent.text.delta",
+        "agent.message.completed",
+        "model_round.started",
+        "model_round.completed",
+        "tool.proposed",
+        "policy.decided",
+        "todo.changed",
+        "hypothesis.changed",
+        "conclusion.created",
+        "context.compacted",
+        "safety_state.changed",
+        "tool_call.started",
+        "tool_call.status_changed",
+        "tool_call.completed",
+        "child_run.started",
+        "child_run.completed",
+        "evidence.appended",
+        "registry_proposal.created",
+        "registry_proposal.decided",
+        "recovery.started",
+        "recovery.completed"
+      ],
+      "title": "RuntimeEventType",
+      "type": "string"
+    }
+  },
+  "$id": "incidentlens://protocol/cli-stream-v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "event_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Event Id"
+    },
+    "event_type": {
+      "anyOf": [
+        {
+          "enum": [
+            "stream.hello",
+            "stream.heartbeat",
+            "stream.gap",
+            "stream.slow_consumer"
+          ],
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/RuntimeEventType"
+        }
+      ],
+      "title": "Event Type"
+    },
+    "investigation_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Investigation Id"
+    },
+    "occurred_at": {
+      "format": "date-time",
+      "title": "Occurred At",
+      "type": "string"
+    },
+    "payload": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Payload"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "sequence": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sequence"
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "target_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Target Id"
+    }
+  },
+  "required": [
+    "schema_version",
+    "event_type",
+    "occurred_at"
+  ],
+  "title": "StreamEventEnvelope",
+  "type": "object"
+}

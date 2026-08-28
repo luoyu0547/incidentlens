@@ -1,0 +1,20 @@
+.app-shell { min-height: 100vh; background: radial-gradient(circle at 8% -10%, color-mix(in srgb, var(--color-accent) 10%, transparent), transparent 34rem); }
+.app-shell__skip-link { position: absolute; left: var(--space-4); top: -3rem; z-index: 10; padding: var(--space-2) var(--space-3); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
+.app-shell__skip-link:focus { top: var(--space-2); }
+.app-shell__header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: var(--space-8); padding: 0.7rem clamp(1rem, 4vw, 3rem); background: color-mix(in srgb, var(--color-surface) 92%, transparent); backdrop-filter: blur(14px); border-bottom: 1px solid var(--color-border); }
+.app-shell__brand { display: inline-flex; align-items: center; gap: 0.6rem; }
+.app-shell__brand-mark { display: grid; width: 1.8rem; height: 1.8rem; place-items: center; border-radius: 0.55rem; background: var(--color-accent); color: var(--color-surface); font-size: 0.65rem; font-weight: 800; letter-spacing: 0.04em; }
+.app-shell__header h1 { margin: 0; font-size: 1.05rem; letter-spacing: -0.02em; }
+.app-shell__nav { display: flex; align-items: center; gap: 0.25rem; }
+.app-shell__nav a { padding: 0.45rem 0.8rem; border-radius: 999px; color: var(--color-muted); font-size: 0.9rem; }
+.app-shell__nav a:hover, .app-shell__nav a[data-status="active"] { background: var(--color-surface-muted); color: var(--color-text); text-decoration: none; }
+.workspace-status { margin-left: auto; padding: 0.35rem 0.7rem; border: 1px solid var(--color-border); border-radius: 999px; color: var(--color-muted); font-size: 0.75rem; white-space: nowrap; }
+.workspace-status--live { border-color: color-mix(in srgb, #16a34a 45%, var(--color-border)); color: #15803d; }
+.workspace-status--authentication-error { border-color: color-mix(in srgb, var(--color-danger) 45%, var(--color-border)); color: var(--color-danger); }
+.app-shell__main { width: min(100% - 2 * var(--space-6), 1440px); margin: 0 auto; padding: var(--space-6); }
+
+@media (max-width: 640px) {
+  .app-shell__header { align-items: flex-start; flex-wrap: wrap; gap: var(--space-3); }
+  .workspace-status { margin-left: 0; }
+  .app-shell__main { width: 100%; padding: var(--space-4); }
+}

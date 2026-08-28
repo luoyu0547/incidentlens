@@ -175,9 +175,19 @@ def seed_in_flight_run(
 
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
-    """Create a test client whose session manager uses a fake transport."""
+    """Create a test client whose session manager uses a fake transport.
+
+    The legacy ``/api/*`` surface these tests exercise stays open (no auth),
+    so no deployment profiles are configured.  Trusted hosts are pinned to the
+    TestClient/loopback defaults and Secure cookies are disabled so the HTTP
+    client can round-trip them over ``http://testserver``.
+    """
     app = create_app(
-        RuntimeSettings(data_dir=tmp_path / "data"),
+        RuntimeSettings(
+            data_dir=tmp_path / "data",
+            trusted_hosts=["testserver", "localhost", "127.0.0.1"],
+            secure_cookies=False,
+        ),
         transport_factory=FakeTransportFactory(),
     )
     with TestClient(app) as client:

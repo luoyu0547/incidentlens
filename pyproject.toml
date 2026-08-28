@@ -8,13 +8,9 @@ dependencies = [
     "pydantic>=2.13,<3",
     "uvicorn>=0.30,<1",
     "asyncssh>=2.24,<3",
+    "certifi>=2026.7.22,<2027",
     "cryptography>=48,<49",
-    "jinja2>=3.1,<4",
-    "textual>=0.40,<1.0",
 ]
-
-[project.scripts]
-incidentlens = "incidentlens_control_plane.cli.app:main"
 
 [dependency-groups]
 dev = [
@@ -31,6 +27,15 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["apps/control-plane/src/incidentlens_control_plane"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"apps/control-plane/src/incidentlens_control_plane/static/web" = "incidentlens_control_plane/static/web"
+
+[tool.hatch.build.targets.sdist]
+artifacts = ["apps/control-plane/src/incidentlens_control_plane/static/web/**"]
+
+[tool.hatch.build.hooks.custom]
+path = "scripts/hatch_build.py"
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100
@@ -41,3 +46,7 @@ select = ["E", "F", "I", "W"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = "--strict-markers"
+markers = [
+    "integrated: backend acceptance requiring composed adapters or durable restart",
+]

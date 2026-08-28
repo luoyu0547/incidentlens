@@ -77,8 +77,14 @@ def test_service_registration_accepts_absolute_remote_roots() -> None:
         allowed_host_paths=(PurePosixPath("/opt/payments"),),
         allowed_container_paths=(PurePosixPath("/app"),),
         protected_remote_paths=(PurePosixPath("/opt/payments/.env"),),
+        allowed_validation_scripts=(
+            PurePosixPath("/opt/payments/scripts/request_matrix.py"),
+        ),
     )
     assert service.allowed_container_paths == (PurePosixPath("/app"),)
+    assert service.allowed_validation_scripts == (
+        PurePosixPath("/opt/payments/scripts/request_matrix.py"),
+    )
 
 
 def test_service_registration_rejects_relative_remote_root() -> None:
@@ -86,4 +92,42 @@ def test_service_registration_rejects_relative_remote_root() -> None:
         ServiceRegistration(
             compose_service="payment-api",
             allowed_host_paths=(PurePosixPath("opt/payments"),),
+        )
+
+
+def test_target_compose_files_must_be_absolute_and_inside_project_directory() -> None:
+    with pytest.raises(ValidationError, match="compose_files"):
+        TargetRegistration(
+            target_id="target",
+            host="example.test",
+            ssh_user="deploy",
+            compose_working_directory=PurePosixPath("/srv/app"),
+            compose_files=(PurePosixPath("compose.cloud.yaml"),),
+        )
+
+    with pytest.raises(ValidationError, match="compose_files"):
+        TargetRegistration(
+            target_id="target",
+            host="example.test",
+            ssh_user="deploy",
+            compose_working_directory=PurePosixPath("/srv/app"),
+            compose_files=(PurePosixPath("/srv/other/compose.yaml"),),
+        )
+
+
+def test_target_validation_base_url_must_be_loopback_http() -> None:
+    target = TargetRegistration(
+        target_id="target",
+        host="example.test",
+        ssh_user="deploy",
+        validation_base_url="http://localhost:18080",
+    )
+    assert target.validation_base_url == "http://localhost:18080"
+
+    with pytest.raises(ValidationError, match="validation_base_url"):
+        TargetRegistration(
+            target_id="target",
+            host="example.test",
+            ssh_user="deploy",
+            validation_base_url="https://example.com",
         )

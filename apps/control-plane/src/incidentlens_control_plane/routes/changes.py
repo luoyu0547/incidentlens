@@ -7,11 +7,13 @@ diff/validation/rollback status without any plaintext.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from incidentlens_control_plane.changes.manager import ChangeVerifyError
@@ -20,6 +22,8 @@ from incidentlens_control_plane.changes.types import (
     ChangeSetStatus,
     FileChange,
 )
+from incidentlens_control_plane.operations.state_machine import OPERATION_TERMINAL
+from incidentlens_control_plane.operations.types import OperationKind
 from incidentlens_control_plane.routes import get_runtime
 from incidentlens_control_plane.runtime import RuntimeServices
 
@@ -132,13 +136,32 @@ async def verify_changeset(
     return _to_view(changeset).model_dump(mode="json")
 
 
-async def _safe_rollback(
-    runtime: RuntimeServices, changeset_id: str, approval_id: str | None
+async def _await_operation_terminal(
+    runtime: RuntimeServices, operation_id: str, *, timeout: float = 30.0
 ) -> None:
-    try:
-        await runtime.changes.rollback(changeset_id, approval_id)
-    except Exception:
-        logger.exception("background rollback failed for %s", changeset_id)
+    """Wait (bounded) for a durable operation to reach a terminal status.
+
+    The legacy rollback contract ran the restore in a ``BackgroundTask`` before
+    the request returned, so callers observed the rollback complete shortly
+    after the 202.  The durable path keeps the same visible timing by waiting
+    for the operation dispatcher to finalise the operation before handing back
+    the 202 body.  A timeout only logs and returns -- the route still answers
+    202 with the operation running in the background.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        operation = runtime.operation_service.get_operation(operation_id)
+        if operation.status in OPERATION_TERMINAL:
+            return
+        if loop.time() >= deadline:
+            logger.warning(
+                "operation %s did not reach a terminal status within %.1fs",
+                operation_id,
+                timeout,
+            )
+            return
+        await asyncio.sleep(0.05)
 
 
 @router.post("/{changeset_id}/rollback", status_code=202)
@@ -146,9 +169,13 @@ async def rollback_changeset(
     request: Request,
     changeset_id: str,
     body: RollbackRequest | None = None,
-    background_tasks: BackgroundTasks = BackgroundTasks(),
 ) -> dict[str, str]:
-    """Roll a ChangeSet back; returns 202 while the restore executes."""
+    """Roll a ChangeSet back; returns 202 while the restore executes.
+
+    The rollback is enqueued as a durable ``ROLLBACK`` operation and dispatched
+    by the worker loop, so a restart can never silently re-run it.  The response
+    body is preserved byte-for-byte from the legacy contract.
+    """
     runtime = get_runtime(request)
     changeset = runtime.change_store.get(changeset_id)
     if changeset is None:
@@ -166,5 +193,16 @@ async def rollback_changeset(
             detail="an approval is required to roll back a service-interrupting changeset",
         )
 
-    background_tasks.add_task(_safe_rollback, runtime, changeset_id, approval_id)
+    operation = runtime.operation_service.enqueue(
+        kind=OperationKind.ROLLBACK,
+        target_id=changeset.target_id,
+        created_by="legacy-api",
+        request_payload=json.dumps(
+            {"changeset_id": changeset_id, "approval_id": approval_id},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        now=datetime.now(UTC),
+    )
+    await _await_operation_terminal(runtime, operation.operation_id)
     return {"changeset_id": changeset_id, "status": "rolling_back"}

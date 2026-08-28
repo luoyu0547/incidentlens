@@ -1,0 +1,41 @@
+{
+  "name": "incidentlens",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "format:check": "prettier --check .",
+    "test": "npm run test --workspaces --if-present",
+    "protocol:generate": "npm run generate --workspace @incidentlens/protocol",
+    "protocol:check": "npm run check --workspace @incidentlens/protocol",
+    "test:pty": "npm run test:pty --workspace @incidentlens/cli",
+    "verify:cli": "npm run protocol:check && npm run lint && npm run format:check && npm run typecheck && npm test && npm run build && npm run test:pty",
+    "web:dev": "npm run dev --workspace @incidentlens/web",
+    "web:test": "npm run test --workspace @incidentlens/web",
+    "web:typecheck": "npm run typecheck --workspace @incidentlens/web",
+    "web:lint": "npm run lint --workspace @incidentlens/web",
+    "web:build": "npm run build --workspace @incidentlens/web",
+    "build:static": "npm run web:build",
+    "web:e2e": "npm run e2e --workspace @incidentlens/web",
+    "web:verify": "npm run web:typecheck && npm run web:lint && npm run web:test && npm run web:build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.0.7",
+    "eslint": "^9.18.0",
+    "eslint-plugin-react-hooks": "^5.0.0",
+    "prettier": "^3.4.2",
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.21.0",
+    "vitest": "^2.1.8"
+  }
+}

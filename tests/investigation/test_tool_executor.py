@@ -47,6 +47,7 @@ from incidentlens_control_plane.investigation.tools import (
     TOOL_FILE_EDIT,
     TOOL_FILE_WRITE,
     TOOL_HOST_LIST,
+    TOOL_HOST_METRICS,
     TOOL_HOST_READ,
     TOOL_HOST_SEARCH,
     TOOL_HOST_STAT,
@@ -107,6 +108,7 @@ def _project_registration() -> ProjectRegistration:
                 host="dev-a.example.test",
                 ssh_user="deploy",
                 ssh_config_alias="dev-a",
+                validation_base_url="http://localhost:18080",
             ),
         ),
         services=(
@@ -118,6 +120,7 @@ def _project_registration() -> ProjectRegistration:
                 allowed_container_paths=(CONTAINER_ROOT,),
                 container_path_hints=("/app/logs",),
                 protected_remote_paths=(HOST_ROOT / "app.env",),
+                allowed_validation_scripts=(HOST_ROOT / "request_matrix.py",),
             ),
         ),
     )
@@ -477,6 +480,8 @@ class Harness:
     executor: ToolExecutor
     factory: HarnessTransportFactory | OneTransportFactory | FailingTransportFactory
     hooks: HookRunner
+    events: RuntimeEventStore
+    broker: RuntimeEventBroker
 
 
 def build_harness(
@@ -566,6 +571,8 @@ def build_harness(
         executor=executor,
         factory=factory,
         hooks=hooks,
+        events=events,
+        broker=broker,
     )
 
 
@@ -601,6 +608,19 @@ def test_registry_materializes_every_definition_as_a_provider_schema(tmp_path: P
         assert schema.parameters_json_schema == definition.parameters_json_schema
         assert schema.allowed_scope is definition.allowed_scope
         assert schema.requires_approval is definition.requires_approval
+
+
+def test_read_tool_schemas_expose_line_ranges(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    schemas = (
+        *harness.executor.tool_schemas(scope=LogScope.HOST),
+        *harness.executor.tool_schemas(scope=LogScope.CONTAINER),
+    )
+    by_name = {schema.tool_name: schema for schema in schemas}
+    for tool_name in (TOOL_HOST_READ, TOOL_CONTAINER_READ, TOOL_EVIDENCE_READ):
+        properties = by_name[tool_name].parameters_json_schema["properties"]
+        assert properties["start_line"]["minimum"] == 1
+        assert properties["end_line"]["minimum"] == 1
 
 
 def test_tool_schemas_filter_by_run_scope(tmp_path: Path) -> None:
@@ -854,6 +874,49 @@ async def test_container_run_mutation_requires_explicit_container_scope(tmp_path
     # The mutation happened inside the container backend, never the host.
     assert transport.container_files[PurePosixPath("/app/app.conf")] == b"value = 2\n"
     assert transport.files.get(PurePosixPath("/app/app.conf")) is None
+
+
+@pytest.mark.asyncio
+async def test_protected_path_cannot_be_bypassed_with_another_service_name(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(tmp_path)
+    record = harness.projects.get(PROJECT_ID)
+    primary = record.services[0].model_copy(update={"protected_remote_paths": ()})
+    protected_path = HOST_ROOT / "shared.env"
+    registration = ProjectRegistration(
+        project_id=record.project_id,
+        display_name=record.display_name,
+        local_source_paths=record.local_source_paths,
+        targets=record.targets,
+        services=(
+            primary,
+            ServiceRegistration(
+                compose_service="other-service",
+                allowed_host_paths=(HOST_ROOT,),
+                protected_remote_paths=(protected_path,),
+            ),
+        ),
+    )
+    harness.projects.replace(registration, now=NOW)
+    await seed_host_file(harness, protected_path, b"VALUE=old\n")
+    run = _new_run(harness.investigations)
+
+    outcome = await harness.executor.execute(
+        tool_request(
+            TOOL_FILE_EDIT,
+            service_name=SERVICE,
+            path=str(protected_path),
+            expected_sha256=_sha256(b"VALUE=old\n"),
+            replacements=[{"old_text": "old", "new_text": "new"}],
+        ),
+        run,
+        now=NOW,
+    )
+
+    assert outcome.status is ToolCallStatus.WAITING_APPROVAL
+    assert outcome.approval_id is not None
+    assert str(protected_path) in outcome.summary
 
 
 @pytest.mark.asyncio
@@ -1148,6 +1211,67 @@ async def test_evidence_read_returns_redacted_excerpt(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_evidence_read_exposes_model_visible_content_beyond_preview(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    content = ("header\n" + ("x" * 500) + "\nROOT_CAUSE=wrong-port\n").encode()
+    await seed_host_file(harness, HOST_ROOT / "app.conf", content)
+    run = _new_run(harness.investigations)
+    first = await harness.executor.execute(
+        tool_request(
+            TOOL_HOST_READ,
+            service_name=SERVICE,
+            path=str(HOST_ROOT / "app.conf"),
+        ),
+        run,
+        now=NOW,
+    )
+    owned_run = run.model_copy(update={"evidence": first.evidence})
+
+    outcome = await harness.executor.execute(
+        tool_request(TOOL_EVIDENCE_READ, evidence_id=first.evidence[0].evidence_id),
+        owned_run,
+        now=NOW,
+    )
+
+    assert outcome.status is ToolCallStatus.SUCCEEDED
+    assert "ROOT_CAUSE=wrong-port" in outcome.summary
+
+
+@pytest.mark.asyncio
+async def test_evidence_read_returns_requested_line_range(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    await seed_host_file(harness, HOST_ROOT / "app.conf", b"one\ntwo\nthree\nfour\n")
+    run = _new_run(harness.investigations)
+    first = await harness.executor.execute(
+        tool_request(
+            TOOL_HOST_READ,
+            service_name=SERVICE,
+            path=str(HOST_ROOT / "app.conf"),
+        ),
+        run,
+        now=NOW,
+    )
+    owned_run = run.model_copy(update={"evidence": first.evidence})
+
+    outcome = await harness.executor.execute(
+        tool_request(
+            TOOL_EVIDENCE_READ,
+            evidence_id=first.evidence[0].evidence_id,
+            start_line=2,
+            end_line=3,
+        ),
+        owned_run,
+        now=NOW,
+    )
+
+    assert outcome.status is ToolCallStatus.SUCCEEDED
+    assert "lines=2-3/4" in outcome.summary
+    assert "two\nthree\n" in outcome.summary
+    assert "\none\n" not in outcome.summary
+    assert "\nfour\n" not in outcome.summary
+
+
+@pytest.mark.asyncio
 async def test_evidence_list_returns_run_evidence(tmp_path: Path) -> None:
     harness = build_harness(tmp_path)
     await seed_host_file(harness, HOST_ROOT / "app.conf", b"alpha\n")
@@ -1163,6 +1287,34 @@ async def test_evidence_list_returns_run_evidence(tmp_path: Path) -> None:
     assert outcome.status is ToolCallStatus.SUCCEEDED
     assert first.evidence[0].evidence_id in outcome.summary
     assert len(outcome.evidence) == 1
+
+
+@pytest.mark.asyncio
+async def test_evidence_list_bounds_references_to_tool_outcome_limit(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    run = _new_run(harness.investigations)
+    for index in range(25):
+        path = HOST_ROOT / f"app-{index}.conf"
+        await seed_host_file(harness, path, f"value={index}\n".encode())
+        outcome = await harness.executor.execute(
+            tool_request(
+                TOOL_HOST_READ,
+                tool_call_id=f"read-{index}",
+                service_name=SERVICE,
+                path=str(path),
+            ),
+            run,
+            now=NOW,
+        )
+        assert outcome.status is ToolCallStatus.SUCCEEDED
+
+    outcome = await harness.executor.execute(
+        tool_request(TOOL_EVIDENCE_LIST, limit=100), run, now=NOW
+    )
+
+    assert outcome.status is ToolCallStatus.SUCCEEDED
+    assert len(outcome.evidence) == 24
+    assert "25 evidence refs" in outcome.summary
 
 
 # ---------------------------------------------------------------------------
@@ -1189,12 +1341,188 @@ async def test_host_read_creates_redacted_file_snapshot_evidence(tmp_path: Path)
     assert "hunter2" not in stored.content_redacted
     assert "10.1.2.3" not in stored.content_redacted
     assert "hunter2" not in outcome.summary
+    assert _sha256(b"api_key=hunter2\nlistening on 10.1.2.3\n") in outcome.summary
+
+
+@pytest.mark.asyncio
+async def test_host_read_exposes_model_visible_content_beyond_preview(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    content = ("header\n" + ("x" * 500) + "\nROOT_CAUSE=wrong-port\n").encode()
+    await seed_host_file(harness, HOST_ROOT / "app.conf", content)
+    run = _new_run(harness.investigations)
+
+    outcome = await harness.executor.execute(
+        tool_request(
+            TOOL_HOST_READ,
+            service_name=SERVICE,
+            path=str(HOST_ROOT / "app.conf"),
+            limit=2_000,
+        ),
+        run,
+        now=NOW,
+    )
+
+    assert outcome.status is ToolCallStatus.SUCCEEDED
+    assert "ROOT_CAUSE=wrong-port" in outcome.summary
+
+
+@pytest.mark.asyncio
+async def test_host_read_returns_unchanged_stub_for_same_file_page(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    path = HOST_ROOT / "app.conf"
+    await seed_host_file(harness, path, b"DB_PORT=55432\nMODE=canary\n")
+    run = _new_run(harness.investigations)
+
+    first = await harness.executor.execute(
+        tool_request(
+            TOOL_HOST_READ,
+            tool_call_id="read-first",
+            service_name=SERVICE,
+            path=str(path),
+            start_line=1,
+            end_line=2,
+        ),
+        run,
+        now=NOW,
+    )
+    second = await harness.executor.execute(
+        tool_request(
+            TOOL_HOST_READ,
+            tool_call_id="read-second",
+            service_name=SERVICE,
+            path=str(path),
+            start_line=1,
+            end_line=2,
+        ),
+        run,
+        now=NOW,
+    )
+
+    assert first.status is ToolCallStatus.SUCCEEDED
+    assert "DB_PORT=55432" in first.summary
+    assert second.status is ToolCallStatus.SUCCEEDED
+    assert second.evidence[0].evidence_id == first.evidence[0].evidence_id
+    assert second.summary.startswith("FILE_UNCHANGED_STUB ")
+    assert str(path) in second.summary
+    assert first.evidence[0].evidence_id in second.summary
+    assert _sha256(b"DB_PORT=55432\nMODE=canary\n") in second.summary
+    assert "DB_PORT=55432" not in second.summary
+
+
+@pytest.mark.asyncio
+async def test_host_read_invalidates_unchanged_stub_when_source_changes(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    path = HOST_ROOT / "app.conf"
+    await seed_host_file(harness, path, b"DB_PORT=55432\n")
+    run = _new_run(harness.investigations)
+
+    first = await harness.executor.execute(
+        tool_request(TOOL_HOST_READ, service_name=SERVICE, path=str(path)),
+        run,
+        now=NOW,
+    )
+    await seed_host_file(harness, path, b"DB_PORT=5432\n")
+    changed = await harness.executor.execute(
+        tool_request(
+            TOOL_HOST_READ,
+            tool_call_id="read-changed",
+            service_name=SERVICE,
+            path=str(path),
+        ),
+        run,
+        now=NOW,
+    )
+
+    assert first.status is ToolCallStatus.SUCCEEDED
+    assert changed.status is ToolCallStatus.SUCCEEDED
+    assert not changed.summary.startswith("FILE_UNCHANGED_STUB ")
+    assert "DB_PORT=5432" in changed.summary
+    assert changed.evidence[0].evidence_id != first.evidence[0].evidence_id
+
+
+@pytest.mark.asyncio
+async def test_host_read_returns_requested_line_range_with_next_page(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    await seed_host_file(
+        harness,
+        HOST_ROOT / "app.conf",
+        b"one\ntwo\nthree\nfour\nfive\nsix\n",
+    )
+    run = _new_run(harness.investigations)
+
+    outcome = await harness.executor.execute(
+        tool_request(
+            TOOL_HOST_READ,
+            service_name=SERVICE,
+            path=str(HOST_ROOT / "app.conf"),
+            start_line=2,
+            end_line=4,
+        ),
+        run,
+        now=NOW,
+    )
+
+    assert outcome.status is ToolCallStatus.SUCCEEDED
+    assert "lines=2-4/6" in outcome.summary
+    assert "has_more=true" in outcome.summary
+    assert "next_start_line=5" in outcome.summary
+    assert "two\nthree\nfour\n" in outcome.summary
+    assert "\none\n" not in outcome.summary
+    assert "\nfive\n" not in outcome.summary
+
+
+@pytest.mark.asyncio
+async def test_host_read_default_page_reports_continuation(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    content = "".join(f"line-{index:03d} {'x' * 80}\n" for index in range(100)).encode()
+    await seed_host_file(harness, HOST_ROOT / "large.conf", content)
+    run = _new_run(harness.investigations)
+
+    outcome = await harness.executor.execute(
+        tool_request(
+            TOOL_HOST_READ,
+            service_name=SERVICE,
+            path=str(HOST_ROOT / "large.conf"),
+        ),
+        run,
+        now=NOW,
+    )
+
+    assert outcome.status is ToolCallStatus.SUCCEEDED
+    assert "has_more=true" in outcome.summary
+    assert "next_start_line=" in outcome.summary
+    assert "line-000" in outcome.summary
+    assert "line-099" not in outcome.summary
+
+
+@pytest.mark.asyncio
+async def test_host_read_rejects_mixed_line_and_byte_ranges(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    await seed_host_file(harness, HOST_ROOT / "app.conf", b"one\ntwo\n")
+    run = _new_run(harness.investigations)
+
+    outcome = await harness.executor.execute(
+        tool_request(
+            TOOL_HOST_READ,
+            service_name=SERVICE,
+            path=str(HOST_ROOT / "app.conf"),
+            start_line=1,
+            offset=0,
+        ),
+        run,
+        now=NOW,
+    )
+
+    assert outcome.status is ToolCallStatus.FAILED
+    assert "line range cannot be combined with byte offset/limit" in outcome.error_redacted
 
 
 @pytest.mark.asyncio
 async def test_container_read_validates_and_reads(tmp_path: Path) -> None:
     transport = FakeChangeTransport()
-    transport.container_files[PurePosixPath("/app/config.yaml")] = b"token=abc123\n"
+    transport.container_files[PurePosixPath("/app/config.yaml")] = (
+        b"first\ntoken=abc123\nthird\n"
+    )
     harness = build_harness(tmp_path, transport_factory=OneTransportFactory(transport))
     run = _new_run(harness.investigations)
     outcome = await harness.executor.execute(
@@ -1203,6 +1531,8 @@ async def test_container_read_validates_and_reads(tmp_path: Path) -> None:
             service_name=SERVICE,
             container=CONTAINER,
             path="/app/config.yaml",
+            start_line=2,
+            end_line=2,
         ),
         run,
         now=NOW,
@@ -1211,6 +1541,9 @@ async def test_container_read_validates_and_reads(tmp_path: Path) -> None:
     stored = harness.evidence_store.get(outcome.evidence[0].evidence_id)
     assert "abc123" not in stored.content_redacted
     assert "abc123" not in outcome.summary
+    assert "lines=2-2/3" in outcome.summary
+    assert "first" not in outcome.summary
+    assert "third" not in outcome.summary
 
 
 @pytest.mark.asyncio
@@ -1272,6 +1605,8 @@ async def test_registry_info_records_discovery_evidence(tmp_path: Path) -> None:
     assert stored.evidence_kind is EvidenceKind.REGISTRY_DISCOVERY
     assert SERVICE in outcome.summary
     assert CONTAINER in outcome.summary
+    assert "validation_base_url=http://localhost:18080" in outcome.summary
+    assert f"validation_scripts=['{HOST_ROOT / 'request_matrix.py'}']" in outcome.summary
 
 
 @pytest.mark.asyncio
@@ -1311,6 +1646,79 @@ async def test_shell_read_only_command_executes_and_records_evidence(tmp_path: P
     assert stored.evidence_kind is EvidenceKind.COMMAND_OUTPUT
     assert "payments-api-1 running" in stored.content_redacted
     assert ref.evidence_id.startswith("ev-")
+
+
+@pytest.mark.asyncio
+async def test_shell_exposes_model_visible_output_beyond_preview(tmp_path: Path) -> None:
+    output = ("matrix-row\n" * 40 + "FINAL_CELL=201\n").encode()
+    harness = build_harness(
+        tmp_path,
+        transport_factory=HarnessTransportFactory(shell_output=output, shell_status=0),
+    )
+    run = _new_run(harness.investigations)
+
+    outcome = await harness.executor.execute(
+        tool_request(TOOL_SHELL_EXEC, service_name=SERVICE, command="docker ps"),
+        run,
+        now=NOW,
+    )
+
+    assert outcome.status is ToolCallStatus.SUCCEEDED
+    assert "FINAL_CELL=201" in outcome.summary
+
+
+@pytest.mark.asyncio
+async def test_host_metrics_is_fixed_read_only_and_never_requests_approval(
+    tmp_path: Path,
+) -> None:
+    harness = build_harness(
+        tmp_path,
+        transport_factory=HarnessTransportFactory(
+            shell_output=b"healthy metrics", shell_status=0
+        ),
+    )
+    run = _new_run(harness.investigations)
+
+    outcome = await harness.executor.execute(
+        tool_request(
+            TOOL_HOST_METRICS,
+            sections=["load", "memory", "disk"],
+        ),
+        run,
+        now=NOW,
+    )
+
+    assert outcome.status is ToolCallStatus.SUCCEEDED
+    assert harness.approvals.list() == ()
+    assert len(harness.factory.transports) == 1
+    assert "host metrics collected" in outcome.summary
+    stored = harness.evidence_store.get(outcome.evidence[0].evidence_id)
+    assert stored.evidence_kind is EvidenceKind.COMMAND_OUTPUT
+    assert stored.metadata["command"] == "host_metrics:load,memory,disk"
+
+
+@pytest.mark.asyncio
+async def test_shell_nonzero_exit_records_evidence_and_fails_tool(tmp_path: Path) -> None:
+    harness = build_harness(
+        tmp_path,
+        transport_factory=HarnessTransportFactory(
+            shell_output=b"usage: probe --expected VALUE", shell_status=2
+        ),
+    )
+    run = _new_run(harness.investigations)
+
+    outcome = await harness.executor.execute(
+        tool_request(TOOL_SHELL_EXEC, service_name=SERVICE, command="docker ps"),
+        run,
+        now=NOW,
+    )
+
+    assert outcome.status is ToolCallStatus.FAILED
+    assert outcome.error_redacted == "command exited 2"
+    assert len(outcome.evidence) == 1
+    stored = harness.evidence_store.get(outcome.evidence[0].evidence_id)
+    assert stored.metadata["exit_code"] == "2"
+    assert "usage: probe" in stored.content_redacted
 
 
 @pytest.mark.asyncio

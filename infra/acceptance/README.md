@@ -1,37 +1,17 @@
-# Acceptance Test Environment
+# Controlled Dual-Regression Acceptance Target
 
-Docker Compose 模拟微服务环境，用于端到端验收测试。
-
-## 启动
+This Compose environment is a deterministic controlled scenario, not a production deployment.
 
 ```bash
-cd infra/acceptance
-docker compose up -d
+docker compose -f infra/acceptance/docker-compose.yml \
+  -f infra/acceptance/compose.cloud.yaml up -d --build
+python infra/acceptance/scripts/request_matrix.py --expected pre-repair
 ```
 
-## 服务
+The public gateway is loopback-bound. `route-a` selects the stable replica and
+`route-b` selects the canary replica. The request matrix emits one JSON object
+per route/amount cell and exits nonzero when the expected state is not observed.
 
-| 服务 | 端口 | 说明 |
-|---|---|---|
-| api-gateway | 8080 | API 网关入口 |
-| order-service | 5001 | 订单服务 |
-| payment-service | 5002 | 支付服务 |
-| inventory-service | 5003 | 库存服务 |
-| postgres | 5432 | 数据库 |
-
-## 故障注入
-
-通过环境变量控制故障：
-
-- `FAULT_DB_POOL=true` — order-service 数据库连接池耗尽
-- `FAULT_PAYMENT_TIMEOUT=true` — 支付服务超时
-- `FAULT_DEPENDENCY=true` — 下游服务不可用
-
-修改 docker-compose.yml 中对应服务的 environment 后重启。
-
-## 健康检查
-
-```bash
-curl http://localhost:8080/health
-curl http://localhost:5001/health
-```
+The runtime scenario definition contains no diagnostic labels or expected root
+causes. Keep answer-bearing test fixtures outside the registered remote paths
+provided to an investigation.

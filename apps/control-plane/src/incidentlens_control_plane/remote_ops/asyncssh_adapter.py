@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import stat
 from pathlib import PurePosixPath
@@ -13,6 +14,7 @@ from incidentlens_control_plane.remote_ops.transport import (
     CommandResult,
     FileMetadata,
     RemoteConnectionError,
+    RemoteHostKeyError,
     RemotePathError,
     RemoteProcess,
     RemoteTimeoutError,
@@ -44,6 +46,8 @@ def _is_symlink(st: asyncssh.SFTPAttrs) -> bool:
 
 def _map_error(exc: Exception) -> Exception:
     """Map AsyncSSH library errors into domain exceptions."""
+    if isinstance(exc, asyncssh.HostKeyNotVerifiable):
+        return RemoteHostKeyError(str(exc))
     if isinstance(exc, (asyncssh.ConnectionLost, OSError)):
         return RemoteConnectionError(str(exc))
     if isinstance(exc, asyncssh.TimeoutError):
@@ -272,9 +276,18 @@ class AsyncSshTransportFactory:
         ``client_key_paths`` and ``known_hosts_path`` are intended ONLY for
         disposable test targets (see ``tests/integration/test_live_ssh_tools.py``).
         Production targets resolve credentials through ``ssh_config_alias`` or the
-        user's default SSH agent/keys and verify host keys through the user's
-        default known-hosts file, so both options stay at their default ``None``.
+        user's default SSH agent/keys and verify host keys against the user's
+        default known-hosts files, so both options stay at their default ``None``.
+
+        When ``known_hosts_path`` is given it must be a non-empty absolute path
+        to a known-hosts file; host-key verification is then restricted to the
+        keys recorded there.
         """
+        if known_hosts_path is not None:
+            if not known_hosts_path.strip():
+                raise ValueError("known_hosts_path must be a non-empty absolute path")
+            if not os.path.isabs(known_hosts_path):
+                raise ValueError("known_hosts_path must be an absolute path")
         self._client_key_paths = tuple(client_key_paths) if client_key_paths else None
         self._known_hosts_path = known_hosts_path
 
@@ -282,7 +295,6 @@ class AsyncSshTransportFactory:
         host = target.ssh_config_alias or target.host
         connect_kwargs: dict[str, object] = {
             "username": target.ssh_user,
-            "known_hosts": (),
             "keepalive_interval": _KEEPALIVE_INTERVAL,
             "keepalive_count_max": _KEEPALIVE_COUNT_MAX,
         }

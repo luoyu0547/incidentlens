@@ -1,8 +1,4 @@
-"""Docker Compose 验收测试（需要 Docker 环境）。
-
-默认跳过；设置 ``INCIDENTLENS_RUN_ACCEPTANCE=1`` 且 Docker Compose 环境
-运行后才会执行。校验 Phase 5 故障注入环境的微服务健康与订单创建链路。
-"""
+"""Docker Compose acceptance tests for deterministic routing and regressions."""
 
 import os
 
@@ -16,35 +12,57 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def compose_urls():
-    """验证 Docker Compose 服务是否可达。"""
     return {
-        "api_gateway": "http://localhost:8080",
-        "order_service": "http://localhost:5001",
-        "payment_service": "http://localhost:5002",
-        "inventory_service": "http://localhost:5003",
+        "api_gateway": "http://127.0.0.1:8080",
+        "order_stable": "http://127.0.0.1:5001",
+        "order_canary": "http://127.0.0.1:5002",
+        "payment_service": "http://127.0.0.1:5003",
+        "inventory_service": "http://127.0.0.1:5004",
     }
 
 
 async def test_services_are_healthy(compose_urls):
-    """所有服务应该健康。"""
     import httpx
 
     async with httpx.AsyncClient() as client:
         for name, url in compose_urls.items():
-            resp = await client.get(f"{url}/health", timeout=5)
-            assert resp.status_code == 200, f"{name} not healthy"
+            response = await client.get(f"{url}/health", timeout=5)
+            assert response.status_code == 200, f"{name} not healthy"
 
 
-async def test_order_creation_normal(compose_urls):
-    """正常情况下订单创建成功。"""
+async def test_routing_is_deterministic(compose_urls):
     import httpx
 
     async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{compose_urls['order_service']}/orders",
-            json={"user_id": "test-user", "total": 99.99},
-            timeout=10,
-        )
-        assert resp.status_code == 201
-        data = resp.json()
-        assert "order_id" in data
+        for route, key in (("stable", "route-a"), ("canary", "route-b")):
+            response = await client.post(
+                f"{compose_urls['api_gateway']}/orders",
+                json={"user_id": "routing", "total": 10},
+                headers={"X-Route-Key": key, "X-Request-ID": f"route-{route}"},
+                timeout=10,
+            )
+            assert response.headers["X-Served-By"] == route
+
+
+async def test_dual_regression_pre_repair_matrix(compose_urls):
+    import httpx
+
+    expected = {
+        ("route-a", 10): (201, "stable"),
+        ("route-a", 500): (429, "stable"),
+        ("route-b", 10): (503, "canary"),
+        ("route-b", 500): (503, "canary"),
+    }
+    async with httpx.AsyncClient() as client:
+        for (route_key, amount), (status, served_by) in expected.items():
+            response = await client.post(
+                f"{compose_urls['api_gateway']}/orders",
+                json={"user_id": "matrix", "total": amount},
+                headers={
+                    "X-Route-Key": route_key,
+                    "X-Request-ID": f"matrix-{route_key}-{amount}",
+                },
+                timeout=10,
+            )
+            assert response.status_code == status
+            assert response.headers["X-Served-By"] == served_by

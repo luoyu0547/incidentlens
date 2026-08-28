@@ -2,7 +2,7 @@
 
 ## Goal
 
-Turn the existing deterministic tests and configured real-MaaS demonstration into
+Turn the existing deterministic tests and configured real-model demonstration into
 measurable evidence that IncidentLens Harness guarantees hold in complete Agent
 runs.
 
@@ -18,10 +18,10 @@ This phase follows:
 ## Scope
 
 This change adds a small deterministic scenario evaluator, machine-readable
-metrics, and opt-in assertions around the existing real MaaS + disposable SSH
+metrics, and opt-in assertions around the existing real model + disposable SSH
 workflow.
 
-It reuses the configured `XfyunMaaSProvider`, existing environment settings,
+It reuses the configured `OpenAICompatibleProvider`, existing environment settings,
 `record_live_model_demo.py`, disposable SSH container, runtime stores, and report
 generation. It does not introduce another provider, another E2E runner, an LLM
 judge, or a hosted evaluation service.
@@ -32,7 +32,7 @@ The repository has extensive unit, acceptance, and live transport coverage.
 `test_live_agent_runtime.py` deliberately uses `FakeProvider`; therefore it proves
 real SSH/runtime integration but not real model behavior.
 
-`record_live_model_demo.py` runs a real MaaS model through the normal runtime and
+`record_live_model_demo.py` runs a real model model through the normal runtime and
 records a successful workflow. It is a documentation recorder rather than a test:
 its core workflow cannot be called directly by pytest, and it does not assert
 Harness invariants or produce comparable metric results.
@@ -87,16 +87,16 @@ single score.
 Results are emitted as JSON for automation and as a compact terminal table for
 humans. The first version stores no historical database and renders no dashboard.
 
-### Real MaaS assertions
+### Real model assertions
 
 Add opt-in pytest coverage around the extracted existing workflow. It runs only
-when a single test-only opt-in flag is set and the existing MaaS runtime
+when a single test-only opt-in flag is set and the existing model runtime
 credentials are present. Provider/model/base-URL configuration continues to come
 from `RuntimeSettings`; the test does not define a second configuration scheme.
 
 The normal real-model scenario asserts:
 
-- runtime used the configured MaaS Provider rather than `FakeProvider`;
+- runtime used the configured OpenAI-compatible Provider rather than `FakeProvider`;
 - at least one model-proposed tool call passed through the real Harness;
 - every assistant tool use has a matching result;
 - no scope/policy bypass or unapproved mutation occurred;
@@ -122,7 +122,7 @@ Harness scenarios remain mandatory in CI.
   `HarnessEvalResult` metrics.
 - Create `tests/eval/test_harness_eval.py`: mandatory deterministic invariant
   assertions.
-- Create or modify a focused opt-in integration test for the existing MaaS live
+- Create or modify a focused opt-in integration test for the existing live-model
   workflow and compaction variant.
 - Add a short README section documenting the deterministic eval command, real
   opt-in command, result schema, and exact safety targets.
@@ -135,14 +135,14 @@ recorder also needs them.
 
 The implementation is complete when:
 
-1. ordinary CI runs all deterministic scenarios without MaaS credentials;
+1. ordinary CI runs all deterministic scenarios without model credentials;
 2. the evaluator writes valid JSON and prints the same calculated metrics;
 3. deliberately injecting a foreign citation, bypassed approval, unpaired tool
    result, failed compact recovery, or duplicate child delivery fails the relevant
    metric assertion;
 4. the existing live recording command still produces its current JSON and report
    artifacts;
-5. the opt-in real MaaS test exercises the configured Provider and enforces the
+5. the opt-in real model test exercises the configured Provider and enforces the
    persisted Harness invariants;
 6. the opt-in small-window variant observes real compaction or a documented safe
    pause, never an unbounded retry loop.

@@ -2,17 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Produce deterministic, machine-readable evidence for Harness invariants and add opt-in assertions to the already configured real MaaS workflow.
+**Goal:** Produce deterministic, machine-readable evidence for Harness invariants and add opt-in assertions to the already configured real model workflow.
 
-**Architecture:** A test-side evaluator derives metrics entirely from persisted runtime records and fixed Hook events. The existing real-model recording flow becomes callable, so its CLI and opt-in pytest share the same MaaS Provider, disposable SSH target, and artifact collection.
+**Architecture:** A test-side evaluator derives metrics entirely from persisted runtime records and fixed Hook events. The existing real-model recording flow becomes callable, so its CLI and opt-in pytest share the same OpenAI-compatible Provider, disposable SSH target, and artifact collection.
 
-**Tech Stack:** Python 3.12, pytest, asyncio, Pydantic, JSON, existing XFYUN MaaS runtime, Docker/OpenSSH integration harness.
+**Tech Stack:** Python 3.12, pytest, asyncio, Pydantic, JSON, existing OpenAI-compatible model runtime, Docker/OpenSSH integration harness.
 
 **Spec:** `docs/superpowers/specs/2026-08-18-agent-harness-eval-design.md`
 
 ## Global Constraints
 
-- Reuse the existing MaaS Provider, runtime settings, disposable SSH container, and recording command.
+- Reuse the existing OpenAI-compatible Provider, runtime settings, disposable SSH container, and recording command.
 - Do not add an LLM judge, provider comparison, dashboard, historical metrics database, or stochastic merge gate.
 - Deterministic eval scenarios must run in ordinary CI without network credentials.
 - Real-model tests require one explicit test flag plus the existing runtime credentials and remain opt-in.
@@ -225,7 +225,7 @@ git add tests/eval
 git commit -m "test(agent): add deterministic harness scenarios"
 ```
 
-### Task 3: Make the existing real MaaS recording workflow callable
+### Task 3: Make the existing real model recording workflow callable
 
 **Files:**
 - Modify: `scripts/record_live_model_demo.py:57`
@@ -296,12 +296,12 @@ Move project registration, investigation creation/start, report generation, and
 store extraction into `run_live_model_workflow()`. Keep Docker lifecycle, SSH key
 creation, log seeding, CLI parsing, JSON writing, and artifact copying in `main()`.
 The optional fake registry is test-only dependency injection; when absent,
-`build_runtime(settings)` uses the existing configured MaaS Provider.
+`build_runtime(settings)` uses the existing configured OpenAI-compatible Provider.
 
 - [ ] **Step 4: Verify the original CLI serialization path uses `to_record()`**
 
 Patch Docker/subprocess boundaries in the unit test and assert the CLI writes the
-same top-level JSON keys and report files as before. Do not make a MaaS call in
+same top-level JSON keys and report files as before. Do not make a model call in
 this test.
 
 ```python
@@ -324,7 +324,7 @@ git add scripts/record_live_model_demo.py tests/integration/test_live_model_work
 git commit -m "refactor(agent): expose live model workflow results"
 ```
 
-### Task 4: Add opt-in real MaaS invariant tests and documentation
+### Task 4: Add opt-in real model invariant tests and documentation
 
 **Files:**
 - Create: `tests/integration/test_live_model_harness.py`
@@ -332,7 +332,7 @@ git commit -m "refactor(agent): expose live model workflow results"
 - Modify: `docs/phase-4-agent-runtime-verification.md`
 
 **Interfaces:**
-- Consumes: Task 1 metrics, Task 3 callable workflow, existing `RuntimeSettings.from_environment()`, MaaS credentials, and disposable SSH fixture behavior.
+- Consumes: Task 1 metrics, Task 3 callable workflow, existing `RuntimeSettings.from_environment()`, model credentials, and disposable SSH fixture behavior.
 - Produces: opt-in normal and small-context real-model tests using `INCIDENTLENS_RUN_LIVE_MODEL_TESTS=1`.
 
 - [ ] **Step 1: Add the explicit skip gate and normal real-model test**
@@ -345,7 +345,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.asyncio
-async def test_real_maas_run_satisfies_harness_invariants(live_target, tmp_path) -> None:
+async def test_real_model_run_satisfies_harness_invariants(live_target, tmp_path) -> None:
     settings = RuntimeSettings.from_environment().model_copy(
         update={"data_dir": tmp_path / "runtime", "agent_mode": "llm_agent"}
     )
@@ -366,7 +366,7 @@ async def test_real_maas_run_satisfies_harness_invariants(live_target, tmp_path)
 
 ```python
 @pytest.mark.asyncio
-async def test_real_maas_small_window_compacts_or_pauses_safely(live_target, tmp_path) -> None:
+async def test_real_model_small_window_compacts_or_pauses_safely(live_target, tmp_path) -> None:
     settings = live_settings(tmp_path).model_copy(
         update={
             "agent_context_window_tokens": 8_000,
@@ -405,7 +405,7 @@ INCIDENTLENS_RUN_LIVE_MODEL_TESTS=1 uv run pytest tests/integration/test_live_mo
 
 Document exact targets: foreign evidence, scope/policy bypass, and unapproved
 mutation equal zero; tool pairing and child exactly-once equal 100%. Note that
-real tests reuse existing MaaS settings and remain opt-in.
+real tests reuse existing model settings and remain opt-in.
 
 - [ ] **Step 5: Run Phase C verification and commit**
 

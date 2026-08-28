@@ -1,0 +1,5 @@
+scenario: dual-deployment-regression
+symptom: intermittent order failures with healthy services
+traffic:
+  routes: [route-a, route-b]
+  amounts: [10, 500]

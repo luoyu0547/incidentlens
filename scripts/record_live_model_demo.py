@@ -1,4 +1,4 @@
-"""Run the real MaaS provider against a disposable, controlled SSH target.
+"""Run the real model provider against a disposable, controlled SSH target.
 
 This is a documentation-recording harness, not a mock: it creates a fresh SSH
 key, starts ``infra/test-ssh``, writes a known log through the real SSH
@@ -80,8 +80,7 @@ _CONTEXT_OVERRIDE_FIELDS = frozenset(
         "agent_context_max_output_tokens",
         "agent_context_reserve_tokens",
         "agent_tool_result_budget_chars",
-        "agent_context_max_message_groups",
-        "agent_context_keep_recent_tool_results",
+        "agent_micro_compact_after_seconds",
         "agent_compact_max_failures",
         "agent_reactive_keep_recent_groups",
     }
@@ -161,7 +160,7 @@ async def run_live_model_workflow(
         runtime.projects.create(
             ProjectRegistration(
                 project_id=project_id,
-                display_name="Live MaaS recording",
+                display_name="Live model recording",
                 targets=(target,),
                 services=(service,),
             ),

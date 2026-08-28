@@ -1,0 +1,4 @@
+{"route":"stable","amount":10,"status":201,"served_by":"stable"}
+{"route":"stable","amount":500,"status":201,"served_by":"stable"}
+{"route":"canary","amount":10,"status":201,"served_by":"canary"}
+{"route":"canary","amount":500,"status":201,"served_by":"canary"}

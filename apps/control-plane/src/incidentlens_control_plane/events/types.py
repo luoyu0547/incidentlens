@@ -46,12 +46,33 @@ class RuntimeEventType(StrEnum):
     INVESTIGATION_CANCELLED = "investigation.cancelled"
     INVESTIGATION_FAILED = "investigation.failed"
 
+    OPERATION_QUEUED = "operation.queued"
+    OPERATION_RUNNING = "operation.running"
+    OPERATION_CANCEL_REQUESTED = "operation.cancel_requested"
+    OPERATION_SUCCEEDED = "operation.succeeded"
+    OPERATION_FAILED = "operation.failed"
+    OPERATION_CANCELLED = "operation.cancelled"
+    OPERATION_UNCERTAIN = "operation.uncertain"
+
     AGENT_RUN_STARTED = "agent_run.started"
     AGENT_RUN_STATUS_CHANGED = "agent_run.status_changed"
     AGENT_RUN_COMPLETED = "agent_run.completed"
     AGENT_RUN_FAILED = "agent_run.failed"
     AGENT_RUN_CANCELLED = "agent_run.cancelled"
     AGENT_HOOK = "agent_hook"
+
+    AGENT_TEXT_DELTA = "agent.text.delta"
+    AGENT_MESSAGE_COMPLETED = "agent.message.completed"
+
+    MODEL_ROUND_STARTED = "model_round.started"
+    MODEL_ROUND_COMPLETED = "model_round.completed"
+    TOOL_PROPOSED = "tool.proposed"
+    POLICY_DECIDED = "policy.decided"
+    TODO_CHANGED = "todo.changed"
+    HYPOTHESIS_CHANGED = "hypothesis.changed"
+    CONCLUSION_CREATED = "conclusion.created"
+    CONTEXT_COMPACTED = "context.compacted"
+    SAFETY_STATE_CHANGED = "safety_state.changed"
 
     TOOL_CALL_STARTED = "tool_call.started"
     TOOL_CALL_STATUS_CHANGED = "tool_call.status_changed"

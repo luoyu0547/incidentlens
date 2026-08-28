@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from incidentlens_control_plane.events.types import RuntimeEvent
+from incidentlens_control_plane.evidence.types import EvidenceRef as PersistedEvidenceRef
 from incidentlens_control_plane.investigation.store import AgentRound
 from incidentlens_control_plane.investigation.types import (
     AgentRun,
@@ -49,6 +50,7 @@ class HarnessTrace(BaseModel):
     transcript: tuple[TranscriptMessage, ...] = ()
     compact_boundaries: tuple[CompactBoundary, ...] = ()
     evidence: tuple[EvidenceRef, ...] = ()
+    persisted_evidence: tuple[PersistedEvidenceRef, ...] = ()
     conclusions: tuple[Conclusion, ...] = ()
     conclusion_runs: tuple[tuple[str, Conclusion], ...] = ()
     child_receipts: tuple[ChildReportReceipt, ...] = ()
@@ -87,18 +89,21 @@ class HarnessTrace(BaseModel):
         tool_calls = tuple(ToolCall.model_validate(item) for item in raw_tool_calls)
         transcript = tuple(TranscriptMessage.model_validate(item) for item in raw_transcript)
         boundaries = tuple(CompactBoundary.model_validate(item) for item in raw_boundaries)
-        evidence = tuple(EvidenceReference.model_validate(item) for item in raw_evidence)
+        persisted_evidence = tuple(
+            PersistedEvidenceRef.model_validate(item) for item in raw_evidence
+        )
         conclusions = tuple(Conclusion.model_validate(item) for item in raw_conclusions)
         hooks = tuple(RuntimeEvent.model_validate(item) for item in raw_hooks)
         return cls(
-            scenario="real_maas",
+            scenario="real_model",
             investigation=investigation,
             run=run,
             rounds=rounds,
             tool_calls=tool_calls,
             transcript=transcript,
             compact_boundaries=boundaries,
-            evidence=evidence,
+            evidence=run.evidence,
+            persisted_evidence=persisted_evidence,
             conclusions=conclusions,
             conclusion_runs=tuple((run.agent_run_id, conclusion) for conclusion in conclusions),
             hook_events=hooks,

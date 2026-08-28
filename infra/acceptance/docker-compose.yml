@@ -2,7 +2,6 @@
 services:
   postgres:
     build: ./services/postgres
-    ports: ["5432:5432"]
     environment:
       POSTGRES_DB: acceptance
       POSTGRES_USER: test
@@ -12,43 +11,55 @@ services:
       interval: 5s
       retries: 5
 
-  order-service:
+  order-stable:
     build: ./services/order-service
-    ports: ["5001:5000"]
     environment:
-      - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_NAME=acceptance
-      - DB_USER=test
-      - DB_PASSWORD=test
-      - PAYMENT_URL=http://payment-service:5000
-      - INVENTORY_URL=http://inventory-service:5000
-      - FAULT_DB_POOL=false
-      - FAULT_PAYMENT_TIMEOUT=false
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: acceptance
+      DB_USER: test
+      DB_PASSWORD: test
+      PAYMENT_URL: http://payment-service:5000
+      REPLICA_NAME: stable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  order-canary:
+    build: ./services/order-service
+    env_file:
+      - ./config/order-canary.env
+    environment:
+      DB_HOST: postgres
+      DB_NAME: acceptance
+      DB_USER: test
+      DB_PASSWORD: test
+      PAYMENT_URL: http://payment-service:5000
+      REPLICA_NAME: canary
     depends_on:
       postgres:
         condition: service_healthy
 
   payment-service:
     build: ./services/payment-service
-    ports: ["5002:5000"]
-    environment:
-      - FAULT_DEPENDENCY=false
+    env_file:
+      - ./config/payment-policy.env
 
   inventory-service:
     build: ./services/inventory-service
-    ports: ["5003:5000"]
     environment:
-      - FAULT_DEPENDENCY=false
+      FAULT_DEPENDENCY: "false"
 
   api-gateway:
     build: ./services/api-gateway
-    ports: ["8080:8080"]
+    ports: ["127.0.0.1:8080:8080"]
     environment:
-      - ORDER_URL=http://order-service:5000
-      - PAYMENT_URL=http://payment-service:5000
-      - INVENTORY_URL=http://inventory-service:5000
+      ORDER_STABLE_URL: http://order-stable:5000
+      ORDER_CANARY_URL: http://order-canary:5000
+      PAYMENT_URL: http://payment-service:5000
+      INVENTORY_URL: http://inventory-service:5000
     depends_on:
-      - order-service
+      - order-stable
+      - order-canary
       - payment-service
       - inventory-service

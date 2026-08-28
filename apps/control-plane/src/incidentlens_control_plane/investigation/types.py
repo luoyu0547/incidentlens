@@ -330,6 +330,7 @@ class ToolCall(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     tool_call_id: str = Field(min_length=1, max_length=120)
+    provider_tool_call_id: str | None = Field(default=None, min_length=1, max_length=120)
     agent_run_id: str = Field(min_length=1, max_length=120)
     tool_name: str = Field(min_length=1, max_length=120)
     status: ToolCallStatus
@@ -492,6 +493,24 @@ class CompactionState(BaseModel):
     updated_at: datetime
 
 
+class ReacquisitionRecipe(BaseModel):
+    """A redacted recipe for refreshing reproducible remote observations."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    purpose: str = Field(min_length=1, max_length=1_000)
+    tool_name: str = Field(min_length=1, max_length=120)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    stale_summary: str = Field(min_length=1, max_length=2_000)
+
+    @field_validator("arguments")
+    @classmethod
+    def _arguments_must_be_json_compatible(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if not _json_compatible(value):
+            raise ValueError("arguments must be JSON-compatible plain values")
+        return value
+
+
 class SessionMemory(BaseModel):
     """Versioned, bounded memory for one agent run.
 
@@ -512,9 +531,16 @@ class SessionMemory(BaseModel):
     objective: str = Field(min_length=1, max_length=4_000)
     confirmed_facts: tuple[str, ...] = Field(default=(), max_length=64)
     active_hypotheses: tuple[str, ...] = Field(default=(), max_length=32)
+    rejected_hypotheses: tuple[str, ...] = Field(default=(), max_length=32)
     open_questions: tuple[str, ...] = Field(default=(), max_length=32)
     completed_actions: tuple[str, ...] = Field(default=(), max_length=64)
     child_findings: tuple[str, ...] = Field(default=(), max_length=32)
+    reacquisition_recipes: tuple[ReacquisitionRecipe, ...] = Field(
+        default=(), max_length=32
+    )
+    immutable_observations: tuple[str, ...] = Field(default=(), max_length=64)
+    pending_actions: tuple[str, ...] = Field(default=(), max_length=32)
+    safety_state: tuple[str, ...] = Field(default=(), max_length=64)
     evidence_ids: tuple[str, ...] = Field(default=(), max_length=100)
     user_constraints: tuple[str, ...] = Field(default=(), max_length=32)
     todos: tuple[str, ...] = Field(default=(), max_length=64)

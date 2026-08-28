@@ -1,144 +1,122 @@
 # IncidentLens
 
-> 面向已注册云主机的、安全优先事故调查控制台。
+> 面向已注册云主机的安全优先事故调查控制面：让 Agent 查得深，也让每一次远程动作都可解释、可审批、可追溯。
 
-IncidentLens 将项目注册、脱敏日志、证据、受限 Agent 调查、人工审批、变更备份和调查报告串成一条可审计的诊断链路。它不是故障注入演示，也不会在远程服务器部署 IncidentLens agent，更不会把通用 SSH Shell 交给模型。
+IncidentLens 把项目注册、脱敏日志、证据、受限 Agent 调查、人工审批、变更备份和调查报告串成一条持久化链路，让 LLM 在明确的权限、证据和恢复边界内参与生产故障调查。
 
-## 演示效果
+## 演示
 
-下面的页面来自本仓库启动的本地示例实例；示例中的调查数据仅用于展示界面。所有截图均采用统一桌面视口（约 1280×720）完整捕获，不是局部裁剪。
+在真实 Tencent CVM 微服务目标上，Agent 从受限证据开始调查：展示工具调用和完整命令，在风险操作前暂停等待操作员审批，再继续执行与远程验证。CLI、Web 和控制面共享同一条持久化调查链路。
 
-### 统一控制台与调查总览
+[![CLI Agent 调查过程](docs/assets/demo-run-20260828-final/cli-approval.png)](docs/assets/demo-run-20260828-final/incidentlens-cli-agent-demo-30s.mov)
 
-![IncidentLens 仪表盘](docs/assets/dashboard.jpg)
+| CLI：调查计划、工具调用与精确审批                                              | Web：实时工作区总览                                                     |
+| ------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| ![CLI Agent 调查过程](docs/assets/demo-run-20260828-final/cli-agent-final.png) | ![Web 工作区总览](docs/assets/demo-run-20260828-final/web-overview.png) |
 
-仪表盘集中展示进行中调查、待审批操作、调查状态、服务范围、数据脱敏状态和安全边界。
+[观看 30 秒 CLI Agent 演示视频](docs/assets/demo-run-20260828-final/incidentlens-cli-agent-demo-30s.mov) · 仅录制 CLI Terminal 窗口。
 
-### 调查详情与时间线
+审批卡会展示精确命令，并提供 `yes`、`no`、`yes all` 三个选择；`yes all` 只作用于当前对话 session，不保存审批理由。
 
-| 调查概览 | 调查时间线（滚动区域） |
-| --- | --- |
-| ![调查详情](docs/assets/investigation-detail.jpg) | ![调查时间线](docs/assets/investigation-timeline.jpg) |
+### 真实云端验收
 
-调查详情页串联 Agent 运行、日志证据、工具调用、假设、审批、子任务、变更执行和最终结论。
+在一次受控 Tencent CVM 验收中，`deepseek-v4-flash` 通过正常 Agent Loop 定位两个独立回归（payment 拒付阈值、canary 数据库端口），完成修复、原生 changeset 回滚、重新应用与独立 SSH 复查：
 
-### 终端 CLI（Textual TUI）
+| 指标                     |        结果 |
+| ------------------------ | ----------: |
+| Agent 运行状态           | `completed` |
+| 调查轮次 / 工具调用      |     24 / 60 |
+| 持久化 evidence          |       42 条 |
+| 精确审批                 |       12 次 |
+| 未批准 mutation          |        0 次 |
+| 带 provenance 的项目记忆 |        5 条 |
 
-CLI 不是 Web 的终端镜像，而是开发者跟进一次调查的本地会话。它直接调用 Runtime：中间区域按运行顺序展示 Agent、工具调用、假设和结论；左右两侧保留 scope、预算和安全状态；底部使用命令输入处理报告、取消和精确审批。
+验收器结果为 `passed: true`。完整的 [验收说明](docs/cloud-acceptance/hard-incident/README.md)、[manifest](docs/cloud-acceptance/hard-incident/manifest.json)、[最终矩阵](docs/cloud-acceptance/hard-incident/final-matrix.jsonl) 与[结构化 trace](docs/assets/hard-cloud-task7m.trace.jsonl) 均已保留，可按文档中的命令复核。该结果只证明受控目标上的有边界闭环能力，不代表系统可以绕过注册范围或无需审批修改任意生产主机。
 
-![IncidentLens 调查会话 CLI](docs/assets/cli-investigation.png)
+## 解决什么问题
 
-```bash
-# 从调查列表进入，或直接打开某个调查会话
-incidentlens
-incidentlens investigate <investigation_id>
-
-# 直接在终端生成并阅读该调查的 Markdown 报告
-incidentlens report <investigation_id>
-```
-
-会话内支持 `:report`、`:cancel`、`:approve <审批 ID>`、`:reject <审批 ID>` 与 `:refresh`。所有显示内容均来自已脱敏证据与持久化调查记录；审批仍是精确、单次使用的授权。
-
-### 真实模型流程录制
-
-下方不是页面切换图：它回放了一次实际写入 Runtime 的模型运行。录制脚本启动一次性的受控 OpenSSH 容器，使用真实讯飞 MaaS `xopglm51`，模型先提出 `log_query`，运行时完成 schema、注册服务、路径与只读策略校验后才经 SSH 执行；第二回合再以持久化、脱敏的证据 ID 请求关联日志，最终形成引用证据的结论并生成双格式报告。
-
-![真实模型 CLI 流程录制](docs/assets/incidentlens-live-workflow.gif)
-
-本次运行的原始、已脱敏记录见 [live-model-workflow.json](docs/assets/live-model-workflow.json)，实际生成的 [Markdown 报告](docs/assets/live-model-report.md) 与 [HTML 报告](docs/assets/live-model-report.html) 也一并保留。可在已配置 `XFYUN_MAAS_API_KEY` 的环境中复跑：
-
-```bash
-uv run python scripts/record_live_model_demo.py \
-  --output docs/assets/live-model-workflow.json \
-  --report-dir docs/assets
-```
-
-### 风险审批与资源范围
-
-| 审批中心 | 项目管理 |
-| --- | --- |
-| ![审批中心](docs/assets/approvals.jpg) | ![项目管理](docs/assets/projects.jpg) |
-
-审批中心展示精确的一次性授权；项目管理用于维护目标主机、服务和 Agent 可访问边界。
-
-### 日志检索与调查报告
-
-| 脱敏日志检索 | 自包含 HTML 调查报告 |
-| --- | --- |
-| ![日志检索](docs/assets/log-search.jpg) | ![调查报告](docs/assets/report.jpg) |
-
-日志检索、证据归档和 Markdown/HTML 报告共同组成从诊断到复盘的闭环。HTML 报告为独立中文复盘文档，适合浏览与打印。
-
-Web UI 提供调查、审批、项目与报告入口；Textual CLI 提供相同本地运行时的终端视图。报告会同时生成 Markdown 和无需服务器即可打开的自包含 HTML 文件。
-
-## 它解决什么问题
-
-当生产服务出现 5xx、超时或依赖不可用时，IncidentLens 让调查在明确边界内进行：
+生产故障调查通常同时面对三类风险：信息分散、远程操作不可控、调查过程难以复盘。IncidentLens 的目标不是“让模型拥有一台服务器”，而是把模型限制为提出建议的 Provider，把事实和执行分别放进可验证的边界内：
 
 ```text
-注册的项目/目标
-       │
-       ├── 受策略约束的 SSH、文件与容器操作
-       ├── 已脱敏的日志查询与订阅
-       ▼
-追加式证据库 ──> 有界调查运行时 ──> 审批/变更门禁 ──> Markdown + HTML 报告
+项目 / 目标注册
+      │
+      ├─ 受策略约束的 SSH、文件、容器操作
+      ├─ 已脱敏的日志查询与订阅
+      ▼
+追加式证据库 → 有界调查运行时 → 审批 / 变更门禁 → Markdown + HTML 报告
 ```
 
-所有对模型可见的外部事实都来自追加式、已脱敏的证据库。模型只能提出工具调用、委派、假设和结论；真正的执行始终经过策略、会话、审批及备份边界。
+所有对模型可见的外部事实都来自追加式、已脱敏的证据库。模型只能提出工具调用、委派、假设和结论；真正的执行始终经过策略、会话、审批和备份边界。
 
 ## 核心能力
 
-- **项目与目标注册**：在 SQLite 中维护项目、SSH 目标、Compose 服务、容器和允许访问的路径。
-- **安全远程诊断**：每个目标复用持久 SSH/SFTP/PTY 通道；提供受限的读、列举、搜索、状态和文件操作，而非通用 Shell。
-- **日志到证据**：查询主机或已注册容器日志，逐行解析、脱敏并限制到 16 KiB；支持全文检索、订阅与 WebSocket 重放。
-- **有界 Agent 运行时**：Provider 只提出方案；编排器限制轮次、工具调用、时间、输出和证据预算，并支持父/子运行、检查点、取消、恢复和重启恢复。调查状态与模型上下文相互分离，Runtime 通过版本化 Session Memory 和最近增量重建有界上下文，完整证据按需读取。
-- **人工可控的风险操作**：Docker、PTY、写文件等操作生成精确的一次性审批；永久拒绝 `rm -rf`、重定向、管道和命令替换等危险模式。
-- **可回滚的远程变更**：写入前强制创建本地加密备份与远端同目录时间戳备份，使用陈旧写检测和原子替换；多文件变更支持回滚。
-- **操作界面与报告（Phase 5）**：Jinja2 + HTMX 本地 Web UI、Textual CLI、SSE 实时事件，以及 Markdown/HTML 双格式调查报告。
+| 能力               | 工程实现与价值                                                                                                    |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| 项目与目标注册     | SQLite 维护项目、SSH 目标、Compose 服务、容器和允许访问的路径，调查范围显式可见。                                 |
+| 受限远程诊断       | 复用持久 SSH / SFTP / PTY 通道；工具按读、列举、搜索、状态和文件操作拆分，不暴露通用 Shell。                      |
+| 日志 → 证据        | 主机或已注册容器日志逐行解析、脱敏并限制到 16 KiB；支持全文检索、订阅和 WebSocket 重放。                          |
+| 有界 Agent Runtime | Provider 只提出方案；编排器限制轮次、工具调用、时间、输出和证据预算，支持父子运行、检查点、取消、恢复和重启恢复。 |
+| 人工控制风险操作   | Docker、PTY、写文件等操作生成精确的一次性审批；`rm -rf`、重定向、管道和命令替换等危险模式永久拒绝。               |
+| 可回滚远程变更     | 写入前创建本地加密备份与远端同目录时间戳备份，使用陈旧写检测和原子替换；多文件变更支持回滚。                      |
+| 调查报告           | 统一生成 Markdown / HTML 报告，保留证据引用、操作和最终结论。                                                     |
 
-## 快速开始
+## 技术栈
 
-要求：Python **3.12**、[uv](https://docs.astral.sh/uv/)。Docker 只在运行集成/验收场景时需要。
+- **Backend / Control Plane**：Python 3.12、FastAPI、Pydantic、Uvicorn、AsyncSSH、SQLite
+- **Web**：React 19、TypeScript、Vite、TanStack Router / Query / Table、Vitest、Playwright
+- **CLI**：Node.js 22+、TypeScript、PTY 测试
+- **工程化**：uv、npm workspaces、pytest、Ruff、ESLint、Prettier、Docker Compose
+
+## 5 分钟本地运行
+
+### 环境要求
+
+- Python **3.12** 与 [uv](https://docs.astral.sh/uv/)
+- Node.js **22.19+** 与 npm
+- Docker 仅在运行集成 / 验收场景时需要
+
+### 安装与离线验证
 
 ```bash
-# 安装依赖
 uv sync
+npm install
 
-# 运行全部离线测试
+# 后端离线测试
 uv run pytest -q
 
-# 启动 API 与 Web UI
-uv run uvicorn incidentlens_control_plane.main:app --reload
+# 前端、协议与 CLI 构建验证
+npm run verify:cli
+npm run web:verify
 ```
 
-打开 <http://127.0.0.1:8000> 即可进入仪表盘。运行数据默认存储在 `~/.incidentlens`；若要隔离一次本地体验：
+### 启动控制面与 Web
+
+```bash
+# Terminal 1 — API / Agent runtime
+uv run uvicorn incidentlens_control_plane.main:app --host 0.0.0.0 --port 8000
+
+# Terminal 2 — Web
+npm run dev --workspace @incidentlens/web -- --host 0.0.0.0 --port 5173
+
+# Terminal 3 — CLI（先执行 npm run build --workspace @incidentlens/cli）
+node apps/cli/dist/cli.js
+```
+
+运行数据默认写入 `~/.incidentlens`。想隔离一次本地体验时：
 
 ```bash
 export INCIDENTLENS_DATA_DIR="$(pwd)/.incidentlens-data"
 uv run uvicorn incidentlens_control_plane.main:app --reload
 ```
 
-在另一个终端启动 CLI：
-
-```bash
-# 一次安装：将命令加入用户级 PATH（~/.local/bin）
-uv tool install --editable .
-
-# 此后可在任意目录直接启动
-incidentlens
-```
-
-CLI 默认显示调查列表；可按 Enter 进入选中的调查，或直接使用 `incidentlens investigate <id>` / `incidentlens report <id>`。调查会话中可用 `:report`、`:cancel`、`:approve <id>`、`:reject <id>` 与 `:refresh`；`q` 退出。CLI 与 Web UI 共享本地 SQLite 数据库，MVP 阶段建议不要让两个进程同时执行写操作。
-
-## 一次调查如何流转
+### 第一次调查
 
 1. 通过 `POST /api/projects` 注册项目、目标和服务范围。
-2. 通过 `POST /api/investigations` 创建调查，再使用 `POST /api/investigations/{id}/start` 以限定 scope 启动或恢复它。
-3. 调查运行时收集已脱敏证据、提出有证据引用的假设/结论，必要时暂停等待精确审批。
-4. 在 Web UI 查看调查时间线、运行、工具调用、假设与待审批项；事件通过 SSE 推送。
-5. 打开 `/web/reports/{id}` 生成并查看报告。文件默认输出至 `$INCIDENTLENS_DATA_DIR/reports/{id}.md` 和 `.html`。
+2. 通过 `POST /api/investigations` 创建调查，再调用 `POST /api/investigations/{id}/start`，并显式传入 scope。
+3. Runtime 收集脱敏证据，提出带证据引用的假设 / 结论；遇到风险操作时暂停等待审批。
+4. 通过 API 查询结论、证据、变更和相关日志；报告输出到 `$INCIDENTLENS_DATA_DIR/reports/{id}.md` 与 `.html`。
 
-API 启动调查时需要明确 scope，例如主机日志范围：
+主机日志调查的 scope 示例：
 
 ```json
 {
@@ -150,62 +128,87 @@ API 启动调查时需要明确 scope，例如主机日志范围：
 }
 ```
 
-默认使用确定性的 `FakeProvider`，用于可重复的离线调查和验收。设置 `.env` 后可启用讯飞星辰 MaaS 的 OpenAI 兼容模型：
+默认 FakeProvider 可重复、无需外部 API Key。启用任意支持 Chat Completions 的 OpenAI-compatible 模型：
 
 ```dotenv
 INCIDENTLENS_AGENT_MODE=llm_agent
-INCIDENTLENS_LLM_ACTIVE_MODEL=xfyun-xopglm51
-XFYUN_MAAS_API_KEY=your_key
-# 可选；默认使用讯飞 Coding Plan 的 OpenAI 兼容地址
-INCIDENTLENS_LLM_BASE_URL=https://maas-coding-api.cn-huabei-1.xf-yun.com/v2
+INCIDENTLENS_LLM_ACTIVE_MODEL=deepseek-v4-flash
+INCIDENTLENS_LLM_BASE_URL=https://api.deepseek.com
+INCIDENTLENS_LLM_API_KEY=your_key
 ```
 
-运行时会将 `xfyun-` 前缀映射为讯飞实际 model ID（如 `xopglm51`）。无论使用 FakeProvider 还是真实模型，模型都只能通过同一受限的 `ModelProvider` 合约提出建议，不能绕过工具白名单、scope、证据校验或审批边界。
+无论使用 FakeProvider 还是真实模型，模型都只能通过同一受限 `ModelProvider` 合约提出建议，不能绕过工具白名单、scope、证据校验或审批边界。
 
-## 安全边界
+## 安全设计：把“能做什么”写成代码约束
 
-| 边界 | 约束 |
-| --- | --- |
-| 远程执行 | 不暴露通用 Shell/SSH 工具；命令分为自动读取、需审批与禁止三类。 |
-| 路径访问 | 只允许注册根目录内的受限文件操作，拒绝遍历与符号链接逃逸。 |
-| 日志与证据 | 不持久化或返回原始日志；所有内容先脱敏、截断，再作为证据引用。 |
-| 模型输出 | 只接受白名单工具与已拥有证据的引用；无证据结论会暂停而不是编造。 |
-| 高风险变更 | 审批精确、单次使用；写入前必须完成双重备份。 |
-| 故障恢复 | 危险的在途调用重启后标记为 `UNCERTAIN`，绝不自动重放。 |
+| 边界       | 约束                                                              |
+| ---------- | ----------------------------------------------------------------- |
+| 远程执行   | 不暴露通用 Shell / SSH 工具；命令分为自动读取、需审批与禁止三类。 |
+| 路径访问   | 只允许注册根目录内的受限文件操作，拒绝遍历与符号链接逃逸。        |
+| 日志与证据 | 不持久化或返回原始日志；先脱敏、截断，再作为证据引用。            |
+| 模型输出   | 只接受白名单工具与已拥有证据的引用；无证据结论会暂停而不是编造。  |
+| 高风险变更 | 审批精确且单次使用；写入前必须完成本地 + 远端双重备份。           |
+| 故障恢复   | 危险的在途调用重启后标记为 `UNCERTAIN`，绝不自动重放。            |
 
-## 验证
+## 一次调查的生命周期
+
+```text
+注册项目 / 目标
+      ↓
+创建 Investigation + 显式 scope
+      ↓
+读取脱敏日志 / 受限远程状态
+      ↓
+写入追加式 Evidence Store
+      ↓
+Agent 基于证据提出假设与下一步
+      ├─ 低风险读取：策略校验后执行
+      └─ Docker / PTY / 写入：暂停 → 精确审批 → 执行 → 远程验证
+      ↓
+保存 checkpoint / session memory / 审计事件
+      ↓
+生成 Markdown + HTML 调查报告
+```
+
+Runtime 状态与模型上下文相互分离：通过版本化 Session Memory 和最近增量重建有界上下文，完整证据按需读取。这使得取消、恢复、进程重启和上下文压缩都能有明确的持久化语义。
+
+## 工程质量与验证
+
+测试按风险和依赖分层，默认离线测试不依赖云主机或真实模型：
 
 ```bash
-# 全量离线测试与静态检查
+# 全量后端测试与静态检查
 uv run pytest -q
 uv run ruff check .
 
-# Phase 4 harness evaluator and deterministic runner
+# 产品契约与 API 基础验收
+uv run python scripts/check_product_contracts.py
+uv run pytest tests/contracts tests/acceptance/test_product_api_foundation.py -q
+
+# Agent harness 与确定性评估
 uv run pytest tests/eval/test_harness_eval.py -q
 uv run python tests/eval/runner.py --json .incidentlens/harness-eval.json
 
-# Opt-in real MaaS invariants (reuses configured MaaS settings; skipped otherwise)
-# Targets: foreign evidence, scope/policy bypass, and unapproved mutation = 0;
-# tool pairing and child exactly-once = 100%.
-INCIDENTLENS_RUN_LIVE_MODEL_TESTS=1 uv run pytest tests/integration/test_live_model_harness.py -q
+# 报告与离线端到端流程
+uv run pytest tests/reports/ tests/acceptance/test_e2e_investigation.py -v
 
-# Phase 5：CLI、Web UI、报告与离线端到端流程
-uv run pytest tests/reports/ tests/cli/ tests/web/test_web_dashboard.py tests/acceptance/test_e2e_investigation.py -v
-
-# 可选：Docker 验收场景
+# 可选：Docker 验收
 cd infra/acceptance && docker compose up -d
 INCIDENTLENS_RUN_ACCEPTANCE=1 uv run pytest ../../tests/acceptance/test_docker_scenarios.py -v
 ```
 
-其他可选的真实集成验证：
+可选的真实集成测试通过环境变量显式开启：`INCIDENTLENS_RUN_LIVE_SSH`、`INCIDENTLENS_RUN_LIVE_LOG_TESTS`、`INCIDENTLENS_RUN_LIVE_AGENT_TESTS`、`INCIDENTLENS_RUN_LIVE_MODEL_TESTS`。其中 live model harness 验证外部证据、scope / policy 绕过和未审批变更为 0，并检查工具配对与子运行 exactly-once。
 
-```bash
-INCIDENTLENS_RUN_LIVE_SSH=1 uv run pytest tests/integration/test_live_ssh_tools.py -q
-INCIDENTLENS_RUN_LIVE_LOG_TESTS=1 uv run pytest tests/integration/test_live_log_tools.py -q
-INCIDENTLENS_RUN_LIVE_AGENT_TESTS=1 uv run pytest tests/integration/test_live_agent_runtime.py -q
-```
+验证记录： [Phase 1 本地 Runtime](docs/phase-1-local-runtime-verification.md) · [Phase 2 远程工具](docs/phase-2-remote-tools-verification.md) · [Phase 3 日志与证据](docs/phase-3-hybrid-log-evidence-verification.md) · [Phase 4 Agent Runtime](docs/phase-4-agent-runtime-verification.md)
 
-详细步骤见 [Phase 1](docs/phase-1-local-runtime-verification.md)、[Phase 2](docs/phase-2-remote-tools-verification.md)、[Phase 3](docs/phase-3-hybrid-log-evidence-verification.md)、[Phase 4](docs/phase-4-agent-runtime-verification.md) 与 [Phase 5](docs/phase-5-cli-web-reports-verification.md) 验证记录。
+## 产品契约与部署约束
+
+- 稳定 API / stream schema 位于 `packages/protocol/`，由 `scripts/export_product_contracts.py` 生成，并由 `scripts/check_product_contracts.py` 检查漂移。
+- 客户端必须先通过 `/api/v1/version` 协商版本；未知版本显式失败，不能静默降级。
+- 当前控制面是本地单用户运行时，部署必须使用**单个 Uvicorn worker**，并挂载包含 SQLite、加密备份、checkpoint 和报告的持久化数据卷。
+- 生产环境应配置认证 profile、session signing key，并运行在 TLS 反向代理之后；签名密钥和 bearer token 不进入请求体、日志或公开 schema。
+- 旧 `/api/*` 路由仅作临时兼容层，可通过 `INCIDENTLENS_LEGACY_API_ENABLED` 关闭，不作为新客户端依赖。
+- CLI / Web stream 连接携带并校验 schema version，断线后使用 cursor / sequence 恢复并处理 gap / backpressure 信号。
 
 ## 项目结构
 
@@ -218,23 +221,40 @@ apps/control-plane/src/incidentlens_control_plane/
 ├── investigation/    # 有界编排器、Provider 合约、恢复与工具执行
 ├── approvals/         # 单次精确审批
 ├── changes/           # 双备份、原子修改与回滚
-├── reports/           # Markdown/HTML 报告
-├── web/               # Jinja2 + HTMX + SSE Web UI
-└── cli/               # Textual 终端界面
+└── reports/           # Markdown / HTML 报告
 ```
 
-`infra/acceptance/` 包含用于 Docker 验收的微服务和故障场景；`tests/` 按领域模块组织离线、集成与验收测试。
+`infra/acceptance/` 包含 Docker 验收用微服务和故障场景；`apps/web/` 是实时工作区；`apps/cli/` 是终端调查入口；`packages/protocol/` 是前后端共享的版本化契约；`tests/` 按领域组织离线、集成和验收测试。
 
-## 配置
+## 配置参考
 
-| 环境变量 | 用途 | 默认值 |
-| --- | --- | --- |
-| `INCIDENTLENS_DATA_DIR` | SQLite、加密备份库与报告输出目录 | `~/.incidentlens` |
-| `INCIDENTLENS_RUN_LIVE_SSH` | 启用真实 SSH 集成测试 | 未设置（跳过） |
-| `INCIDENTLENS_RUN_LIVE_LOG_TESTS` | 启用真实日志集成测试 | 未设置（跳过） |
-| `INCIDENTLENS_RUN_LIVE_AGENT_TESTS` | 启用真实 Agent 集成测试 | 未设置（跳过） |
-| `INCIDENTLENS_RUN_LIVE_MODEL_TESTS` | 启用真实 MaaS harness invariant 测试 | 未设置（跳过） |
+| 环境变量                            | 用途                                  | 默认值            |
+| ----------------------------------- | ------------------------------------- | ----------------- |
+| `INCIDENTLENS_DATA_DIR`             | SQLite、加密备份库与报告目录          | `~/.incidentlens` |
+| `INCIDENTLENS_AGENT_MODE`           | `fake` 或 `llm_agent`                 | `fake`            |
+| `INCIDENTLENS_LLM_BASE_URL`         | OpenAI-compatible API 根地址          | 未设置            |
+| `INCIDENTLENS_LLM_ACTIVE_MODEL`     | 原样发送给 Provider 的模型 ID         | 未设置            |
+| `INCIDENTLENS_LLM_API_KEY`          | Provider API Key                      | 未设置            |
+| `INCIDENTLENS_RUN_LIVE_SSH`         | 启用真实 SSH 集成测试                 | 未设置（跳过）    |
+| `INCIDENTLENS_RUN_LIVE_LOG_TESTS`   | 启用真实日志集成测试                  | 未设置（跳过）    |
+| `INCIDENTLENS_RUN_LIVE_AGENT_TESTS` | 启用真实 Agent 集成测试               | 未设置（跳过）    |
+| `INCIDENTLENS_RUN_LIVE_MODEL_TESTS` | 启用真实 model harness invariant 测试 | 未设置（跳过）    |
 
-## 当前范围
+## 云端验收（可选）
 
-IncidentLens 是本地单用户控制台。Phase 5 交付的是交互层和报告能力，不改变前四个阶段的安全模型。远端侧无需部署 agent；实际远程访问仍需在项目注册中显式配置目标与可访问范围。
+验收脚本会在目标机启动 gateway、order stable / canary、payment、inventory 与 PostgreSQL；服务端口只绑定云主机 loopback。
+
+```bash
+./scripts/cloud_acceptance_target.sh provision
+./scripts/cloud_acceptance_target.sh status
+./scripts/cloud_acceptance_target.sh stop
+```
+
+默认目标是 SSH 配置中的 `incidentlens-tencent`，也可用 `--host` 或 `INCIDENTLENS_CLOUD_HOST` 覆盖。运行前请确认目标、凭据和网络权限属于你有权访问的环境。
+
+## 当前范围与非目标
+
+- 当前是本地单用户 API 服务；不承诺多租户隔离、水平扩展或高可用部署。
+- 远端无需部署 IncidentLens Agent，但实际访问必须在项目注册中显式配置目标与允许范围。
+- 项目刻意不提供任意 SSH Shell，也不把“模型自动修复生产环境”作为产品承诺。
+- 后续可沿着多租户认证、策略配置中心、更多云厂商适配和长期审计存储继续演进。

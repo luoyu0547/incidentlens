@@ -146,7 +146,8 @@ def test_approving_tool_approval_reexecutes_and_resumes(
 
     # The approved tool call was re-executed with the exact single-use approval.
     tool_call = runtime.investigation_store.get_tool_call("call-ap-1")
-    assert tool_call.status is ToolCallStatus.SUCCEEDED
+    assert tool_call.status is ToolCallStatus.FAILED
+    assert "command exited" in (tool_call.error_redacted or "")
     approval = runtime.approvals.get(stack["approval_id"])
     assert approval.status is ApprovalStatus.CONSUMED
     # The run is no longer parked on the approval (it resumed and failed the

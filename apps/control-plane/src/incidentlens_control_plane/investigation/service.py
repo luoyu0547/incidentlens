@@ -41,6 +41,7 @@ from incidentlens_control_plane.investigation.store import (
     Checkpoint,
     InvestigationNotFound,
     InvestigationStore,
+    TranscriptMessage,
 )
 from incidentlens_control_plane.investigation.tool_executor import ToolExecutor, ToolOutcome
 from incidentlens_control_plane.investigation.types import (
@@ -113,6 +114,15 @@ class InvestigationService:
         )
 
     # -- lifecycle ------------------------------------------------------------
+
+    def list_transcript_messages(self, agent_run_id: str) -> tuple[TranscriptMessage, ...]:
+        """Expose the durable transcript projection to facade services.
+
+        Agent-session projection deliberately depends on this high-level
+        service rather than reaching into the store. Keep the delegation
+        read-only and preserve the store's oldest-first ordering.
+        """
+        return self._store.list_transcript_messages(agent_run_id)
 
     def create_investigation(
         self,
@@ -463,6 +473,7 @@ class InvestigationService:
             )
         request = ToolRequest(
             tool_call_id=tool_call.tool_call_id,
+            provider_tool_call_id=tool_call.provider_tool_call_id,
             tool_name=tool_call.tool_name,
             arguments=tool_call.arguments,
         )
@@ -712,10 +723,25 @@ class InvestigationService:
                 "evidence_count": run.usage.evidence_count + len(new_refs),
                 "tool_calls": run.usage.tool_calls + 1,
                 "total_output_bytes": run.usage.total_output_bytes + outcome.output_bytes,
+                "consecutive_no_new_evidence_rounds": 0,
             }
         )
         run = run.model_copy(update={"usage": usage})
         self._store.update_agent_run(run)
+        investigation = self._store.get_investigation(run.investigation_id)
+        investigation_usage = investigation.usage.model_copy(
+            update={
+                "evidence_count": investigation.usage.evidence_count + len(new_refs),
+                "tool_calls": investigation.usage.tool_calls + 1,
+                "total_output_bytes": (
+                    investigation.usage.total_output_bytes + outcome.output_bytes
+                ),
+                "consecutive_no_new_evidence_rounds": 0,
+            }
+        )
+        self._store.update_investigation(
+            investigation.model_copy(update={"usage": investigation_usage})
+        )
         if self._events_pub is not None:
             self._events_pub.evidence_appended(
                 run, added=len(new_refs), occurred_at=now

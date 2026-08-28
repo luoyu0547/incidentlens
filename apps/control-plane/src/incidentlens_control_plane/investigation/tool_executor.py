@@ -38,7 +38,7 @@ from incidentlens_control_plane.evidence.service import (
     EvidenceService,
 )
 from incidentlens_control_plane.evidence.store import EvidenceStore
-from incidentlens_control_plane.evidence.types import EvidenceRef
+from incidentlens_control_plane.evidence.types import EvidenceKind, EvidenceRef
 from incidentlens_control_plane.investigation.delegation import (
     DelegationRejected,
     DelegationSpec,
@@ -67,6 +67,7 @@ from incidentlens_control_plane.investigation.tools import (
     TOOL_FILE_EDIT,
     TOOL_FILE_WRITE,
     TOOL_HOST_LIST,
+    TOOL_HOST_METRICS,
     TOOL_HOST_READ,
     TOOL_HOST_SEARCH,
     TOOL_HOST_STAT,
@@ -186,6 +187,16 @@ class ToolExecutionError(Exception):
     """A deterministic execution/validation failure safe to report to the model."""
 
 
+@dataclass(frozen=True)
+class _LinePage:
+    content: str
+    start_line: int
+    end_line: int
+    total_lines: int
+    has_more: bool
+    next_start_line: int | None
+
+
 class ToolUncertain(Exception):
     """A remote operation whose result cannot be confirmed (timeout/connection)."""
 
@@ -214,6 +225,61 @@ class ToolResult:
     error_redacted: str | None = None
 
 
+TOOL_OUTCOME_MAX_EVIDENCE = 24
+TOOL_OUTCOME_SUMMARY_MAX_LENGTH = 4_000
+EVIDENCE_REFERENCE_SUMMARY_MAX_LENGTH = 2_000
+MODEL_VISIBLE_LINE_CONTENT_MAX_LENGTH = 3_200
+
+
+def _model_visible_summary(prefix: str, content: str) -> str:
+    """Return bounded redacted content for the next model turn."""
+    available = max(0, TOOL_OUTCOME_SUMMARY_MAX_LENGTH - len(prefix))
+    return prefix + content[:available]
+
+
+def _line_page(
+    content: str,
+    *,
+    start_line: int = 1,
+    end_line: int | None = None,
+) -> _LinePage:
+    """Select a complete-line page that fits the model-visible result budget."""
+    if end_line is not None and end_line < start_line:
+        raise ToolExecutionError("end_line must be greater than or equal to start_line")
+    lines = content.splitlines(keepends=True)
+    total = len(lines)
+    if total == 0:
+        return _LinePage("", 0, 0, 0, False, None)
+    if start_line > total:
+        raise ToolExecutionError(
+            f"start_line {start_line} exceeds available line count {total}"
+        )
+    requested_end = min(end_line or total, total)
+    selected: list[str] = []
+    selected_chars = 0
+    for line_number in range(start_line, requested_end + 1):
+        line = lines[line_number - 1]
+        if selected_chars + len(line) > MODEL_VISIBLE_LINE_CONTENT_MAX_LENGTH:
+            if not selected:
+                raise ToolExecutionError(
+                    f"line {line_number} exceeds the model-visible line budget; "
+                    "use a search tool or the legacy byte range"
+                )
+            break
+        selected.append(line)
+        selected_chars += len(line)
+    actual_end = start_line + len(selected) - 1
+    has_more = actual_end < total
+    return _LinePage(
+        content="".join(selected),
+        start_line=start_line,
+        end_line=actual_end,
+        total_lines=total,
+        has_more=has_more,
+        next_start_line=actual_end + 1 if has_more else None,
+    )
+
+
 class ToolOutcome(BaseModel):
     """The single auditable result of one tool invocation, safe for the model."""
 
@@ -222,8 +288,10 @@ class ToolOutcome(BaseModel):
     tool_call_id: str = Field(min_length=1, max_length=120)
     tool_name: str = Field(min_length=1, max_length=120)
     status: ToolCallStatus
-    evidence: tuple[EvidenceReference, ...] = Field(default=(), max_length=24)
-    summary: str = Field(default="", max_length=4_000)
+    evidence: tuple[EvidenceReference, ...] = Field(
+        default=(), max_length=TOOL_OUTCOME_MAX_EVIDENCE
+    )
+    summary: str = Field(default="", max_length=TOOL_OUTCOME_SUMMARY_MAX_LENGTH)
     output_bytes: int = Field(default=0, ge=0)
     approval_id: str | None = None
     error_redacted: str | None = Field(default=None, max_length=2_000)
@@ -534,22 +602,31 @@ class ToolExecutor:
             ref = self._evidence_store.get(evidence_id)
         except KeyError:
             raise ToolExecutionError(f"evidence {evidence_id!r} is not readable")
-        metadata = ", ".join(f"{key}={value}" for key, value in ref.metadata.items())
-        summary = (
-            f"evidence {ref.evidence_ref_id} kind={ref.evidence_kind.value} "
-            f"source={ref.source_ref or ''} metadata={{{metadata}}}: "
-            f"{ref.content_redacted[:400]}"
+        page = _line_page(
+            ref.content_redacted,
+            start_line=ctx.arguments.get("start_line", 1),
+            end_line=ctx.arguments.get("end_line"),
         )
+        metadata = ", ".join(f"{key}={value}" for key, value in ref.metadata.items())
+        next_line = page.next_start_line if page.next_start_line is not None else "none"
+        prefix = (
+            f"evidence {ref.evidence_ref_id} kind={ref.evidence_kind.value} "
+            f"source={ref.source_ref or ''} metadata={{{metadata}}} "
+            f"lines={page.start_line}-{page.end_line}/{page.total_lines} "
+            f"has_more={str(page.has_more).lower()} next_start_line={next_line}; "
+            "content:\n"
+        )
+        summary = _model_visible_summary(prefix, page.content)
         return ToolResult(
             evidence=(
                 EvidenceReference(
                     evidence_id=ref.evidence_ref_id,
                     operation_id=ctx.operation_id,
-                    summary=summary,
+                    summary=summary[:EVIDENCE_REFERENCE_SUMMARY_MAX_LENGTH],
                 ),
             ),
             summary=summary,
-            output_bytes=len(ref.content_redacted),
+            output_bytes=len(page.content),
         )
 
     async def _handle_evidence_list(self, ctx: ToolContext) -> ToolResult:
@@ -575,7 +652,10 @@ class ToolExecutor:
                 operation_id=ctx.operation_id,
                 summary=entry,
             )
-            for ref, entry in zip(refs, entries)
+            for ref, entry in zip(
+                refs[:TOOL_OUTCOME_MAX_EVIDENCE],
+                entries[:TOOL_OUTCOME_MAX_EVIDENCE],
+            )
         )
         return ToolResult(evidence=evidence, summary=summary, output_bytes=len(summary))
 
@@ -587,12 +667,16 @@ class ToolExecutor:
         for target in project.targets:
             lines.append(
                 f"target {target.target_id} host={target.host} "
-                f"compose_dir={target.compose_working_directory}"
+                f"compose_dir={target.compose_working_directory} "
+                f"compose_files={[str(path) for path in target.compose_files]} "
+                f"validation_base_url={target.validation_base_url}"
             )
         for svc in project.services:
             lines.append(
                 f"service {svc.compose_service} containers={sorted(svc.container_names)} "
-                f"allowed_log_paths={sorted(svc.allowed_log_paths)}"
+                f"allowed_log_paths={sorted(svc.allowed_log_paths)} "
+                f"validation_scripts="
+                f"{[str(path) for path in svc.allowed_validation_scripts]}"
             )
         description = "; ".join(lines)
         ref = self._evidence.record_registry_discovery(
@@ -621,7 +705,8 @@ class ToolExecutor:
             f"service {svc.compose_service}: containers={sorted(svc.container_names)} "
             f"allowed_host_paths={[str(p) for p in svc.allowed_host_paths]} "
             f"allowed_container_paths={[str(p) for p in svc.allowed_container_paths]} "
-            f"allowed_log_paths={sorted(svc.allowed_log_paths)}"
+            f"allowed_log_paths={sorted(svc.allowed_log_paths)} "
+            f"validation_scripts={[str(p) for p in svc.allowed_validation_scripts]}"
         )
         ref = self._evidence.record_registry_discovery(
             agent_run_id=ctx.run.agent_run_id,
@@ -640,6 +725,51 @@ class ToolExecutor:
             evidence=(self._evidence_ref(ctx, ref, summary),),
             summary=summary,
             output_bytes=len(description),
+        )
+
+    async def _handle_host_metrics(self, ctx: ToolContext) -> ToolResult:
+        """Collect fixed read-only host metrics without exposing generic shell."""
+        requested = ctx.arguments.get("sections") or ["load", "memory", "disk"]
+        sections = tuple(dict.fromkeys(requested))
+        commands = {
+            "load": "uptime",
+            "memory": "free -h",
+            "disk": "df -h",
+        }
+        target = self._resolve_target(ctx)
+        session = await self._sessions.connect(target)
+        process = await session.transport.open_shell()
+        shell = PersistentShell(process)
+        framed_parts = [
+            f"printf '\n[{section}]\n'; {commands[section]}" for section in sections
+        ]
+        framed = "; ".join(framed_parts)
+        try:
+            result = await shell.execute(framed, timeout=30)
+        except asyncio.TimeoutError as exc:
+            raise ToolUncertain("host metrics collection timed out") from exc
+        finally:
+            await shell.close()
+
+        output = self._bound_content(
+            ctx,
+            result.stdout.decode("utf-8", errors="replace"),
+            CONTENT_MAX_LENGTH,
+        )
+        ref = self._evidence.record_command_output(
+            **self._evidence_kwargs(ctx, "host", f"host:{ctx.run.scope.target_id}"),
+            command=f"host_metrics:{','.join(sections)}",
+            output=output,
+            exit_code=result.exit_status,
+        )
+        summary = _model_visible_summary("host metrics collected: ", ref.content_redacted)
+        failed = result.exit_status != 0
+        return ToolResult(
+            status=ToolCallStatus.FAILED if failed else ToolCallStatus.SUCCEEDED,
+            evidence=(self._evidence_ref(ctx, ref, "host health metrics"),),
+            summary=summary,
+            output_bytes=len(output),
+            error_redacted="one or more metric commands failed" if failed else None,
         )
 
     # -- file tools (host + container) ----------------------------------------
@@ -675,6 +805,13 @@ class ToolExecutor:
         self._assert_run_scope(ctx, scope)
         svc = self._resolve_service(ctx, service_name)
         self._validate_path_in_scope(ctx, path, scope=scope)
+        has_line_range = "start_line" in args or "end_line" in args
+        has_byte_range = "offset" in args or "limit" in args
+        if has_line_range and has_byte_range:
+            raise ToolExecutionError(
+                "line range cannot be combined with byte offset/limit"
+            )
+        line_mode = not has_byte_range
         result = await self._gateway.read(
             **self._gateway_kwargs(
                 ctx,
@@ -683,28 +820,111 @@ class ToolExecutor:
                 scope,
                 svc,
                 extra={
-                    "offset": args.get("offset", 0),
-                    "limit": min(args.get("limit", _MAX_FILE_READ_BYTES), _MAX_FILE_READ_BYTES),
+                    "offset": args.get("offset", 0) if not line_mode else 0,
+                    "limit": (
+                        min(args.get("limit", _MAX_FILE_READ_BYTES), _MAX_FILE_READ_BYTES)
+                        if not line_mode
+                        else _MAX_FILE_READ_BYTES
+                    ),
                 },
             )
         )
         text = result.content.decode("utf-8", errors="replace")
-        text = self._bound_content(ctx, text, CONTENT_MAX_LENGTH)
+        page: _LinePage | None = None
+        if line_mode:
+            page = _line_page(
+                text,
+                start_line=args.get("start_line", 1),
+                end_line=args.get("end_line"),
+            )
+            text = page.content
+        else:
+            text = self._bound_content(ctx, text, CONTENT_MAX_LENGTH)
+        read_metadata = {
+            "operation": TOOL_HOST_READ if scope is LogScope.HOST else TOOL_CONTAINER_READ,
+            "scope": scope.value,
+            "container": args.get("container", ""),
+            "read_mode": "lines" if line_mode else "bytes",
+            "start_line": str(args.get("start_line", 1)) if line_mode else "",
+            "end_line": str(args.get("end_line", "")) if line_mode else "",
+            "offset": str(args.get("offset", 0)) if not line_mode else "",
+            "limit": str(args.get("limit", _MAX_FILE_READ_BYTES)) if not line_mode else "",
+            "source_sha256": result.sha256,
+        }
+        previous = self._latest_matching_file_read(
+            agent_run_id=ctx.run.agent_run_id,
+            source_ref=str(result.path),
+            metadata=read_metadata,
+        )
+        if previous is not None:
+            summary = (
+                f"FILE_UNCHANGED_STUB path={result.path} sha256={result.sha256} "
+                f"unchanged_since_evidence={previous.evidence_ref_id}; "
+                "previous content remains authoritative"
+            )
+            return ToolResult(
+                evidence=(self._evidence_ref(ctx, previous, summary),),
+                summary=summary,
+                output_bytes=len(summary),
+            )
         ref = self._evidence.record_file_snapshot(
             **self._evidence_kwargs(ctx, service_name, str(result.path)),
             content=text,
             size_bytes=result.metadata.size,
+            metadata=read_metadata,
         )
-        preview = ref.content_redacted[:300] or "(empty content)"
-        summary = (
-            f"read {result.path} ({result.metadata.size} bytes, "
-            f"truncated={result.truncated}); sha256={result.sha256[:16]}; {preview}"
-        )
+        if page is not None:
+            has_more = page.has_more or result.truncated
+            next_start_line: int | str = (
+                page.next_start_line
+                if page.next_start_line is not None
+                else (page.end_line + 1 if result.truncated else "none")
+            )
+            total_lines = (
+                f">={page.total_lines}" if result.truncated else str(page.total_lines)
+            )
+            prefix = (
+                f"read {result.path} ({result.metadata.size} bytes) "
+                f"lines={page.start_line}-{page.end_line}/{total_lines} "
+                f"has_more={str(has_more).lower()} "
+                f"next_start_line={next_start_line}; sha256={result.sha256}; content:\n"
+            )
+        else:
+            prefix = (
+                f"read {result.path} ({result.metadata.size} bytes, "
+                f"truncated={result.truncated}); sha256={result.sha256}; "
+            )
+        summary = _model_visible_summary(prefix, ref.content_redacted or "(empty content)")
         return ToolResult(
-            evidence=(self._evidence_ref(ctx, ref, summary),),
+            evidence=(
+                self._evidence_ref(
+                    ctx, ref, summary[:EVIDENCE_REFERENCE_SUMMARY_MAX_LENGTH]
+                ),
+            ),
             summary=summary,
             output_bytes=len(text),
         )
+
+    def _latest_matching_file_read(
+        self,
+        *,
+        agent_run_id: str,
+        source_ref: str,
+        metadata: dict[str, str],
+    ) -> EvidenceRef | None:
+        """Return the durable snapshot for an unchanged, identical read page."""
+        for ref in reversed(
+            self._evidence_store.list_by_kind(
+                EvidenceKind.FILE_SNAPSHOT,
+                agent_run_id=agent_run_id,
+                limit=1000,
+            )
+        ):
+            if ref.source_ref != source_ref:
+                continue
+            if all(ref.metadata.get(key) == value for key, value in metadata.items()):
+                return ref
+        return None
 
     async def _file_list(self, ctx: ToolContext, *, scope: LogScope) -> ToolResult:
         args = ctx.arguments
@@ -933,10 +1153,14 @@ class ToolExecutor:
             target_id=ctx.run.scope.target_id,
             service=service_name,
             scope=HostScope(),
+            investigation_id=ctx.run.investigation_id,
+            agent_run_id=ctx.run.agent_run_id,
+            tool_call_id=ctx.operation_id,
             command=command,
             reason="agent investigation shell command",
         )
-        decision = CommandPolicy().evaluate(request, svc)
+        policy_service = self._shell_policy_service(ctx, svc)
+        decision = CommandPolicy().evaluate(request, policy_service)
         if decision.risk is OperationRisk.FORBIDDEN:
             raise ToolExecutionError(f"command is forbidden by policy: {decision.reason}")
         routed = await Gateway(self._approvals).shell(
@@ -971,12 +1195,23 @@ class ToolExecutor:
             output=bound,
             exit_code=shell_result.exit_status,
         )
-        preview = ref.content_redacted[:300] or "(no output)"
-        summary = f"command exited {shell_result.exit_status}: {preview}"
+        prefix = f"command exited {shell_result.exit_status}: "
+        summary = _model_visible_summary(
+            prefix, ref.content_redacted or "(no output)"
+        )
+        failed = shell_result.exit_status != 0
         return ToolResult(
-            evidence=(self._evidence_ref(ctx, ref, summary),),
+            status=ToolCallStatus.FAILED if failed else ToolCallStatus.SUCCEEDED,
+            evidence=(
+                self._evidence_ref(
+                    ctx, ref, summary[:EVIDENCE_REFERENCE_SUMMARY_MAX_LENGTH]
+                ),
+            ),
             summary=summary,
             output_bytes=len(bound),
+            error_redacted=(
+                f"command exited {shell_result.exit_status}" if failed else None
+            ),
         )
 
     async def _handle_file_edit(self, ctx: ToolContext) -> ToolResult:
@@ -1119,6 +1354,9 @@ class ToolExecutor:
             target_id=ctx.run.scope.target_id,
             service=service_name,
             scope=HostScope(),
+            investigation_id=ctx.run.investigation_id,
+            agent_run_id=ctx.run.agent_run_id,
+            tool_call_id=ctx.operation_id,
             action=action,
             container=container,
             reason=reason,
@@ -1216,6 +1454,32 @@ class ToolExecutor:
         except ValueError as exc:
             raise ToolExecutionError(str(exc))
 
+    def _shell_policy_service(
+        self, ctx: ToolContext, service: ServiceRegistration
+    ) -> ServiceRegistration:
+        """Expose all registered project resources to a host-scoped read policy."""
+        if ctx.run.scope.scope is not LogScope.HOST:
+            return service
+        project = self._projects.get(ctx.run.scope.project_id)
+        return service.model_copy(
+            update={
+                "container_names": tuple(
+                    dict.fromkeys(
+                        container
+                        for item in project.services
+                        for container in item.container_names
+                    )
+                ),
+                "allowed_host_paths": tuple(
+                    dict.fromkeys(
+                        path
+                        for item in project.services
+                        for path in item.allowed_host_paths
+                    )
+                ),
+            }
+        )
+
     def _resolve_target(self, ctx: ToolContext) -> TargetRegistration:
         project = self._projects.get(ctx.run.scope.project_id)
         for target in project.targets:
@@ -1292,8 +1556,16 @@ class ToolExecutor:
         approval_id: str | None,
     ) -> ToolResult | None:
         """Request an exact approval for protected paths, or return None to run."""
+        project = self._projects.get(ctx.run.scope.project_id)
+        project_protected = tuple(
+            dict.fromkeys(
+                path
+                for registered_service in project.services
+                for path in registered_service.protected_remote_paths
+            )
+        )
         protected = tuple(
-            path for path in paths if is_protected_path(path, svc.protected_remote_paths)
+            path for path in paths if is_protected_path(path, project_protected)
         )
         if not protected or approval_id is not None:
             return None
@@ -1306,7 +1578,24 @@ class ToolExecutor:
         # Approvals are real-time artifacts: request them against the wall clock
         # so the TTL and the later approve/consume decision stay consistent,
         # independent of the investigation's simulated ``now``.
-        record = await self._approvals.request(intent)
+        record = await self._approvals.request(
+            intent,
+            project_id=ctx.run.scope.project_id,
+            target_id=ctx.run.scope.target_id,
+            service=service_name,
+            investigation_id=ctx.run.investigation_id,
+            agent_run_id=ctx.run.agent_run_id,
+            tool_call_id=ctx.operation_id,
+            changeset_id=changeset_id,
+            risk="approval_required",
+            preview={
+                "preview": "Protected path change requires explicit approval.",
+                "impact": (
+                    f"Changeset {changeset_id} touches protected paths on "
+                    f"{service_name}."
+                ),
+            },
+        )
         return ToolResult(
             status=ToolCallStatus.WAITING_APPROVAL,
             approval_id=record.approval_id,
@@ -1495,6 +1784,7 @@ def default_tool_registry(executor: ToolExecutor) -> ToolRegistry:
         TOOL_EVIDENCE_LIST: executor._handle_evidence_list,
         TOOL_REGISTRY_INFO: executor._handle_registry_info,
         TOOL_SERVICE_INFO: executor._handle_service_info,
+        TOOL_HOST_METRICS: executor._handle_host_metrics,
         TOOL_HOST_READ: executor._handle_host_read,
         TOOL_HOST_LIST: executor._handle_host_list,
         TOOL_HOST_SEARCH: executor._handle_host_search,

@@ -313,6 +313,13 @@ class ToolRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     tool_call_id: str = Field(min_length=1, max_length=120)
+    provider_tool_call_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=120,
+        exclude=True,
+        description="Harness-only correlation; providers must leave this unset.",
+    )
     tool_name: str = Field(min_length=1, max_length=120)
     arguments: dict[str, Any] = Field(default_factory=dict)
 
@@ -432,6 +439,13 @@ class PromptTooLongError(ProviderError):
         super().__init__(message, retryable=False)
 
 
+class ProviderOutputFormatError(ProviderError):
+    """The provider returned JSON that does not satisfy ``AgentTurnResult``."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, retryable=True)
+
+
 class AgentTurnResult(BaseModel):
     """What a provider may declare for one turn: proposals only, never effects."""
 
@@ -439,7 +453,7 @@ class AgentTurnResult(BaseModel):
 
     tool_requests: tuple[ToolRequest, ...] = Field(default=(), max_length=8)
     hypotheses: tuple[HypothesisProposal, ...] = Field(default=(), max_length=16)
-    conclusions: tuple[Conclusion, ...] = Field(default=(), max_length=2)
+    conclusions: tuple[Conclusion, ...] = Field(default=(), max_length=8)
     child_delegation: ChildDelegationRequest | None = None
     stop_signal: StopSignal | None = None
     usage: ProviderUsage = ProviderUsage()

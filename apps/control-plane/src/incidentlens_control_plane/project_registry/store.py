@@ -105,6 +105,21 @@ class ProjectRegistryStore:
 
         return tuple(ProjectRecord.model_validate_json(row[0]) for row in rows)
 
+    def list_registry_targets(self) -> tuple[tuple[str, str, str], ...]:
+        """Return ``(project_id, registry_target_id, display_name)`` for every
+        registered target across all projects.
+
+        This additive accessor exists for the target product facade so it can
+        enumerate existing targets (and detect globally unique vs. duplicated
+        internal target IDs) without reaching into the ``projects`` table
+        directly.  The authoritative record remains ``projects.record_json``.
+        """
+        return tuple(
+            (record.project_id, target.target_id, record.display_name)
+            for record in self.list()
+            for target in record.targets
+        )
+
     def replace(
         self,
         registration: ProjectRegistration,

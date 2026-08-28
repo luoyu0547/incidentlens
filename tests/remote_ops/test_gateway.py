@@ -751,6 +751,47 @@ def test_docker_action_requests_approval_when_no_id(
     asyncio.run(scenario())
 
 
+def test_docker_action_requested_approval_preserves_linkage(
+    docker_gateway: RemoteToolGateway,
+) -> None:
+    """Pending docker approvals retain their downstream linkage metadata."""
+    from incidentlens_control_plane.remote_ops.types import (
+        DockerActionKind,
+        DockerActionRequest,
+        HostScope,
+    )
+
+    request = DockerActionRequest(
+        operation_id="op-dk-link",
+        incident_id="inc-1",
+        project_id="myproj",
+        target_id="dev-host",
+        service="web",
+        scope=HostScope(),
+        session_id="sess-1",
+        investigation_id="inv-1",
+        agent_run_id="run-1",
+        tool_call_id="call-1",
+        action=DockerActionKind.RESTART,
+        container="web-1",
+        reason="restart the web service",
+    )
+
+    async def scenario() -> None:
+        result = await docker_gateway.docker_action(request)
+        assert result.approved is False
+        assert result.approval_id is not None
+        record = docker_gateway._approvals.get(result.approval_id)
+        assert record is not None
+        assert record.project_id == "myproj"
+        assert record.session_id == "sess-1"
+        assert record.investigation_id == "inv-1"
+        assert record.agent_run_id == "run-1"
+        assert record.tool_call_id == "call-1"
+
+    asyncio.run(scenario())
+
+
 def test_docker_action_consumes_approval_and_executes(
     docker_gateway: RemoteToolGateway,
     tmp_path: Path,
@@ -843,6 +884,10 @@ def test_docker_action_compose_builds_fixed_argv(
         ssh_user="deploy",
         compose_working_directory=PurePosixPath("/srv/web"),
         compose_project_name="webapp",
+        compose_files=(
+            PurePosixPath("/srv/web/docker-compose.yml"),
+            PurePosixPath("/srv/web/compose.cloud.yaml"),
+        ),
     )
     record = ProjectRecord(
         project_id="myproj",
@@ -904,6 +949,10 @@ def test_docker_action_compose_builds_fixed_argv(
             "compose",
             "--project-directory",
             "/srv/web",
+            "--file",
+            "/srv/web/docker-compose.yml",
+            "--file",
+            "/srv/web/compose.cloud.yaml",
             "--project-name",
             "webapp",
             "up",
@@ -987,6 +1036,34 @@ async def test_gateway_resolve_service_validates_target_and_service(
         gateway.resolve_service("payments", "dev-a", "ghost")
     with pytest.raises(ValueError, match="not registered"):
         gateway.resolve_service("payments", "ghost-target", "payment-api")
+
+
+@pytest.mark.asyncio
+async def test_gateway_resolves_host_for_target_without_discovered_services(
+    project_store, target_registration
+) -> None:
+    """Fresh target-facade projects can start a host-scoped discovery turn."""
+    from incidentlens_control_plane.project_registry.types import ProjectRegistration
+    from incidentlens_control_plane.remote_ops.fakes import FakeTransportFactory
+    from incidentlens_control_plane.remote_ops.gateway import RemoteToolGateway
+    from incidentlens_control_plane.remote_ops.sessions import SessionManager
+
+    project_store.create(
+        ProjectRegistration(
+            project_id="empty-target",
+            display_name="Empty target",
+            targets=(target_registration,),
+            services=(),
+        ),
+        now=datetime(2026, 8, 12, tzinfo=UTC),
+    )
+    gateway = RemoteToolGateway(
+        projects=project_store,
+        sessions=SessionManager(FakeTransportFactory()),
+    )
+
+    service = gateway.resolve_service("empty-target", "dev-a", "host")
+    assert service.compose_service == "host"
 
 
 @pytest.mark.asyncio

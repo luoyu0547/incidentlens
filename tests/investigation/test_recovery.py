@@ -13,6 +13,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from incidentlens_control_plane.approvals.types import (
+    ApprovalDownstreamStatus,
+    ApprovalStatus,
+)
 from incidentlens_control_plane.evidence.types import EvidenceKind
 from incidentlens_control_plane.investigation.fake_provider import (
     FakeProvider,
@@ -24,6 +28,7 @@ from incidentlens_control_plane.investigation.orchestrator import AgentOrchestra
 from incidentlens_control_plane.investigation.provider import StopSignal
 from incidentlens_control_plane.investigation.recovery import RecoveryService
 from incidentlens_control_plane.investigation.service import (
+    ApprovalDecisionOutcome,
     InvestigationService,
     NotAcceptingInvestigations,
     TooManyActiveInvestigations,
@@ -380,10 +385,258 @@ async def test_startup_reconciles_decided_approval_and_resumes_run(tmp_path: Any
     summary = await recovery.startup()
 
     assert summary.reconciled_approvals == 1
-    tool_call = harness.investigations.get_tool_call("call-1")
+    tool_call = harness.investigations.get_tool_call_by_provider_id("run-1", "call-1")
     assert tool_call.status is ToolCallStatus.SUCCEEDED
     assert service.get_run("run-1").status is AgentRunStatus.COMPLETED
     assert service.get_investigation("inv-1").status is InvestigationStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_startup_reconciles_processing_approval_and_resumes_run(
+    tmp_path: Any,
+) -> None:
+    """A decided approval left mid-processing is resumed on startup."""
+    harness = build_harness(
+        tmp_path,
+        transport_factory=HarnessTransportFactory(
+            shell_output=b"restarted", shell_status=0
+        ),
+    )
+    registry = FakeProviderRegistry()
+    _make_investigation(harness)
+    _make_run(harness)
+    registry.set_script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=(
+                    tool_request(
+                        "shell_exec",
+                        tool_call_id="call-1",
+                        service_name=SERVICE,
+                        command="systemctl restart mysql",
+                    ),
+                )
+            ),
+            StopStep(
+                stop_signal=StopSignal(
+                    stop_reason=StopReason.COMPLETED, summary="investigation complete"
+                )
+            ),
+        ],
+    )
+    _, service, recovery = build_recovery(harness, registry)
+
+    parked = await service.resume_run("run-1")
+    assert parked.status is AgentRunStatus.WAITING_APPROVAL
+    pending = harness.approvals.list()
+    assert len(pending) == 1 and pending[0].status.value == "pending"
+
+    approved = await harness.approvals.approve(pending[0].approval_id)
+    harness.approvals.mark_downstream(
+        approved.approval_id,
+        ApprovalDownstreamStatus.PROCESSING,
+        now=NOW,
+    )
+
+    summary = await recovery.startup()
+
+    assert summary.reconciled_approvals == 1
+    tool_call = harness.investigations.get_tool_call_by_provider_id("run-1", "call-1")
+    assert tool_call.status is ToolCallStatus.SUCCEEDED
+    assert service.get_run("run-1").status is AgentRunStatus.COMPLETED
+    assert service.get_investigation("inv-1").status is InvestigationStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_startup_terminalizes_consumed_processing_approval_from_tool_state(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A consumed approval left processing is finalized from durable tool state."""
+    harness = build_harness(
+        tmp_path,
+        transport_factory=HarnessTransportFactory(
+            shell_output=b"restarted", shell_status=0
+        ),
+    )
+    registry = FakeProviderRegistry()
+    _make_investigation(harness)
+    _make_run(harness)
+    registry.set_script(
+        "run-1",
+        [
+            RequestToolsStep(
+                tool_requests=(
+                    tool_request(
+                        "shell_exec",
+                        tool_call_id="call-1",
+                        service_name=SERVICE,
+                        command="systemctl restart mysql",
+                    ),
+                )
+            ),
+            StopStep(
+                stop_signal=StopSignal(
+                    stop_reason=StopReason.COMPLETED, summary="investigation complete"
+                )
+            ),
+        ],
+    )
+    _, service, recovery = build_recovery(harness, registry)
+
+    parked = await service.resume_run("run-1")
+    assert parked.status is AgentRunStatus.WAITING_APPROVAL
+    pending = harness.approvals.list()
+    assert len(pending) == 1 and pending[0].status.value == "pending"
+
+    await harness.approvals.approve(pending[0].approval_id)
+    outcome = await service.handle_approval_decision(pending[0].approval_id)
+    assert outcome.consumed is True
+    tool_call = harness.investigations.get_tool_call_by_provider_id("run-1", "call-1")
+    assert tool_call.status is ToolCallStatus.SUCCEEDED
+
+    harness.approvals.mark_downstream(
+        pending[0].approval_id,
+        ApprovalDownstreamStatus.PROCESSING,
+        now=NOW,
+    )
+
+    async def _unexpected(*_args, **_kwargs):
+        raise AssertionError("recovery must not re-execute or re-consume consumed approvals")
+
+    monkeypatch.setattr(service, "handle_approval_decision", _unexpected)
+
+    summary = await recovery.startup()
+
+    assert summary.reconciled_approvals == 1
+    approval = harness.approvals.get(pending[0].approval_id)
+    assert approval is not None
+    assert approval.status.value == "consumed"
+    assert approval.downstream_status is ApprovalDownstreamStatus.PROCESSED
+
+
+@pytest.mark.asyncio
+async def test_startup_terminalizes_consumed_processing_approval_after_running_tool_becomes_uncertain(  # noqa: E501
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One startup classifies RUNNING->UNCERTAIN, then finalizes approval state."""
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(harness)
+    _make_run(harness)
+    approval = await harness.approvals.request(
+        {"kind": "shell", "target_id": TARGET_ID},
+        target_id=TARGET_ID,
+        service=SERVICE,
+        investigation_id="inv-1",
+        agent_run_id="run-1",
+        tool_call_id="call-1",
+    )
+    await harness.approvals.approve(approval.approval_id)
+    await harness.approvals.consume(
+        approval.approval_id,
+        {"kind": "shell", "target_id": TARGET_ID},
+    )
+    harness.approvals.mark_downstream(
+        approval.approval_id,
+        ApprovalDownstreamStatus.PROCESSING,
+        now=NOW,
+    )
+    _make_tool_call(
+        harness,
+        tool_call_id="call-1",
+        tool_name="shell_exec",
+        status=ToolCallStatus.PLANNED,
+    )
+    harness.investigations.transition_tool_call_status(
+        "call-1",
+        ToolCallStatus.RUNNING,
+        now=NOW,
+        approval_id=approval.approval_id,
+    )
+
+    _, service, recovery = build_recovery(harness, registry)
+
+    async def _unexpected(*_args, **_kwargs):
+        raise AssertionError("startup must not invoke approval decision handling")
+
+    monkeypatch.setattr(service, "handle_approval_decision", _unexpected)
+
+    summary = await recovery.startup()
+
+    assert summary.dangerous_parked == 1
+    assert summary.reconciled_approvals == 1
+    tool_call = harness.investigations.get_tool_call("call-1")
+    assert tool_call.status is ToolCallStatus.UNCERTAIN
+    approval_record = harness.approvals.get(approval.approval_id)
+    assert approval_record is not None
+    assert approval_record.status.value == "consumed"
+    assert approval_record.downstream_status is ApprovalDownstreamStatus.FAILED
+    assert approval_record.downstream_error_code == "tool_call_uncertain"
+
+
+@pytest.mark.asyncio
+async def test_startup_terminalizes_decided_running_approval_after_tool_becomes_uncertain(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A decided-but-unconsumed running dangerous tool is finalized locally."""
+    harness = build_harness(tmp_path)
+    registry = FakeProviderRegistry()
+    _make_investigation(harness)
+    _make_run(harness)
+    approval = await harness.approvals.request(
+        {"kind": "shell", "target_id": TARGET_ID},
+        target_id=TARGET_ID,
+        service=SERVICE,
+        investigation_id="inv-1",
+        agent_run_id="run-1",
+        tool_call_id="call-1",
+    )
+    await harness.approvals.approve(approval.approval_id)
+    _make_tool_call(
+        harness,
+        tool_call_id="call-1",
+        tool_name="shell_exec",
+        status=ToolCallStatus.PLANNED,
+    )
+    harness.investigations.transition_tool_call_status(
+        "call-1",
+        ToolCallStatus.RUNNING,
+        now=NOW,
+        approval_id=approval.approval_id,
+    )
+
+    _, service, recovery = build_recovery(harness, registry)
+    calls: list[str] = []
+
+    async def _none(*args, **kwargs):
+        calls.append(kwargs.get("approval_id", args[0] if args else ""))
+        return ApprovalDecisionOutcome(
+            approval_id=approval.approval_id,
+            matched="none",
+            tool_call_id=None,
+            run_id="run-1",
+            action="none",
+            applied=False,
+            consumed=False,
+        )
+
+    monkeypatch.setattr(service, "handle_approval_decision", _none)
+
+    summary = await recovery.startup()
+
+    assert calls == [approval.approval_id]
+    assert summary.dangerous_parked == 1
+    assert summary.reconciled_approvals == 1
+    assert harness.factory.transports == []
+    tool_call = harness.investigations.get_tool_call("call-1")
+    assert tool_call.status is ToolCallStatus.UNCERTAIN
+    approval_record = harness.approvals.get(approval.approval_id)
+    assert approval_record is not None
+    assert approval_record.status is ApprovalStatus.APPROVED
+    assert approval_record.downstream_status is ApprovalDownstreamStatus.FAILED
+    assert approval_record.downstream_error_code == "tool_call_uncertain"
 
 
 @pytest.mark.asyncio
@@ -418,7 +671,7 @@ async def test_startup_leaves_pending_approvals_for_the_operator(tmp_path: Any) 
     assert summary.reconciled_approvals == 0
     assert service.get_run("run-1").status is AgentRunStatus.WAITING_APPROVAL
     assert (
-        harness.investigations.get_tool_call("call-1").status
+        harness.investigations.get_tool_call_by_provider_id("run-1", "call-1").status
         is ToolCallStatus.WAITING_APPROVAL
     )
 
@@ -447,7 +700,7 @@ async def test_startup_parks_dangerous_in_flight_run_uncertain_and_never_replays
         service.get_investigation("inv-1").status
         is InvestigationStatus.PAUSED_UNCERTAIN_STATE
     )
-    tool_call = harness.investigations.get_tool_call("call-1")
+    tool_call = harness.investigations.get_tool_call_by_provider_id("run-1", "call-1")
     assert tool_call.status is ToolCallStatus.UNCERTAIN
     assert "never replayed" in tool_call.error_redacted
     # UNCERTAIN_STATE evidence was recorded for the audit trail.
@@ -472,7 +725,7 @@ async def test_startup_marks_safe_in_flight_call_failed_and_keeps_run_resumable(
     assert summary.dangerous_parked == 0
     # A read-only in-flight call is retryable: the run stays RUNNING.
     assert service.get_run("run-1").status is AgentRunStatus.RUNNING
-    tool_call = harness.investigations.get_tool_call("call-1")
+    tool_call = harness.investigations.get_tool_call_by_provider_id("run-1", "call-1")
     assert tool_call.status is ToolCallStatus.FAILED
     assert "retryable" in tool_call.error_redacted
 
@@ -624,7 +877,7 @@ async def test_shutdown_drains_active_loop_and_marks_interrupted_tool_uncertain(
     assert not loop_task.done()
     # C1: the executing call is persisted RUNNING, not PLANNED.
     assert (
-        harness.investigations.get_tool_call("call-1").status
+        harness.investigations.get_tool_call_by_provider_id("run-1", "call-1").status
         is ToolCallStatus.RUNNING
     )
 
@@ -636,7 +889,7 @@ async def test_shutdown_drains_active_loop_and_marks_interrupted_tool_uncertain(
     assert service.get_investigation("inv-1").status is InvestigationStatus.CANCELLED
     # The interrupted shell call could not be confirmed -> UNCERTAIN, never left
     # as a dangling RUNNING row.
-    tool_call = harness.investigations.get_tool_call("call-1")
+    tool_call = harness.investigations.get_tool_call_by_provider_id("run-1", "call-1")
     assert tool_call.status is ToolCallStatus.UNCERTAIN
     assert "never replayed" in tool_call.error_redacted
 
@@ -707,7 +960,7 @@ async def test_real_execution_crash_marks_dangerous_in_flight_uncertain(
     await asyncio.gather(loop_task, return_exceptions=True)
     # C1: the dangerous call is persisted RUNNING after the crash.
     assert (
-        harness.investigations.get_tool_call("call-1").status
+        harness.investigations.get_tool_call_by_provider_id("run-1", "call-1").status
         is ToolCallStatus.RUNNING
     )
 
@@ -719,7 +972,7 @@ async def test_real_execution_crash_marks_dangerous_in_flight_uncertain(
         service.get_investigation("inv-1").status
         is InvestigationStatus.PAUSED_UNCERTAIN_STATE
     )
-    tool_call = harness.investigations.get_tool_call("call-1")
+    tool_call = harness.investigations.get_tool_call_by_provider_id("run-1", "call-1")
     assert tool_call.status is ToolCallStatus.UNCERTAIN
     assert "never replayed" in tool_call.error_redacted
 
@@ -769,7 +1022,7 @@ async def test_approval_after_cancel_does_not_execute_tool(tmp_path: Any) -> Non
     # No transport contact: the dangerous tool was never re-executed.
     assert harness.factory.transports == []
     assert (
-        harness.investigations.get_tool_call("call-1").status
+        harness.investigations.get_tool_call_by_provider_id("run-1", "call-1").status
         is ToolCallStatus.CANCELLED
     )
 
@@ -815,7 +1068,7 @@ async def test_approval_on_waiting_approval_run_under_cancelled_investigation_sk
     assert outcome.applied is False
     assert harness.factory.transports == []
     assert (
-        harness.investigations.get_tool_call("call-1").status
+        harness.investigations.get_tool_call_by_provider_id("run-1", "call-1").status
         is ToolCallStatus.CANCELLED
     )
 
@@ -857,7 +1110,7 @@ async def test_startup_cancelled_investigation_sweeps_waiting_approval_run(
     assert service.get_investigation("inv-1").status is InvestigationStatus.CANCELLED
     assert service.get_run("run-1").status is AgentRunStatus.CANCELLED
     assert (
-        harness.investigations.get_tool_call("call-1").status
+        harness.investigations.get_tool_call_by_provider_id("run-1", "call-1").status
         is ToolCallStatus.CANCELLED
     )
     assert harness.factory.transports == []
@@ -901,7 +1154,7 @@ async def test_startup_does_not_reexecute_approved_tool_on_cancelled_run(
     assert service.get_investigation("inv-1").status is InvestigationStatus.CANCELLED
     # The tool was swept to CANCELLED (M1), never re-executed.
     assert (
-        harness.investigations.get_tool_call("call-1").status
+        harness.investigations.get_tool_call_by_provider_id("run-1", "call-1").status
         is ToolCallStatus.CANCELLED
     )
     assert harness.factory.transports == []

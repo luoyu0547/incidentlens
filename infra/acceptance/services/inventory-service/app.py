@@ -1,9 +1,10 @@
 # infra/acceptance/services/inventory-service/app.py
 """模拟库存服务。"""
 
-import os
 import logging
-from flask import Flask, request, jsonify
+import os
+
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')

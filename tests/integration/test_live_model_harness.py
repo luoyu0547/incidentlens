@@ -1,4 +1,4 @@
-"""Opt-in real MaaS checks for persisted harness invariants.
+"""Opt-in real model checks for persisted harness invariants.
 
 Collection is harmless unless INCIDENTLENS_RUN_LIVE_MODEL_TESTS=1 is set: the
 module gate runs before the disposable-target fixture can perform any setup.
@@ -59,7 +59,7 @@ def count_overflow_retries(hooks: tuple[dict[str, object], ...]) -> int:
 
 
 @pytest.mark.asyncio
-async def test_real_maas_run_satisfies_harness_invariants(live_target, tmp_path) -> None:
+async def test_real_model_run_satisfies_harness_invariants(live_target, tmp_path) -> None:
     settings = RuntimeSettings.from_environment().model_copy(
         update={"data_dir": tmp_path / "runtime", "agent_mode": "llm_agent"}
     )
@@ -67,8 +67,8 @@ async def test_real_maas_run_satisfies_harness_invariants(live_target, tmp_path)
         settings, live_target.factory, live_target.target, live_target.service
     )
     metrics = evaluate_trace(HarnessTrace.from_live_result(result))
-    assert result.report["provider_type"] == "XfyunMaaSProvider"
-    assert result.report["provider_model"] == settings.llm_active_model.removeprefix("xfyun-")
+    assert result.report["provider_type"] == "OpenAICompatibleProvider"
+    assert result.report["provider_model"] == settings.llm_active_model
     assert metrics.foreign_evidence_count == 0
     assert metrics.scope_policy_bypass_count == 0
     assert metrics.unapproved_mutation_count == 0
@@ -79,7 +79,7 @@ async def test_real_maas_run_satisfies_harness_invariants(live_target, tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_real_maas_small_window_compacts_or_pauses_safely(live_target, tmp_path) -> None:
+async def test_real_model_small_window_compacts_or_pauses_safely(live_target, tmp_path) -> None:
     settings = live_settings(tmp_path).model_copy(
         update={
             "agent_context_window_tokens": 8_000,
