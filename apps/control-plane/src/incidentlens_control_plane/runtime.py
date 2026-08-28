@@ -51,6 +51,7 @@ from incidentlens_control_plane.investigation.registry_proposals import (
     RegistryProposalService,
 )
 from incidentlens_control_plane.investigation.service import InvestigationService
+from incidentlens_control_plane.investigation.skills import SkillRegistry
 from incidentlens_control_plane.investigation.source_discovery import (
     SourceDiscoveryService,
 )
@@ -250,6 +251,7 @@ def build_runtime(
     for event_type in HookEventType:
         hooks.register(event_type, hook_recorder)
     delegation = DelegationValidator(projects)
+    skills = SkillRegistry(root=settings.data_dir / "skills")
     executor = ToolExecutor(
         projects=projects,
         sessions=sessions,
@@ -262,6 +264,7 @@ def build_runtime(
         approvals=approvals,
         hooks=hooks,
         delegation=delegation,
+        skills=skills,
     )
     fake_provider = fake_provider_registry or FakeProviderRegistry()
     provider = FakeProvider(fake_provider)

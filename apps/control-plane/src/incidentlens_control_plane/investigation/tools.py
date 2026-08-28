@@ -47,6 +47,8 @@ TOOL_FILE_WRITE = "file_write"
 TOOL_DOCKER_ACTION = "docker_action"
 TOOL_TODO_WRITE = "todo_write"
 TOOL_COMPACT_CONTEXT = "compact_context"
+TOOL_LIST_SKILLS = "list_skills"
+TOOL_LOAD_SKILL = "load_skill"
 
 # ---------------------------------------------------------------------------
 # JSON-Schema fragments (the compact subset enforced by ``_validate_schema``)
@@ -573,6 +575,26 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         ),
         parameters_json_schema={"type": "object", "additionalProperties": False},
     ),
+    ToolDefinition(
+        tool_name=TOOL_LIST_SKILLS,
+        concurrency_safe=True,
+        description=(
+            "List the runtime investigation skills registered for this agent. "
+            "The catalog is a bounded, deterministic summary of the skill names "
+            "and their descriptions."
+        ),
+        parameters_json_schema=_obj({}),
+    ),
+    ToolDefinition(
+        tool_name=TOOL_LOAD_SKILL,
+        concurrency_safe=True,
+        description=(
+            "Load the full markdown body of one named runtime skill. The name "
+            "is resolved only against the registered catalog (never a filesystem "
+            "path); an unknown name returns a bounded diagnostic."
+        ),
+        parameters_json_schema=_obj({"name": _SERVICE_NAME}, required=["name"]),
+    ),
 )
 
 
@@ -648,6 +670,8 @@ __all__ = [
     "TOOL_HOST_READ",
     "TOOL_HOST_SEARCH",
     "TOOL_HOST_STAT",
+    "TOOL_LIST_SKILLS",
+    "TOOL_LOAD_SKILL",
     "TOOL_LOG_CONTEXT",
     "TOOL_LOG_QUERY",
     "TOOL_LOG_SEARCH",

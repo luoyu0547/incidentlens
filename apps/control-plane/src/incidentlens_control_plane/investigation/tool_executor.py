@@ -51,6 +51,7 @@ from incidentlens_control_plane.investigation.provider import (
     ToolSchema,
     _validate_schema,
 )
+from incidentlens_control_plane.investigation.skills import SkillRegistry
 from incidentlens_control_plane.investigation.state_machine import ToolCallStatus
 from incidentlens_control_plane.investigation.store import InvestigationStore
 from incidentlens_control_plane.investigation.tools import (
@@ -71,6 +72,8 @@ from incidentlens_control_plane.investigation.tools import (
     TOOL_HOST_READ,
     TOOL_HOST_SEARCH,
     TOOL_HOST_STAT,
+    TOOL_LIST_SKILLS,
+    TOOL_LOAD_SKILL,
     TOOL_LOG_CONTEXT,
     TOOL_LOG_QUERY,
     TOOL_LOG_SEARCH,
@@ -321,6 +324,7 @@ class ToolExecutor:
         registry: ToolRegistry | None = None,
         hooks: HookRunner | None = None,
         delegation: DelegationValidator | None = None,
+        skills: SkillRegistry | None = None,
     ) -> None:
         self._projects = projects
         self._sessions = sessions
@@ -335,6 +339,7 @@ class ToolExecutor:
         self._delegation = delegation or DelegationValidator(self._projects, self._guard)
         self._hooks = hooks or HookRunner()
         self._registry = registry or default_tool_registry(self)
+        self._skills = skills or SkillRegistry()
 
     @property
     def registry(self) -> ToolRegistry:
@@ -1444,6 +1449,36 @@ class ToolExecutor:
         summary = "[Context compacted]"
         return ToolResult(summary=summary, output_bytes=len(summary))
 
+    async def _handle_list_skills(self, ctx: ToolContext) -> ToolResult:
+        """Return the registry's compact skill catalog.
+
+        ``list_skills`` is a read-only registry lookup: it resolves the bounded
+        catalog string from the injected ``SkillRegistry``, creates no evidence,
+        requires no approval and never touches remote state.  The catalog is
+        bounded in the registry, so the summary is already model-safe; the cap
+        is still applied below so the tool output can never exceed the summary
+        budget even for a very large registry.
+        """
+        catalog = self._skills.list_skills()
+        summary = _model_visible_summary("", catalog)
+        return ToolResult(summary=summary, output_bytes=len(summary))
+
+    async def _handle_load_skill(self, ctx: ToolContext) -> ToolResult:
+        """Resolve one skill name against the injected registry.
+
+        ``load_skill`` resolves ``ctx.arguments["name"]`` only through the
+        in-memory ``SkillRegistry`` catalog, so a model-provided name is never
+        used to open a filesystem path; an unknown name returns the bounded
+        registry diagnostic as a normal succeeded result.  The loaded markdown
+        body can be arbitrarily large, so it is bounded at the model-visible
+        summary cap here (never in the registry).  No evidence is created and no
+        approval is required.
+        """
+        name = ctx.arguments["name"]
+        body = self._skills.load_skill(name)
+        summary = _model_visible_summary("", body)
+        return ToolResult(summary=summary, output_bytes=len(body))
+
     # -- validation helpers ---------------------------------------------------
 
     def _resolve_service(self, ctx: ToolContext, service_name: str) -> ServiceRegistration:
@@ -1801,6 +1836,8 @@ def default_tool_registry(executor: ToolExecutor) -> ToolRegistry:
         TOOL_DOCKER_ACTION: executor._handle_docker_action,
         TOOL_TODO_WRITE: executor._handle_todo_write,
         TOOL_COMPACT_CONTEXT: executor._handle_compact_context,
+        TOOL_LIST_SKILLS: executor._handle_list_skills,
+        TOOL_LOAD_SKILL: executor._handle_load_skill,
     }
     return ToolRegistry(TOOL_DEFINITIONS, handlers)
 

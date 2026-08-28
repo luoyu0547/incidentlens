@@ -27,6 +27,7 @@ from incidentlens_control_plane.evidence.service import EvidenceService
 from incidentlens_control_plane.evidence.store import EvidenceStore
 from incidentlens_control_plane.evidence.types import EvidenceKind
 from incidentlens_control_plane.investigation.hooks import HookEventType, HookRunner
+from incidentlens_control_plane.investigation.skills import SkillRegistry
 from incidentlens_control_plane.investigation.state_machine import (
     AgentRunStatus,
     InvestigationStatus,
@@ -51,6 +52,8 @@ from incidentlens_control_plane.investigation.tools import (
     TOOL_HOST_READ,
     TOOL_HOST_SEARCH,
     TOOL_HOST_STAT,
+    TOOL_LIST_SKILLS,
+    TOOL_LOAD_SKILL,
     TOOL_LOG_CONTEXT,
     TOOL_LOG_QUERY,
     TOOL_LOG_SEARCH,
@@ -149,6 +152,21 @@ def make_scope(
         allowed_host_paths=allowed_host_paths,
         allowed_container_paths=allowed_container_paths,
     )
+
+
+def _make_skill(tmp_path: Path, name: str, body: str, description: str) -> Path:
+    """Create one SKILL.md under a fresh ``tmp_path/skills`` root and return the root.
+
+    The frontmatter names the skill ``name`` so the registry catalogues it exactly.
+    """
+    root = tmp_path / "skills"
+    skill_dir = root / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n{body}\n",
+        encoding="utf-8",
+    )
+    return root
 
 
 def _new_run(
@@ -488,6 +506,7 @@ def build_harness(
     tmp_path: Path,
     *,
     transport_factory: Any = None,
+    skills: SkillRegistry | None = None,
 ) -> Harness:
     db_path = tmp_path / "runtime.db"
 
@@ -557,6 +576,7 @@ def build_harness(
         investigations=investigations,
         approvals=approvals,
         hooks=hooks,
+        skills=skills,
     )
     return Harness(
         projects=projects,
@@ -674,6 +694,103 @@ def test_concurrency_safe_metadata_is_exposed_on_schemas(tmp_path: Path) -> None
     assert by_name[TOOL_FILE_WRITE].concurrency_safe is False
     assert by_name[TOOL_DOCKER_ACTION].concurrency_safe is False
     assert by_name[TOOL_DELEGATE_CHILD].concurrency_safe is False
+
+
+def _skill_backed_harness(tmp_path: Path, description: str = "recovery runbook") -> Harness:
+    """A harness whose executor carries a registry with one ``runbook`` skill."""
+    root = _make_skill(tmp_path, "runbook", "STEP 1: check the order logs", description)
+    return build_harness(tmp_path, skills=SkillRegistry(root=root))
+
+
+def test_skill_tool_schemas_are_visible_in_host_and_container_scopes(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    host_names = {s.tool_name for s in harness.executor.tool_schemas(scope=LogScope.HOST)}
+    container_names = {
+        s.tool_name for s in harness.executor.tool_schemas(scope=LogScope.CONTAINER)
+    }
+    assert TOOL_LIST_SKILLS in host_names
+    assert TOOL_LIST_SKILLS in container_names
+    assert TOOL_LOAD_SKILL in host_names
+    assert TOOL_LOAD_SKILL in container_names
+    # ``list_skills`` takes no arguments; ``load_skill`` requires the ``name``.
+    by_name = {s.tool_name: s for s in harness.executor.tool_schemas(scope=LogScope.HOST)}
+    assert by_name[TOOL_LIST_SKILLS].parameters_json_schema == {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
+    assert by_name[TOOL_LOAD_SKILL].parameters_json_schema == {
+        "type": "object",
+        "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 120}},
+        "additionalProperties": False,
+        "required": ["name"],
+    }
+
+
+def test_skill_tools_require_no_approval(tmp_path: Path) -> None:
+    harness = build_harness(tmp_path)
+    assert harness.executor.requires_approval(TOOL_LIST_SKILLS) is False
+    assert harness.executor.requires_approval(TOOL_LOAD_SKILL) is False
+
+
+@pytest.mark.asyncio
+async def test_list_skills_tool_returns_registry_compact_catalog(tmp_path: Path) -> None:
+    harness = _skill_backed_harness(tmp_path)
+    run = _new_run(harness.investigations)
+    outcome = await harness.executor.execute(tool_request(TOOL_LIST_SKILLS), run, now=NOW)
+    assert outcome.status is ToolCallStatus.SUCCEEDED
+    # The skill tools are read-only registry lookups: they create no evidence.
+    assert outcome.evidence == ()
+    assert "runbook: recovery runbook" in outcome.summary
+    assert harness.factory.transports == []
+
+
+@pytest.mark.asyncio
+async def test_load_skill_tool_returns_registered_skill_body(tmp_path: Path) -> None:
+    harness = _skill_backed_harness(tmp_path)
+    run = _new_run(harness.investigations)
+    outcome = await harness.executor.execute(
+        tool_request(TOOL_LOAD_SKILL, name="runbook"), run, now=NOW
+    )
+    assert outcome.status is ToolCallStatus.SUCCEEDED
+    assert outcome.evidence == ()
+    assert "STEP 1: check the order logs" in outcome.summary
+    assert harness.factory.transports == []
+
+
+@pytest.mark.asyncio
+async def test_load_skill_tool_bounds_large_body_to_summary_cap(tmp_path: Path) -> None:
+    body = "x" * 10_000
+    root = _make_skill(tmp_path, "runbook", body, "recovery runbook")
+    harness = build_harness(tmp_path, skills=SkillRegistry(root=root))
+    run = _new_run(harness.investigations)
+    outcome = await harness.executor.execute(
+        tool_request(TOOL_LOAD_SKILL, name="runbook"), run, now=NOW
+    )
+    assert outcome.status is ToolCallStatus.SUCCEEDED
+    # The full loaded body is bounded at the model-visible summary cap.
+    assert len(outcome.summary) == 4_000
+    assert outcome.summary == "x" * 4_000
+
+
+@pytest.mark.asyncio
+async def test_load_skill_tool_traversal_name_opens_no_path(tmp_path: Path) -> None:
+    root = _make_skill(tmp_path, "runbook", "STEP 1: check the order logs", "recovery runbook")
+    # A naive ``root / name`` join for ``../x`` would land on this decoy; a model
+    # name is only ever resolved against the in-memory catalog, so it is never read.
+    decoy = root.parent / "x" / "SKILL.md"
+    decoy.parent.mkdir(parents=True, exist_ok=True)
+    decoy.write_text("DECOY_CONTENT", encoding="utf-8")
+    harness = build_harness(tmp_path, skills=SkillRegistry(root=root))
+    run = _new_run(harness.investigations)
+    for name in ("../x", "/etc/passwd"):
+        outcome = await harness.executor.execute(
+            tool_request(TOOL_LOAD_SKILL, name=name), run, now=NOW
+        )
+        assert outcome.status is ToolCallStatus.SUCCEEDED
+        assert "unknown skill" in outcome.summary
+        assert "DECOY_CONTENT" not in outcome.summary
+        assert harness.factory.transports == []
 
 
 @pytest.mark.asyncio
