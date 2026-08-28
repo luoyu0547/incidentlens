@@ -13,9 +13,9 @@ IncidentLens 把项目注册、脱敏日志、证据、受限 Agent 调查、人
   <a href="docs/assets/demo-run-20260828-final/incidentlens-cli-agent-demo-30s.mov">观看 CLI Agent 演示视频</a>
 </video>
 
-| Web：实时工作区总览                                                     |
-| ----------------------------------------------------------------------- |
-| ![Web 工作区总览](docs/assets/demo-run-20260828-final/web-overview.png) |
+| CLI：调查计划、工具调用与精确审批                                              | Web：实时工作区总览                                                     |
+| ------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| ![CLI Agent 调查过程](docs/assets/demo-run-20260828-final/cli-agent-final.png) | ![Web 工作区总览](docs/assets/demo-run-20260828-final/web-overview.png) |
 
 [观看 30 秒 CLI Agent 演示视频](docs/assets/demo-run-20260828-final/incidentlens-cli-agent-demo-30s.mov) · 仅录制 CLI Terminal 窗口。
 
