@@ -64,7 +64,7 @@ def test_dynamic_tool_and_skill_text_reflects_context(tmp_path: Path) -> None:
 
     assert "- 运行作用域（scope）：container" in prompt
     assert "- 本次是否为子任务：是" in prompt
-    assert "- 项目记忆可用：否" in prompt
+    assert "- 会话记忆可用：否" in prompt
     assert "- 本次运行注册的可用工具：file_edit, log_query" in prompt
     assert "- 已注册技能目录：" in prompt
     assert "- db-pool：排查连接池耗尽" in prompt

@@ -656,9 +656,9 @@ async def test_system_message_reflects_tools_and_memory_flag(provider_config) ->
     system_content = transport.calls[0]["messages"][0]["content"]
     assert "host_read" in system_content
     assert "file_edit" in system_content
-    assert "项目记忆可用：是" in system_content
+    assert "会话记忆可用：是" in system_content
 
     request.memory_present = False
     await provider.generate_turn(request)
     system_content = transport.calls[1]["messages"][0]["content"]
-    assert "项目记忆可用：否" in system_content
+    assert "会话记忆可用：否" in system_content

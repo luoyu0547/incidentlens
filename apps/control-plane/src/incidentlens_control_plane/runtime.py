@@ -325,7 +325,8 @@ def build_runtime(
         orchestrator path: ``is_child`` is True iff the run has a
         ``parent_run_id`` (the delegated task is present iff the run is a
         child), and ``memory_present`` is set from the active-context session
-        memory the provider will be told about.  The registry catalog is the
+        (compaction) memory the provider will be told about, not the project
+        memory store.  The registry catalog is the
         same shared ``SkillRegistry`` injected into the provider, so the budget
         counts the real prompt string without double-counting the checkpoint /
         snapshot attachment.

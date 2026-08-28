@@ -425,8 +425,9 @@ class ConversationRequest(BaseModel):
     tool_schemas: tuple[ToolSchema, ...] = Field(default=(), max_length=32)
     memory_present: bool = Field(
         default=False,
-        description="Whether the run has access to the project memory store, "
-        "advertised so the provider can stay in bounds without touching the store.",
+        description="Whether a session-memory (compaction) revision is present "
+        "for the run, advertised so the provider can stay in bounds without "
+        "touching the store.",
     )
 
     @model_validator(mode="after")

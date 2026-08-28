@@ -161,7 +161,7 @@ class SystemPromptBuilder:
             "当前运行动态上下文（仅本次运行，不构成回合/阶段排程）：",
             f"- 运行作用域（scope）：{context.scope.value}",
             f"- 本次是否为子任务：{'是' if context.is_child else '否'}",
-            f"- 项目记忆可用：{'是' if context.memory_present else '否'}",
+            f"- 会话记忆可用：{'是' if context.memory_present else '否'}",
             "- 本次运行注册的可用工具：" + ", ".join(sorted(context.tool_names)),
         ]
         skills = sorted(
