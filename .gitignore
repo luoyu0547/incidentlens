@@ -12,6 +12,10 @@ node_modules/
 dist/
 *.tsbuildinfo
 .DS_Store
+.superpowers/
+docs/superpowers/
+**/task-*-report.md
+OPTIMIZATION_SUGGESTIONS.md
 apps/web/dist/
 apps/control-plane/src/incidentlens_control_plane/static/web/
 apps/web/test-results/
