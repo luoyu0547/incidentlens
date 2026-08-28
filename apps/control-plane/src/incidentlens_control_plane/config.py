@@ -231,16 +231,16 @@ class RuntimeSettings(BaseModel):
 
 
 def _load_local_dotenv() -> None:
-    """读取项目 .env，但永不覆盖已由用户 shell 提供的环境变量。"""
-    dotenv = Path.cwd() / ".env"
-    if not dotenv.is_file():
-        return
-    for line in dotenv.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+    """读取项目本地配置，但永不覆盖 shell 环境变量。"""
+    for dotenv in (Path.cwd() / ".env", Path.cwd() / ".env.demo"):
+        if not dotenv.is_file():
             continue
-        name, value = line.split("=", 1)
-        os.environ.setdefault(name.strip(), value.strip().strip('"').strip("'"))
+        for line in dotenv.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, value = line.split("=", 1)
+            os.environ.setdefault(name.strip(), value.strip().strip('"').strip("'"))
 
 
 def _environment_int(name: str, default: int) -> int:
