@@ -423,6 +423,11 @@ class ConversationRequest(BaseModel):
     task_prompt: str | None = Field(default=None, min_length=1, max_length=4_000)
     messages: tuple[TranscriptMessage, ...]
     tool_schemas: tuple[ToolSchema, ...] = Field(default=(), max_length=32)
+    memory_present: bool = Field(
+        default=False,
+        description="Whether the run has access to the project memory store, "
+        "advertised so the provider can stay in bounds without touching the store.",
+    )
 
     @model_validator(mode="after")
     def _tool_schemas_must_be_unique(self) -> ConversationRequest:

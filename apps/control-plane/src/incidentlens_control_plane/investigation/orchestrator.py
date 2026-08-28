@@ -874,6 +874,7 @@ class AgentOrchestrator:
             task_prompt=self._task_prompt(run),
             messages=context.messages,
             tool_schemas=tool_schemas,
+            memory_present=context.memory is not None,
         )
 
     # -- transcript plumbing ---------------------------------------------------

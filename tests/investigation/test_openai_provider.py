@@ -31,6 +31,7 @@ from incidentlens_control_plane.investigation.types import (
     ToolUseBlock,
     TranscriptMessage,
 )
+from incidentlens_control_plane.logs.types import LogScope
 
 NOW = datetime(2026, 8, 12, 12, 0, 0, tzinfo=UTC)
 
@@ -83,6 +84,7 @@ def _dummy_request() -> SimpleNamespace:
         task_prompt=None,
         checkpoint=SimpleNamespace(
             round_number=1,
+            scope=SimpleNamespace(scope=LogScope.HOST),
             model_dump=lambda mode="json": {"round_number": 1},
         ),
         investigation=SimpleNamespace(
@@ -90,6 +92,7 @@ def _dummy_request() -> SimpleNamespace:
         ),
         messages=(),
         tool_schemas=(),
+        memory_present=False,
     )
 
 
@@ -631,3 +634,31 @@ async def test_prompt_exposes_actual_tools_not_scripted_stage(provider_config) -
         "host_read",
         "file_edit",
     ]
+
+
+async def test_system_message_reflects_tools_and_memory_flag(provider_config) -> None:
+    transport = _FakeTransport(
+        response={"choices": [{"message": {"content": _EMPTY_TURN}}]}
+    )
+    provider = OpenAICompatibleProvider(provider_config, transport=transport)
+    request = _request_at(1)
+    request.tool_schemas = tuple(
+        SimpleNamespace(
+            tool_name=name,
+            description="registered test tool",
+            parameters_json_schema={"type": "object", "additionalProperties": False},
+        )
+        for name in ("host_read", "file_edit")
+    )
+
+    request.memory_present = True
+    await provider.generate_turn(request)
+    system_content = transport.calls[0]["messages"][0]["content"]
+    assert "host_read" in system_content
+    assert "file_edit" in system_content
+    assert "项目记忆可用：是" in system_content
+
+    request.memory_present = False
+    await provider.generate_turn(request)
+    system_content = transport.calls[1]["messages"][0]["content"]
+    assert "项目记忆可用：否" in system_content

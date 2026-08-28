@@ -804,6 +804,7 @@ class AgentContextManager:
             task_prompt=self._task_prompt(run),
             messages=active.messages,
             tool_schemas=tool_schemas,
+            memory_present=active.memory is not None,
         )
 
     def _tolerant_groups(
