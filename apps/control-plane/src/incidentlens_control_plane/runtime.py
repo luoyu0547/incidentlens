@@ -46,6 +46,10 @@ from incidentlens_control_plane.investigation.openai_provider import (
     OpenAICompatibleProvider,
 )
 from incidentlens_control_plane.investigation.orchestrator import AgentOrchestrator
+from incidentlens_control_plane.investigation.prompt import (
+    PromptContext,
+    SystemPromptBuilder,
+)
 from incidentlens_control_plane.investigation.recovery import RecoveryService
 from incidentlens_control_plane.investigation.registry_proposals import (
     RegistryProposalService,
@@ -286,7 +290,9 @@ def build_runtime(
             model=settings.llm_active_model,
         )
         transport = OpenAICompatibleTransport(provider_config)
-        provider = OpenAICompatibleProvider(provider_config, transport=transport)
+        provider = OpenAICompatibleProvider(
+            provider_config, transport=transport, skill_registry=skills
+        )
         compactor = OpenAICompatibleCompactor(provider_config, transport=transport)
 
     # Project Memory: durable store + deterministic admission service + the
@@ -310,6 +316,30 @@ def build_runtime(
         events=events,
         broker=broker,
     )
+    prompt_builder = SystemPromptBuilder()
+
+    def render_system_prompt(run, investigation, tool_schemas, memory) -> str:
+        """Render the prompt the orchestrator's provider will send this turn.
+
+        This mirrors ``openai_provider._system_prompt`` exactly for the
+        orchestrator path: ``is_child`` is True iff the run has a
+        ``parent_run_id`` (the delegated task is present iff the run is a
+        child), and ``memory_present`` is set from the active-context session
+        memory the provider will be told about.  The registry catalog is the
+        same shared ``SkillRegistry`` injected into the provider, so the budget
+        counts the real prompt string without double-counting the checkpoint /
+        snapshot attachment.
+        """
+        return prompt_builder.build(
+            PromptContext(
+                tool_names=tuple(schema.tool_name for schema in tool_schemas),
+                scope=run.scope.scope,
+                is_child=run.parent_run_id is not None,
+                memory_present=memory is not None,
+                skill_catalog=skills.catalog(),
+            )
+        )
+
     context_manager = AgentContextManager(
         investigation_store,
         policy=ContextBudgetPolicy(
@@ -324,6 +354,7 @@ def build_runtime(
         ),
         compactor=compactor,
         memory_renderer=project_memory.render_relevant,
+        system_prompt_renderer=render_system_prompt,
     )
     orchestrator = AgentOrchestrator(
         store=investigation_store,

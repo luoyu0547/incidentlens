@@ -525,6 +525,10 @@ class AgentContextManager:
         compactor: ContextCompactor | None = None,
         validator: CompactionValidator | None = None,
         memory_renderer: Callable[[str, str, Iterable[str]], str] | None = None,
+        system_prompt_renderer: (
+            Callable[[AgentRun, Investigation, tuple[ToolSchema, ...], SessionMemory | None], str]
+            | None
+        ) = None,
     ) -> None:
         self._store = store
         self._policy = policy or ContextBudgetPolicy()
@@ -534,6 +538,7 @@ class AgentContextManager:
         self._validator = validator or CompactionValidator()
         self._transcript = TranscriptService(store)
         self._memory_renderer = memory_renderer
+        self._system_prompt_renderer = system_prompt_renderer
 
     # -- public ---------------------------------------------------------------
 
@@ -977,7 +982,7 @@ class AgentContextManager:
             project_memory_text=self._project_memory_attachment(run, investigation),
             restored_file_text=self._restored_file_context(memory),
         ) + flatten(groups)
-        budget = self._estimate_budget(run, investigation, messages, ())
+        budget = self._estimate_budget(run, investigation, messages, (), memory)
         return ActiveContext(
             messages=messages, budget=budget, memory=memory, todos=todos
         )
@@ -1026,7 +1031,7 @@ class AgentContextManager:
             project_memory_text=self._project_memory_attachment(run, investigation),
             restored_file_text=self._restored_file_context(memory),
         ) + flatten(groups)
-        budget = self._estimate_budget(run, investigation, messages, tool_schemas)
+        budget = self._estimate_budget(run, investigation, messages, tool_schemas, memory)
         return ActiveContext(
             messages=messages, budget=budget, memory=memory, todos=todos
         )
@@ -1070,7 +1075,7 @@ class AgentContextManager:
             project_memory_text=project_memory_text,
             restored_file_text=self._restored_file_context(memory),
         ) + flatten(groups)
-        budget = self._estimate_budget(run, investigation, messages, tool_schemas)
+        budget = self._estimate_budget(run, investigation, messages, tool_schemas, memory)
         return ActiveContext(
             messages=messages, budget=budget, memory=memory, todos=todos
         )
@@ -1272,7 +1277,9 @@ class AgentContextManager:
         budget = self._policy.context_window - (
             self._policy.max_output_tokens + self._policy.reserve_tokens
         )
-        system_tokens = self._estimator.count_text(self._policy.system_prompt)
+        system_tokens = self._estimator.count_text(
+            self._system_prompt_text(run, investigation, tool_schemas, latest_memory)
+        )
         system_tokens += self._estimator.count_json(self._checkpoint_dump(run))
         system_tokens += self._estimator.count_json(self._snapshot_dump(investigation))
         tool_tokens = sum(
@@ -1462,14 +1469,39 @@ class AgentContextManager:
 
     # -- budget estimation ----------------------------------------------------
 
+    def _system_prompt_text(
+        self,
+        run: AgentRun,
+        investigation: Investigation,
+        tool_schemas: tuple[ToolSchema, ...],
+        memory: SessionMemory | None,
+    ) -> str:
+        """Return the prompt text the budget should count for this materialization.
+
+        When a ``system_prompt_renderer`` is wired in it is the authoritative
+        source (the exact string the provider will send); otherwise the policy
+        ``system_prompt`` fallback is used unchanged, preserving the existing
+        budget behavior.  The renderer returns only the prompt text -- never the
+        checkpoint/snapshot attachments -- so the budget counts
+        ``rendered_prompt + checkpoint + snapshot`` exactly once.
+        """
+        if self._system_prompt_renderer is not None:
+            return self._system_prompt_renderer(
+                run, investigation, tool_schemas, memory
+            )
+        return self._policy.system_prompt
+
     def _estimate_budget(
         self,
         run: AgentRun,
         investigation: Investigation,
         messages: tuple[TranscriptMessage, ...],
         tool_schemas: tuple[ToolSchema, ...],
+        memory: SessionMemory | None,
     ) -> ContextBudget:
-        system_tokens = self._estimator.count_text(self._policy.system_prompt)
+        system_tokens = self._estimator.count_text(
+            self._system_prompt_text(run, investigation, tool_schemas, memory)
+        )
         system_tokens += self._estimator.count_json(self._checkpoint_dump(run))
         system_tokens += self._estimator.count_json(self._snapshot_dump(investigation))
         tool_tokens = sum(

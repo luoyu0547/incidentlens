@@ -389,6 +389,39 @@ def test_budget_counts_system_tools_messages_and_output_reserve(store) -> None:
     assert active.budget.message_tokens > 0
 
 
+def test_rendered_system_prompt_contributes_to_budget(store) -> None:
+    """Task 4: a non-empty rendered prompt raises ``ContextBudget.system_tokens``.
+
+    The manager-backed budget must count the prompt the provider will actually
+    send, not the empty ``ContextBudgetPolicy.system_prompt`` fallback.  Two
+    managers are built over the same run/investigation: one with a renderer
+    returning a known non-empty string and one without (the default empty
+    policy).  The renderer manager's ``system_tokens`` is larger by exactly the
+    renderer's counted tokens, net of the estimator's 1-token floor for the
+    baseline empty string.
+    """
+    known_prompt = "你是 IncidentLens 的受限事故调查规划器。请只返回一个 JSON 对象。" * 5
+    run_obj = run()
+    investigation_obj = investigation()
+    schema_set = schemas()
+
+    baseline = manager(store, system_prompt="").build(
+        run_obj, investigation_obj, schema_set
+    )
+
+    rendered = AgentContextManager(
+        store,
+        policy=ContextBudgetPolicy(),
+        now=lambda: NOW,
+        system_prompt_renderer=(
+            lambda run, investigation, tool_schemas, memory: known_prompt
+        ),
+    ).build(run_obj, investigation_obj, schema_set)
+
+    extra = rendered.budget.system_tokens - baseline.budget.system_tokens
+    assert extra == ConservativeTokenEstimator().count_text(known_prompt) - 1
+
+
 def test_materialization_preserves_all_tool_results_without_context_pressure(
     store,
 ) -> None:
