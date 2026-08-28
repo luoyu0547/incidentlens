@@ -14,6 +14,9 @@ import { EnvironmentTokenStore } from './auth/environment-token-store.js';
 import { ControlPlaneApi } from './api/control-plane-api.js';
 import { WsEventStream } from './stream/ws-event-stream.js';
 import { App } from './app/App.js';
+import { loadLocalEnv } from './config/load-local-env.js';
+
+loadLocalEnv();
 
 // Check Node version
 const nodeVersion = process.version;
@@ -60,4 +63,3 @@ render(
     },
   }),
 );
-

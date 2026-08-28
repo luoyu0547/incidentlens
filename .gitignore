@@ -11,6 +11,7 @@ artifacts/
 node_modules/
 dist/
 *.tsbuildinfo
+.DS_Store
 apps/web/dist/
 apps/control-plane/src/incidentlens_control_plane/static/web/
 apps/web/test-results/
