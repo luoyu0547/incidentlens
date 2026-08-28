@@ -8,11 +8,14 @@ IncidentLens 把项目注册、脱敏日志、证据、受限 Agent 调查、人
 
 在真实 Tencent CVM 微服务目标上，Agent 从受限证据开始调查：展示工具调用和完整命令，在风险操作前暂停等待操作员审批，再继续执行与远程验证。CLI、Web 和控制面共享同一条持久化调查链路。
 
-[![CLI Agent 调查过程](docs/assets/demo-run-20260828-final/cli-approval.png)](docs/assets/demo-run-20260828-final/incidentlens-cli-agent-demo-30s.mov)
+<video controls muted loop playsinline width="100%" poster="https://github.com/luoyu0547/incidentlens/raw/refs/heads/main/docs/assets/demo-run-20260828-final/cli-approval.png">
+  <source src="https://github.com/luoyu0547/incidentlens/raw/refs/heads/main/docs/assets/demo-run-20260828-final/incidentlens-cli-agent-demo-30s.mov" type="video/quicktime" />
+  <a href="docs/assets/demo-run-20260828-final/incidentlens-cli-agent-demo-30s.mov">观看 CLI Agent 演示视频</a>
+</video>
 
-| CLI：调查计划、工具调用与精确审批                                              | Web：实时工作区总览                                                     |
-| ------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
-| ![CLI Agent 调查过程](docs/assets/demo-run-20260828-final/cli-agent-final.png) | ![Web 工作区总览](docs/assets/demo-run-20260828-final/web-overview.png) |
+| Web：实时工作区总览                                                     |
+| ----------------------------------------------------------------------- |
+| ![Web 工作区总览](docs/assets/demo-run-20260828-final/web-overview.png) |
 
 [观看 30 秒 CLI Agent 演示视频](docs/assets/demo-run-20260828-final/incidentlens-cli-agent-demo-30s.mov) · 仅录制 CLI Terminal 窗口。
 
